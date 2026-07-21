@@ -295,13 +295,33 @@ wait_operation() {
   fail "asynchronous node operation timed out"
 }
 
+operation_id_from_file() {
+  local file=$1
+  local opid
+  local pattern='^opid-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  if opid="$(jq -er \
+    'if type == "object" then .opid else . end | select(type == "string")' \
+    "$file" 2>/dev/null)" && [[ "$opid" =~ $pattern ]]; then
+    printf '%s\n' "$opid"
+    return 0
+  fi
+  opid="$(tr -d '\r\n' <"$file")"
+  if [[ "$opid" =~ $pattern ]]; then
+    printf '%s\n' "$opid"
+    return 0
+  fi
+  return 1
+}
+
 shield_coinbase_from() {
   local source_address=$1
   local destination_address=$2
   local prefix=$3
   node_cli z_shieldcoinbase "$source_address" "$destination_address" >"$run_dir/${prefix}-shield-request.json"
   local opid
-  opid="$(jq -er '.opid' "$run_dir/${prefix}-shield-request.json")"
+  if ! opid="$(operation_id_from_file "$run_dir/${prefix}-shield-request.json")"; then
+    fail "z_shieldcoinbase returned an invalid operation id"
+  fi
   wait_operation "$opid" "$run_dir/${prefix}-shield-operation.json"
 }
 
@@ -319,7 +339,9 @@ send_from() {
     "$(jq -c . "$run_dir/${prefix}-recipients.json")" \
     1 >"$run_dir/${prefix}-send-request.json"
   local opid
-  opid="$(jq -er '.opid' "$run_dir/${prefix}-send-request.json")"
+  if ! opid="$(operation_id_from_file "$run_dir/${prefix}-send-request.json")"; then
+    fail "z_sendmany returned an invalid operation id"
+  fi
   wait_operation "$opid" "$run_dir/${prefix}-send-operation.json"
 }
 
