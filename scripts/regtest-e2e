@@ -535,8 +535,8 @@ assert_jq "$run_dir/balance-zero.json" \
   '.data.balance.available_zat == 0 and .data.balance.pending_incoming_zat == 0 and .data.balance.total_unspent_zat == 0 and .data.balance.min_confirmations == 100' \
   "known empty address did not return explicit zero balances"
 
-account="$(node_cli z_getnewaccount | jq -er '.')"
-destination_address="$(node_cli z_getaddressforaccount "$account" | jq -er '.address')"
+account="$(node_cli z_getnewaccount | jq -er '.account | select(type == "number" and . >= 0 and floor == .)')"
+destination_address="$(node_cli z_getaddressforaccount "$account" | jq -er '.address | select(type == "string" and length > 0)')"
 code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$destination_address/balance" "$run_dir/balance-unowned.json")"
 [[ "$code" == "404" ]] || fail "unallocated address balance must return 404, got HTTP $code"
 
