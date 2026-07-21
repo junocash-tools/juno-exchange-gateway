@@ -295,13 +295,32 @@ wait_operation() {
   fail "asynchronous node operation timed out"
 }
 
-shield_to() {
-  local address=$1
-  local prefix=$2
-  node_cli z_shieldcoinbase '*' "$address" >"$run_dir/${prefix}-shield-request.json"
+shield_coinbase_from() {
+  local source_address=$1
+  local destination_address=$2
+  local prefix=$3
+  node_cli z_shieldcoinbase "$source_address" "$destination_address" >"$run_dir/${prefix}-shield-request.json"
   local opid
   opid="$(jq -er '.opid' "$run_dir/${prefix}-shield-request.json")"
   wait_operation "$opid" "$run_dir/${prefix}-shield-operation.json"
+}
+
+send_from() {
+  local source_address=$1
+  local destination_address=$2
+  local amount=$3
+  local prefix=$4
+  jq -cn \
+    --arg address "$destination_address" \
+    --argjson amount "$amount" \
+    '[{address:$address,amount:$amount}]' >"$run_dir/${prefix}-recipients.json"
+  node_cli z_sendmany \
+    "$source_address" \
+    "$(jq -c . "$run_dir/${prefix}-recipients.json")" \
+    1 >"$run_dir/${prefix}-send-request.json"
+  local opid
+  opid="$(jq -er '.opid' "$run_dir/${prefix}-send-request.json")"
+  wait_operation "$opid" "$run_dir/${prefix}-send-operation.json"
 }
 
 log "Build clean-source tools and appliance images"
@@ -543,13 +562,20 @@ code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$destination_address/ba
 log "Manual deposit: detect at one confirmation and finalize at 100"
 node_cli generate 101 >"$run_dir/mature-blocks.json"
 wait_ready "$run_dir/ready-after-maturity.json"
-deposit_txid="$(shield_to "$deposit_address" deposit-1)"
+node_cli listunspent 1 9999999 >"$run_dir/funding-unspent.json"
+funding_source_address="$(jq -er \
+  '[.[] | select(.confirmations > 100)] | first | .address | select(type == "string" and length > 0)' \
+  "$run_dir/funding-unspent.json")"
+funding_txid="$(shield_coinbase_from "$funding_source_address" "$destination_address" funding)"
+node_cli generate 2 >"$run_dir/funding-confirmation-blocks.json"
+wait_ready "$run_dir/ready-after-funding.json"
+deposit_txid="$(send_from "$destination_address" "$deposit_address" 0.05 deposit-1)"
 node_cli generate 1 >"$run_dir/deposit-1-block.json"
 wait_ready "$run_dir/ready-deposit-detected.json"
 wait_deposit_status "$deposit_txid" detected "$run_dir/deposit-detected.json"
 
 log "Second wallet: observe a real deposit and wallet-scoped transaction effect"
-cold_deposit_txid="$(shield_to "$cold_deposit_address" cold-wallet-deposit)"
+cold_deposit_txid="$(send_from "$destination_address" "$cold_deposit_address" 0.01 cold-wallet-deposit)"
 node_cli generate 1 >"$run_dir/cold-wallet-deposit-block.json"
 wait_ready "$run_dir/ready-cold-wallet-deposit.json"
 wait_wallet_deposit_status "$cold_wallet_id" "$cold_wallet_token" "$cold_deposit_txid" detected \
@@ -618,7 +644,7 @@ log "Integration: exclude a real deposit sent to an unallocated UFVK address"
   --index 100 \
   --json >"$run_dir/unallocated-address.json"
 unallocated_address="$(jq -er '.address' "$run_dir/unallocated-address.json")"
-unallocated_txid="$(shield_to "$unallocated_address" deposit-unallocated)"
+unallocated_txid="$(send_from "$destination_address" "$unallocated_address" 0.01 deposit-unallocated)"
 node_cli generate 1 >"$run_dir/unallocated-deposit-block.json"
 wait_ready "$run_dir/ready-unallocated-detected.json"
 assert_no_deposit "$unallocated_txid" "$run_dir/unallocated-deposit-detected.json"
@@ -855,7 +881,7 @@ jq -S '.data.balance' "$run_dir/balance-after-recovery.json" >"$run_dir/balance-
 cmp -s "$run_dir/balance-before.normalized.json" "$run_dir/balance-after.normalized.json" || \
   fail "scanner rebuild changed the recovered address balance"
 
-post_recovery_txid="$(shield_to "$deposit_address" deposit-after-recovery)"
+post_recovery_txid="$(send_from "$destination_address" "$deposit_address" 0.01 deposit-after-recovery)"
 node_cli generate 1 >"$run_dir/post-recovery-deposit-block.json"
 post_recovery_block_hash="$(jq -er '.[0]' "$run_dir/post-recovery-deposit-block.json")"
 wait_ready "$run_dir/ready-post-recovery-deposit.json"
@@ -942,6 +968,7 @@ fi
 
 jq -n \
   --arg project "$project" \
+  --arg funding_txid "$funding_txid" \
   --arg deposit_txid "$deposit_txid" \
   --arg cold_deposit_txid "$cold_deposit_txid" \
   --arg withdrawal_txid "$withdrawal_txid" \
@@ -953,7 +980,7 @@ jq -n \
   --arg scanner_ref "$JUNO_SCAN_REF" \
   --arg txbuild_ref "$JUNO_TXBUILD_REF" \
   --arg txsign_ref "$JUNO_TXSIGN_REF" \
-  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref},checks:["clean source provenance","one-time installation init","single loopback public port","Docker outbound masquerading disabled","chain tip","least-privilege authentication","wallet isolation","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","online build","network-disabled offline sign","prevalidated raw broadcast","idempotent replay","same-key payload conflict","outgoing wallet effects","withdrawal expiry and drop","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
+  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,funding_txid:$funding_txid,deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref},checks:["clean source provenance","one-time installation init","single loopback public port","Docker outbound masquerading disabled","chain tip","least-privilege authentication","wallet isolation","node-owned deposit funding","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","online build","network-disabled offline sign","prevalidated raw broadcast","idempotent replay","same-key payload conflict","outgoing wallet effects","withdrawal expiry and drop","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
   >"$run_dir/summary.json"
 
 log "PASS"
