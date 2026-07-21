@@ -240,6 +240,24 @@ wait_node() {
   fail "junocashd readiness timeout"
 }
 
+wait_node_wallet_notified() {
+  local expected_height=$1
+  local expected_hash=$2
+  local output=$3
+  local deadline=$((SECONDS + 180))
+  while (( SECONDS < deadline )); do
+    if node_cli getblockchaininfo >"$output" 2>/dev/null && jq -e \
+      --arg hash "$expected_hash" \
+      --argjson height "$expected_height" \
+      '.blocks == $height and .bestblockhash == $hash and .fullyNotified == true' \
+      "$output" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "junocashd wallet was not fully notified at height $expected_height"
+}
+
 wait_scanner_event_kind() {
   local target_wallet=$1
   local txid=$2
@@ -779,6 +797,8 @@ assert_jq "$run_dir/withdrawal-mempool.json" \
   "mempool/raw transaction lookup is invalid"
 
 node_cli generate 1 >"$run_dir/withdrawal-block.json"
+withdrawal_block_hash="$(jq -er '.[0]' "$run_dir/withdrawal-block.json")"
+withdrawal_block_height="$(node_cli getblockcount | jq -er '.')"
 wait_ready "$run_dir/ready-withdrawal-mined.json"
 code="$(api_status GET "/v1/transactions/$withdrawal_txid?wallet_id=$wallet_id" "$run_dir/withdrawal-confirmed.json")"
 [[ "$code" == "200" ]] || fail "confirmed lookup returned HTTP $code"
@@ -793,9 +813,26 @@ assert_jq "$run_dir/withdrawal-wallet-effects.json" --arg txid "$withdrawal_txid
     and (.data.wallet_effects | any(.kind == "OutgoingOutputEvent" and .payload.txid == $txid))' \
   "transaction lookup did not expose both outgoing wallet effects"
 
-node_cli z_listunspent 1 9999999 true >"$run_dir/destination-unspent.json"
-assert_jq "$run_dir/destination-unspent.json" --arg txid "$withdrawal_txid" \
-  'any(.txid == $txid and .pool == "orchard" and .spendable == true)' \
+wait_node_wallet_notified \
+  "$withdrawal_block_height" \
+  "$withdrawal_block_hash" \
+  "$run_dir/withdrawal-node-wallet-notified.json"
+destination_filter="$(jq -cn --arg address "$destination_address" '[$address]')"
+node_cli z_listunspent 1 9999999 true "$destination_filter" >"$run_dir/destination-unspent.json"
+destination_action_index="$(jq -er '.data.orchard_output_action_indices[0]' "$run_dir/withdrawal-signed.json")"
+destination_amount_zat="$(jq -er '.outputs[0].amount_zat' "$run_dir/withdrawal.txplan.json")"
+assert_jq "$run_dir/destination-unspent.json" \
+  --arg txid "$withdrawal_txid" \
+  --arg address "$destination_address" \
+  --argjson action_index "$destination_action_index" \
+  --arg amount_zat "$destination_amount_zat" \
+  'any(.txid == $txid
+    and .pool == "orchard"
+    and .outindex == $action_index
+    and .address == $address
+    and .confirmations >= 1
+    and .spendable == true
+    and ((.amount * 100000000 | round) == ($amount_zat | tonumber)))' \
   "node destination did not receive the withdrawal"
 
 assert_no_deposit "$withdrawal_txid" "$run_dir/withdrawal-change-not-deposit.json"
