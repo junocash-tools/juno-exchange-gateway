@@ -976,6 +976,7 @@ assert_jq "$run_dir/deposits-old-cursor.json" \
 code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1000" "$run_dir/deposits-after-recovery.json")"
 [[ "$code" == "200" ]] || fail "post-recovery replay returned HTTP $code"
 reset_cursor="$(jq -er '.data.next_cursor' "$run_dir/deposits-after-recovery.json")"
+reset_epoch="$(jq -er '.data.event_epoch' "$run_dir/deposits-after-recovery.json")"
 assert_jq "$run_dir/deposits-after-recovery.json" --arg txid "$deposit_txid" \
   '.data.deposits | any(.txid == $txid and .status == "confirmed")' \
   "confirmed external deposit was not replayed after scanner rebuild"
@@ -991,10 +992,43 @@ cmp -s "$run_dir/balance-before.normalized.json" "$run_dir/balance-after.normali
   fail "scanner rebuild changed the recovered address balance"
 
 post_recovery_txid="$(send_mature_coinbase_deposit "$deposit_address" deposit-after-recovery)"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1000&cursor=$reset_cursor" "$run_dir/deposits-after-post-recovery-node-sync.json")"
+case "$code" in
+  200)
+    assert_jq "$run_dir/deposits-after-post-recovery-node-sync.json" --arg epoch "$reset_epoch" \
+      '.data.event_epoch == $epoch' \
+      "node wallet synchronization retained the cursor under a different scanner epoch"
+    ;;
+  409)
+    assert_jq "$run_dir/deposits-after-post-recovery-node-sync.json" --arg epoch "$reset_epoch" \
+      '.error.code == "cursor_reset_required"
+        and .error.details.action == "restart_without_cursor"
+        and .error.details.event_epoch != $epoch' \
+      "node wallet synchronization returned invalid cursor-reset instructions"
+    ;;
+  *)
+    fail "deposit cursor continuity after node wallet synchronization returned HTTP $code"
+    ;;
+esac
+
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1000" "$run_dir/deposits-before-post-recovery-block.json")"
+[[ "$code" == "200" ]] || fail "cursorless replay after node wallet synchronization returned HTTP $code"
+post_recovery_cursor="$(jq -er '.data.next_cursor' "$run_dir/deposits-before-post-recovery-block.json")"
+post_recovery_epoch="$(jq -er '.data.event_epoch' "$run_dir/deposits-before-post-recovery-block.json")"
+assert_jq "$run_dir/deposits-before-post-recovery-block.json" \
+  --arg prior_txid "$deposit_txid" \
+  --arg new_txid "$post_recovery_txid" \
+  '.data.deposits | any(.txid == $prior_txid and .status == "confirmed")
+    and all(.txid != $new_txid)' \
+  "cursorless replay after node wallet synchronization lost history or exposed an unmined deposit"
+assert_jq "$run_dir/deposit-after-recovery-ready-after-node-sync.json" --arg epoch "$post_recovery_epoch" \
+  '.data.scanner.event_epoch == $epoch' \
+  "deposit cursor epoch differed from the synchronized scanner readiness epoch"
+
 node_cli generate 1 >"$run_dir/post-recovery-deposit-block.json"
 post_recovery_block_hash="$(jq -er '.[0]' "$run_dir/post-recovery-deposit-block.json")"
 wait_ready "$run_dir/ready-post-recovery-deposit.json"
-code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=100&cursor=$reset_cursor" "$run_dir/post-recovery-new-deposit.json")"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=100&cursor=$post_recovery_cursor" "$run_dir/post-recovery-new-deposit.json")"
 [[ "$code" == "200" ]] || fail "new post-recovery deposit poll returned HTTP $code"
 assert_jq "$run_dir/post-recovery-new-deposit.json" --arg txid "$post_recovery_txid" \
   '.data.deposits | any(.txid == $txid and .status == "detected")' \
