@@ -106,8 +106,12 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return &domain.UpstreamError{Kind: "unavailable", Err: fmt.Errorf("node RPC HTTP %d", resp.StatusCode)}
 	}
-	if out != nil && len(decoded.Result) > 0 && !bytes.Equal(decoded.Result, []byte("null")) {
-		if err := json.Unmarshal(decoded.Result, out); err != nil {
+	if out != nil {
+		result := bytes.TrimSpace(decoded.Result)
+		if len(result) == 0 || bytes.Equal(result, []byte("null")) {
+			return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node RPC response is missing a result")}
+		}
+		if err := json.Unmarshal(result, out); err != nil {
 			return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("invalid node RPC result")}
 		}
 	}
@@ -188,9 +192,6 @@ func (c *Client) Transaction(ctx context.Context, txid string, includeRaw bool) 
 		return domain.Transaction{}, false, invalidNodeResponse("node returned negative transaction metadata")
 	}
 	out := domain.Transaction{TxID: strings.ToLower(strings.TrimSpace(raw.TxID)), Confirmations: raw.Confirmations}
-	if out.TxID == "" {
-		out.TxID = txid
-	}
 	normalizedTxID, err := normalizeHexIdentifier(out.TxID, "transaction ID")
 	if err != nil {
 		return domain.Transaction{}, false, err

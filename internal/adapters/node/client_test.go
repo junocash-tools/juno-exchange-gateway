@@ -180,6 +180,7 @@ func TestTransactionRejectsInvalidNodeMetadata(t *testing.T) {
 		{name: "negative block height", raw: map[string]any{"txid": txid, "blockhash": blockHash, "confirmations": 1}, header: map[string]any{"height": -1, "time": 1}},
 		{name: "negative block time", raw: map[string]any{"txid": txid, "blockhash": blockHash, "confirmations": 1}, header: map[string]any{"height": 1, "time": -1}},
 		{name: "invalid raw hex", raw: map[string]any{"txid": txid, "hex": "xyz"}, includeRaw: true},
+		{name: "missing transaction ID", raw: map[string]any{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -204,6 +205,21 @@ func TestTransactionRejectsInvalidNodeMetadata(t *testing.T) {
 				t.Fatalf("err=%v", err)
 			}
 		})
+	}
+}
+
+func TestRPCResponseRequiresResult(t *testing.T) {
+	for _, response := range []string{
+		`{"result":null,"error":null,"id":1}`,
+		`{"error":null,"id":1}`,
+	} {
+		client := New("http://node.invalid", "", "", time.Second)
+		client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+		})
+		if _, err := client.DecodeRawTransaction(context.Background(), "00"); !domain.IsUpstreamKind(err, "invalid_response") {
+			t.Fatalf("response=%s err=%v", response, err)
+		}
 	}
 }
 
