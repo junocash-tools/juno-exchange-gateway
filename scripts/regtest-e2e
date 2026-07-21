@@ -420,6 +420,21 @@ ufvk="$(jq -er '.data.ufvk' "$run_dir/ufvk.json")"
   --network regtest >"$run_dir/cold-ufvk.json"
 cold_ufvk="$(jq -er '.data.ufvk' "$run_dir/cold-ufvk.json")"
 
+# Use an address that is neither registered with the appliance nor imported
+# into the node wallet when proving dropped-transaction expiry. A node-owned
+# recipient is persisted in wallet.dat and reaccepted independently of
+# -persistmempool=0 after restart.
+"$workspace_root/juno-keys/bin/juno-keys" seed new --out "$run_dir/expiry-external.seed" >/dev/null
+"$workspace_root/juno-keys/bin/juno-keys" --json ufvk from-seed \
+  --seed-file "$run_dir/expiry-external.seed" \
+  --network regtest >"$run_dir/expiry-external-ufvk.json"
+expiry_external_ufvk="$(jq -er '.data.ufvk' "$run_dir/expiry-external-ufvk.json")"
+"$workspace_root/juno-addrgen/bin/juno-addrgen" derive \
+  --ufvk "$expiry_external_ufvk" \
+  --index 0 \
+  --json >"$run_dir/expiry-external-address.json"
+expiry_destination_address="$(jq -er '.address' "$run_dir/expiry-external-address.json")"
+
 jq -n \
   --arg wallet "$wallet_id" \
   --arg ufvk "$ufvk" \
@@ -851,7 +866,7 @@ log "Withdrawal expiry: payload conflict, dropped mempool transaction, and scann
   --wallet-id "$wallet_id" \
   --coin-type 8135 \
   --account 0 \
-  --to "$destination_address" \
+  --to "$expiry_destination_address" \
   --amount-zat 500000 \
   --change-address "$deposit_address" \
   --fee-multiplier 20 \
@@ -898,6 +913,9 @@ code="$(api_status POST /v1/transactions/broadcast "$run_dir/expiry-broadcast-ac
 [[ "$code" == "202" ]] || fail "expiry transaction broadcast returned HTTP $code"
 wait_wallet_effect_kind "$wallet_id" "$read_token" "$expiry_txid" OutgoingOutputEvent \
   "$run_dir/expiry-mempool-wallet-effects.json"
+node_cli getrawmempool >"$run_dir/expiry-mempool-before-node-restart.json"
+assert_jq "$run_dir/expiry-mempool-before-node-restart.json" --arg txid "$expiry_txid" \
+  'index($txid) != null' "accepted expiry transaction did not enter the node mempool"
 
 "${compose[@]}" restart junocashd >/dev/null
 wait_node
