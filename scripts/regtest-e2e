@@ -365,7 +365,7 @@ send_from() {
   node_cli z_sendmany \
     "$source_address" \
     "$(jq -c . "$run_dir/${prefix}-recipients.json")" \
-    1 >"$run_dir/${prefix}-send-request.json"
+    "$min_confirmations" >"$run_dir/${prefix}-send-request.json"
   local opid
   if ! opid="$(operation_id_from_file "$run_dir/${prefix}-send-request.json")"; then
     fail "z_sendmany returned an invalid operation id"
@@ -625,9 +625,11 @@ deposit_txid="$(send_from "$destination_address" "$funding_viewing_key" "$deposi
 node_cli generate 1 >"$run_dir/deposit-1-block.json"
 wait_ready "$run_dir/ready-deposit-detected.json"
 wait_deposit_status "$deposit_txid" detected "$run_dir/deposit-detected.json"
+node_cli generate 1 >"$run_dir/deposit-change-maturity-block.json"
+wait_ready "$run_dir/ready-deposit-change-mature.json"
 
 log "Second wallet: observe a real deposit and wallet-scoped transaction effect"
-cold_deposit_txid="$(send_from "$destination_address" "$funding_viewing_key" "$cold_deposit_address" 0.01 1200000 1 cold-wallet-deposit)"
+cold_deposit_txid="$(send_from "$destination_address" "$funding_viewing_key" "$cold_deposit_address" 0.01 1200000 2 cold-wallet-deposit)"
 node_cli generate 1 >"$run_dir/cold-wallet-deposit-block.json"
 wait_ready "$run_dir/ready-cold-wallet-deposit.json"
 wait_wallet_deposit_status "$cold_wallet_id" "$cold_wallet_token" "$cold_deposit_txid" detected \
@@ -639,7 +641,7 @@ code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$deposit_address/balanc
 [[ "$code" == "200" ]] || fail "pending balance returned HTTP $code"
 assert_jq "$run_dir/balance-pending.json" \
   '.data.balance.available_zat == 0 and .data.balance.pending_incoming_zat > 0 and .data.balance.total_unspent_zat > 0' \
-  "one-confirmation deposit was not held pending"
+  "sub-100-confirmation deposit was not held pending"
 
 node_cli generate 99 >"$run_dir/deposit-confirmation-blocks.json"
 wait_ready "$run_dir/ready-deposit-confirmed.json"
@@ -696,7 +698,7 @@ log "Integration: exclude a real deposit sent to an unallocated UFVK address"
   --index 100 \
   --json >"$run_dir/unallocated-address.json"
 unallocated_address="$(jq -er '.address' "$run_dir/unallocated-address.json")"
-unallocated_txid="$(send_from "$destination_address" "$funding_viewing_key" "$unallocated_address" 0.01 1200000 1 deposit-unallocated)"
+unallocated_txid="$(send_from "$destination_address" "$funding_viewing_key" "$unallocated_address" 0.01 1200000 2 deposit-unallocated)"
 node_cli generate 1 >"$run_dir/unallocated-deposit-block.json"
 wait_ready "$run_dir/ready-unallocated-detected.json"
 assert_no_deposit "$unallocated_txid" "$run_dir/unallocated-deposit-detected.json"
@@ -933,7 +935,7 @@ jq -S '.data.balance' "$run_dir/balance-after-recovery.json" >"$run_dir/balance-
 cmp -s "$run_dir/balance-before.normalized.json" "$run_dir/balance-after.normalized.json" || \
   fail "scanner rebuild changed the recovered address balance"
 
-post_recovery_txid="$(send_from "$destination_address" "$funding_viewing_key" "$deposit_address" 0.01 1200000 1 deposit-after-recovery)"
+post_recovery_txid="$(send_from "$destination_address" "$funding_viewing_key" "$deposit_address" 0.01 1200000 2 deposit-after-recovery)"
 node_cli generate 1 >"$run_dir/post-recovery-deposit-block.json"
 post_recovery_block_hash="$(jq -er '.[0]' "$run_dir/post-recovery-deposit-block.json")"
 wait_ready "$run_dir/ready-post-recovery-deposit.json"
