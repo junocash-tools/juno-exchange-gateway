@@ -127,7 +127,7 @@ docker run --rm --network none --read-only --cap-drop ALL \
   "$JUNO_TXSIGN_IMAGE" sign --txplan /work/plan.json --seed-file /work/seed --json
 ```
 
-The gateway has only the internal backend network. The scanner joins backend and the separate internal storage network; Postgres joins storage only. Host access still enters through the gateway's single published port.
+The gateway joins the internal backend and a dedicated ingress bridge. The ingress bridge exists only for the single published port; it disables Docker's default outbound masquerading and inter-container communication. This is hardening, not an egress firewall. Enforce outbound policy at the host or infrastructure layer. Scanner joins backend and the separate internal storage network; Postgres joins storage only. Node, scanner, and databases have no host ports.
 
 ## Regtest validation
 
@@ -138,3 +138,5 @@ Set `KEEP_STACK=1` only when diagnosing a failed local run. `SKIP_GATEWAY_LOSS_T
 ## Exposure
 
 The default bind is `127.0.0.1:8080`. To serve remote traffic, place a TLS or mTLS reverse proxy in front and then set `JUNO_GATEWAY_BIND=0.0.0.0`. Never publish node RPC, ZMQ, scanner, or Postgres ports.
+
+Use Docker Engine 28 or newer for the localhost publishing boundary. On older engines, a localhost-published port may be reachable from the same layer-2 segment; upgrade or enforce a host firewall before deployment.

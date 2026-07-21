@@ -21,6 +21,7 @@ done
 "$repo_root/scripts/check-clean-sources"
 
 export JUNO_NETWORK=regtest
+export JUNO_GATEWAY_BIND=127.0.0.1
 export JUNO_GATEWAY_WALLETS_FILE="$run_dir/config/wallets.json"
 export JUNO_GATEWAY_AUTH_FILE="$run_dir/config/auth.json"
 export JUNO_INSTALLATION_STATE_DIR="$run_dir/installation-state"
@@ -419,19 +420,31 @@ for service in junocashd juno-scan; do
 done
 gateway_id="$("${compose[@]}" ps -q gateway)"
 bindings="$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$gateway_id")"
-[[ "$(jq -nr --argjson value "$bindings" '($value // {}) | length')" == "1" ]] || \
-  fail "gateway must publish exactly one host port"
+jq -enr --argjson value "$bindings" '
+  ($value | keys) == ["8080/tcp"]
+  and ($value["8080/tcp"] | length) == 1
+  and $value["8080/tcp"][0].HostIp == "127.0.0.1"
+  and ($value["8080/tcp"][0].HostPort | test("^[0-9]+$"))
+' >/dev/null || fail "gateway must publish exactly one loopback host port"
 gateway_networks="$(docker inspect -f '{{json .NetworkSettings.Networks}}' "$gateway_id")"
-[[ "$(jq -nr --argjson value "$gateway_networks" '$value | keys | length')" == "1" ]] || \
-  fail "gateway must join exactly one network"
-jq -nr --argjson value "$gateway_networks" --arg network "${project}_backend" \
-  '$value | has($network)' >/dev/null || fail "gateway is not isolated to the internal backend network"
+jq -enr --argjson value "$gateway_networks" \
+  --arg backend "${project}_backend" --arg ingress "${project}_ingress" \
+  '$value | keys | sort == ([$backend,$ingress] | sort)' >/dev/null || \
+  fail "gateway must join only backend and ingress networks"
 backend_id="$(docker network inspect -f '{{.Id}}' "${project}_backend")"
 [[ "$(docker network inspect -f '{{.Internal}}' "$backend_id")" == "true" ]] || \
   fail "gateway backend network must be internal"
+ingress_id="$(docker network inspect -f '{{.Id}}' "${project}_ingress")"
+[[ "$(docker network inspect -f '{{.Internal}}' "$ingress_id")" == "false" ]] || \
+  fail "gateway ingress network must support the published host port"
+ingress_options="$(docker network inspect -f '{{json .Options}}' "$ingress_id")"
+jq -enr --argjson value "$ingress_options" '
+  $value["com.docker.network.bridge.enable_ip_masquerade"] == "false"
+  and $value["com.docker.network.bridge.enable_icc"] == "false"
+' >/dev/null || fail "gateway ingress network must disable masquerading and inter-container communication"
 scanner_id="$("${compose[@]}" ps -q juno-scan)"
 scanner_networks="$(docker inspect -f '{{json .NetworkSettings.Networks}}' "$scanner_id")"
-jq -nr --argjson value "$scanner_networks" \
+jq -enr --argjson value "$scanner_networks" \
   --arg backend "${project}_backend" --arg storage "${project}_storage" \
   '$value | keys | sort == ([$backend,$storage] | sort)' >/dev/null || \
   fail "scanner must join only backend and storage networks"
@@ -940,7 +953,7 @@ jq -n \
   --arg scanner_ref "$JUNO_SCAN_REF" \
   --arg txbuild_ref "$JUNO_TXBUILD_REF" \
   --arg txsign_ref "$JUNO_TXSIGN_REF" \
-  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref},checks:["clean source provenance","one-time installation init","single public port","egress-isolated gateway","chain tip","least-privilege authentication","wallet isolation","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","online build","network-disabled offline sign","prevalidated raw broadcast","idempotent replay","same-key payload conflict","outgoing wallet effects","withdrawal expiry and drop","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
+  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref},checks:["clean source provenance","one-time installation init","single loopback public port","Docker outbound masquerading disabled","chain tip","least-privilege authentication","wallet isolation","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","online build","network-disabled offline sign","prevalidated raw broadcast","idempotent replay","same-key payload conflict","outgoing wallet effects","withdrawal expiry and drop","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
   >"$run_dir/summary.json"
 
 log "PASS"

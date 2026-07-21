@@ -168,6 +168,7 @@ services:
         bind:
           create_host_path: false
     networks:
+      - ingress
       - backend
     read_only: true
     tmpfs:
@@ -212,6 +213,11 @@ services:
       - no-new-privileges:true
 
 networks:
+  ingress:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+      com.docker.network.bridge.enable_icc: "false"
   backend:
     internal: true
   storage:

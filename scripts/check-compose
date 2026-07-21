@@ -12,12 +12,32 @@ export JUNO_RPC_USER=compose-validation-user
 export JUNO_RPC_PASSWORD=compose-validation-password
 export JUNO_SCAN_API_BEARER_TOKEN=compose-validation-scanner-token
 export JUNO_POSTGRES_PASSWORD=compose-validation-postgres-password
+export JUNO_GATEWAY_BIND=127.0.0.1
 
 for network in regtest testnet mainnet; do
   JUNO_NETWORK="$network" docker compose \
     -f compose.yaml \
     -f compose.dev.yaml \
     config >"tmp/compose-${network}.yaml"
+  JUNO_NETWORK="$network" docker compose \
+    -f compose.yaml \
+    -f compose.dev.yaml \
+    config --format json >"tmp/compose-${network}.json"
+  jq -e '
+    (.services.gateway.networks | keys | sort) == ["backend", "ingress"]
+    and (.services["juno-scan"].networks | keys | sort) == ["backend", "storage"]
+    and (.services.junocashd.networks | keys | sort) == ["backend", "chain"]
+    and (.services.gateway.ports | length) == 1
+    and .services.gateway.ports[0].target == 8080
+    and .services.gateway.ports[0].host_ip == "127.0.0.1"
+    and ((.services["juno-scan"].ports // []) | length) == 0
+    and ((.services.junocashd.ports // []) | length) == 0
+    and .networks.backend.internal == true
+    and .networks.storage.internal == true
+    and (.networks.ingress.internal // false) == false
+    and .networks.ingress.driver_opts["com.docker.network.bridge.enable_ip_masquerade"] == "false"
+    and .networks.ingress.driver_opts["com.docker.network.bridge.enable_icc"] == "false"
+  ' "tmp/compose-${network}.json" >/dev/null
 done
 
 JUNO_NETWORK=mainnet docker compose \
@@ -30,5 +50,12 @@ JUNO_NETWORK=regtest docker compose \
   -f compose.yaml \
   -f compose.dev.yaml \
   config >tmp/compose-regtest-operator.yaml
+JUNO_NETWORK=regtest docker compose \
+  --profile operator \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  config --format json >tmp/compose-regtest-operator.json
+jq -e '(.services.txbuild.networks | keys) == ["backend"]' \
+  tmp/compose-regtest-operator.json >/dev/null
 
 echo "compose config: regtest, testnet, mainnet, Postgres, and operator profile passed"

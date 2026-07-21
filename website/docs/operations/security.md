@@ -9,7 +9,8 @@ title: Security
 - prefer mTLS between the exchange and proxy
 - block direct access when proxy headers are trusted
 - keep node RPC, scanner, ZMQ, and databases on private networks
-- give the gateway no unrestricted outbound network
+- use the supplied ingress bridge to disable Docker's default outbound masquerading and inter-container communication
+- enforce outbound-deny policy at the host or infrastructure layer; disabling masquerading is not an egress firewall
 - private node and scanner clients ignore ambient HTTP proxies and reject redirects
 
 The gateway serves HTTP itself; TLS and mTLS are edge responsibilities.

@@ -10,7 +10,7 @@ The appliance exposes one watch-only HTTP API for exchange deposits and withdraw
 
 Prepare:
 
-- Docker Engine with Compose v2
+- Docker Engine 28 or newer with Compose v2
 - one UFVK and its birthday height
 - a scoped bearer token outside regtest
 - persistent storage for the node, scanner, and gateway state
