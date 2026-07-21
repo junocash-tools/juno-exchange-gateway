@@ -217,6 +217,9 @@ func (c *Config) Validate() error {
 	if c.Network != domain.Regtest && strings.TrimSpace(c.ScannerToken) == "" {
 		return errors.New("scanner authentication is required outside regtest")
 	}
+	if c.Network != domain.Regtest && (strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.NodeRPCPassword)), "replace-this-") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.ScannerToken)), "replace-this-")) {
+		return errors.New("example RPC and scanner credentials are forbidden outside regtest")
+	}
 	seenNames := make(map[string]struct{}, len(c.Credentials))
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
@@ -237,6 +240,9 @@ func (c *Config) Validate() error {
 			if len(cr.Token) < 24 {
 				return fmt.Errorf("credential %q token must be at least 24 characters", cr.Name)
 			}
+			if c.Network != domain.Regtest && strings.HasPrefix(strings.ToLower(strings.TrimSpace(cr.Token)), "replace-this-") {
+				return fmt.Errorf("credential %q uses an example token", cr.Name)
+			}
 			cr.TokenHash = sha256.Sum256([]byte(cr.Token))
 			cr.Token = ""
 		} else {
@@ -246,6 +252,9 @@ func (c *Config) Validate() error {
 			}
 			if cr.TokenSHA256 != strings.ToLower(cr.TokenSHA256) {
 				return fmt.Errorf("credential %q token_sha256 must be lowercase", cr.Name)
+			}
+			if c.Network != domain.Regtest && cr.TokenSHA256 == strings.Repeat("0", sha256.Size*2) {
+				return fmt.Errorf("credential %q uses the non-authenticating example token hash", cr.Name)
 			}
 			copy(cr.TokenHash[:], b)
 		}

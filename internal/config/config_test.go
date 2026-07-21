@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/sha256"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +55,34 @@ func TestValidateRejectsNetworkMismatchAndMissingProductionAuth(t *testing.T) {
 	cfg.Credentials = nil
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected authentication requirement")
+	}
+}
+
+func TestValidateRejectsExampleProductionCredentials(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"node RPC": func(cfg *Config) { cfg.NodeRPCPassword = "replace-this-regtest-rpc-password" },
+		"scanner":  func(cfg *Config) { cfg.ScannerToken = "replace-this-internal-scanner-token" },
+		"gateway":  func(cfg *Config) { cfg.Credentials[0].Token = "replace-this-example-token-1234567890" },
+		"gateway hash": func(cfg *Config) {
+			cfg.Credentials[0].Token = ""
+			cfg.Credentials[0].TokenSHA256 = strings.Repeat("0", sha256.Size*2)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig(domain.Mainnet)
+			mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected example credential rejection")
+			}
+		})
+	}
+
+	cfg := validConfig(domain.Regtest)
+	cfg.NodeRPCPassword = "replace-this-regtest-rpc-password"
+	cfg.ScannerToken = "replace-this-internal-scanner-token"
+	cfg.Credentials = nil
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("isolated regtest defaults should remain usable: %v", err)
 	}
 }
 
