@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -76,5 +77,67 @@ func TestBroadcastClassifiesRejectedAndWarmingUp(t *testing.T) {
 	message = "Loading block index"
 	if _, err := client.Broadcast(context.Background(), "00"); !domain.IsUpstreamKind(err, "unavailable") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestBlockHashAndDecodeRawTransactionAreTyped(t *testing.T) {
+	hash := strings.Repeat("b", 64)
+	txid := strings.Repeat("c", 64)
+	client := New("http://node.invalid", "", "", time.Second)
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var req struct {
+			Method string `json:"method"`
+			Params []any  `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch req.Method {
+		case "getblockhash":
+			if len(req.Params) != 1 || req.Params[0].(float64) != 12 {
+				t.Fatalf("params=%v", req.Params)
+			}
+			return testRPCResponse(t, hash, nil), nil
+		case "decoderawtransaction":
+			return testRPCResponse(t, map[string]any{"txid": txid}, nil), nil
+		default:
+			t.Fatalf("method=%s", req.Method)
+			return nil, nil
+		}
+	})
+	gotHash, err := client.BlockHash(context.Background(), 12)
+	if err != nil || gotHash != hash {
+		t.Fatalf("hash=%q err=%v", gotHash, err)
+	}
+	gotTxID, err := client.DecodeRawTransaction(context.Background(), "00")
+	if err != nil || gotTxID != txid {
+		t.Fatalf("txid=%q err=%v", gotTxID, err)
+	}
+}
+
+func TestTransactionWithStaleBlockHashIsOrphaned(t *testing.T) {
+	for _, confirmations := range []int64{0, -2} {
+		t.Run(fmt.Sprintf("confirmations_%d", confirmations), func(t *testing.T) {
+			txid := strings.Repeat("a", 64)
+			blockHash := strings.Repeat("b", 64)
+			client := New("http://node.invalid", "", "", time.Second)
+			client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				var req struct {
+					Method string `json:"method"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				switch req.Method {
+				case "getrawtransaction":
+					return testRPCResponse(t, map[string]any{"txid": txid, "blockhash": blockHash, "confirmations": confirmations}, nil), nil
+				case "getblockheader":
+					return testRPCResponse(t, map[string]any{"height": 7, "time": 1234}, nil), nil
+				default:
+					t.Fatalf("method=%s", req.Method)
+					return nil, nil
+				}
+			})
+			tx, found, err := client.Transaction(context.Background(), txid, false)
+			if err != nil || !found || tx.State != "orphaned" || tx.BlockHeight == nil || *tx.BlockHeight != 7 {
+				t.Fatalf("tx=%+v found=%v err=%v", tx, found, err)
+			}
+		})
 	}
 }

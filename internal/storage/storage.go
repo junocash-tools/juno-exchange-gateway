@@ -8,6 +8,7 @@ import (
 type Wallet struct {
 	WalletID           string
 	Network            string
+	UFVKFingerprint    string
 	BirthdayHeight     int64
 	NextBackfillHeight int64
 }
@@ -47,7 +48,7 @@ type ClaimResult struct {
 }
 
 type Store interface {
-	EnsureWallet(context.Context, string, string, int64) error
+	EnsureWallet(context.Context, string, string, string, int64) error
 	Wallet(context.Context, string) (Wallet, bool, error)
 	AdvanceBackfill(context.Context, string, int64, int64) error
 	SetBackfillProgress(context.Context, string, int64) error

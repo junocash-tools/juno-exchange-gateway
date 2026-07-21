@@ -117,6 +117,45 @@ func (c *Client) Tip(ctx context.Context) (domain.NodeTip, error) {
 	}, nil
 }
 
+func (c *Client) BlockHash(ctx context.Context, height int64) (string, error) {
+	if height < 0 {
+		return "", errors.New("block height must be non-negative")
+	}
+	var hash string
+	if err := c.call(ctx, "getblockhash", []any{height}, &hash); err != nil {
+		return "", err
+	}
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if len(hash) != 64 {
+		return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node returned invalid block hash")}
+	}
+	for _, character := range hash {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node returned invalid block hash")}
+		}
+	}
+	return hash, nil
+}
+
+func (c *Client) DecodeRawTransaction(ctx context.Context, rawTxHex string) (string, error) {
+	var decoded struct {
+		TxID string `json:"txid"`
+	}
+	if err := c.call(ctx, "decoderawtransaction", []any{rawTxHex}, &decoded); err != nil {
+		return "", err
+	}
+	txid := strings.ToLower(strings.TrimSpace(decoded.TxID))
+	if len(txid) != 64 {
+		return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node decoder returned invalid transaction ID")}
+	}
+	for _, character := range txid {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node decoder returned invalid transaction ID")}
+		}
+	}
+	return txid, nil
+}
+
 func (c *Client) Transaction(ctx context.Context, txid string, includeRaw bool) (domain.Transaction, bool, error) {
 	var raw struct {
 		Hex           string `json:"hex"`
@@ -147,8 +186,12 @@ func (c *Client) Transaction(ctx context.Context, txid string, includeRaw bool) 
 	if out.TxID != txid {
 		return domain.Transaction{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node returned mismatched transaction ID")}
 	}
-	if raw.BlockHash != "" && raw.Confirmations > 0 {
-		out.State = "confirmed"
+	if raw.BlockHash != "" {
+		if raw.Confirmations > 0 {
+			out.State = "confirmed"
+		} else {
+			out.State = "orphaned"
+		}
 		var header struct {
 			Height int64 `json:"height"`
 			Time   int64 `json:"time"`

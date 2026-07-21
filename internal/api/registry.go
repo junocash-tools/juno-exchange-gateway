@@ -28,7 +28,26 @@ func newWalletRegistry(cfg config.Config, st storage.Store, scanner domain.Scann
 	defer cancel()
 	for _, wallet := range cfg.Wallets {
 		r.wallets[wallet.WalletID] = wallet
-		if err := st.EnsureWallet(ctx, wallet.WalletID, string(cfg.Network), wallet.BirthdayHeight); err != nil {
+		stored, exists, err := st.Wallet(ctx, wallet.WalletID)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			if _, scannerHasWallet, err := scanner.BackfillStatus(ctx, wallet.WalletID); err != nil {
+				return nil, fmt.Errorf("verify fresh gateway wallet %s against scanner: %w", wallet.WalletID, err)
+			} else if scannerHasWallet {
+				return nil, fmt.Errorf("gateway state is missing wallet %q while scanner state retains it; restore the gateway backup to prevent address reuse", wallet.WalletID)
+			}
+		} else if stored.UFVKFingerprint == "" {
+			status, scannerHasWallet, err := scanner.BackfillStatus(ctx, wallet.WalletID)
+			if err != nil {
+				return nil, fmt.Errorf("verify legacy wallet %s UFVK binding: %w", wallet.WalletID, err)
+			}
+			if !scannerHasWallet || status.UFVKFingerprint != wallet.UFVKFingerprint() {
+				return nil, fmt.Errorf("legacy gateway wallet %q UFVK binding cannot be verified; restore matching scanner state before migration", wallet.WalletID)
+			}
+		}
+		if err := st.EnsureWallet(ctx, wallet.WalletID, string(cfg.Network), wallet.UFVKFingerprint(), wallet.BirthdayHeight); err != nil {
 			return nil, err
 		}
 	}
@@ -71,7 +90,7 @@ func (r *walletRegistry) completeThrough(ctx context.Context, height int64) (boo
 		if err != nil {
 			return false, err
 		}
-		if !ok || status.BirthdayHeight != configured.BirthdayHeight {
+		if !ok || status.UFVKFingerprint != configured.UFVKFingerprint() || status.BirthdayHeight != configured.BirthdayHeight {
 			return false, nil
 		}
 		if err := r.store.SetBackfillProgress(ctx, walletID, status.NextHeight); err != nil {
@@ -93,8 +112,8 @@ func (r *walletRegistry) backfillOne(ctx context.Context, tipHeight, batchSize i
 		if !ok {
 			return false, errors.New("registered wallet missing from scanner state")
 		}
-		if status.BirthdayHeight != configured.BirthdayHeight {
-			return false, errors.New("scanner wallet birthday does not match gateway configuration")
+		if status.UFVKFingerprint != configured.UFVKFingerprint() || status.BirthdayHeight != configured.BirthdayHeight {
+			return false, errors.New("scanner wallet identity does not match gateway configuration")
 		}
 		if err := r.store.SetBackfillProgress(ctx, walletID, status.NextHeight); err != nil {
 			return false, err

@@ -35,7 +35,7 @@ paths:
       tags: [Health]
       summary: Financial-read readiness
       x-required-scope: read
-      description: Fails closed if the node is syncing or on another network, scanner history is incomplete, scanner network/HRP differs, scanner lag exceeds the configured maximum, or gateway state is unavailable.
+      description: Fails closed if the node is syncing or on another network, scanner history is incomplete, the scanner network/HRP differs, the scanner block hash does not match this gateway's node, node-derived scanner lag exceeds the configured maximum, or gateway state is unavailable.
       responses:
         "200":
           description: Financial reads are safe.
@@ -47,7 +47,7 @@ paths:
                 data:
                   network: mainnet
                   node: { network: main, height: 920000, hash: "0000000000000000000000000000000000000000000000000000000000000001", block_time: 1784631000, headers: 920000, initial_sync: false, verification_progress: 1 }
-                  scanner: { status: ok, ready: true, network: mainnet, ua_hrp: j, scanned_height: 920000, scanner_lag: 0 }
+                  scanner: { status: ok, ready: true, network: mainnet, ua_hrp: j, event_epoch: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, scanned_height: 920000, scanned_hash: "0000000000000000000000000000000000000000000000000000000000000001", scanner_lag: 0 }
                   scanner_lag: 0
                   max_scanner_lag: 2
                 request_id: req_018f
@@ -104,7 +104,7 @@ paths:
       tags: [Wallets]
       summary: Allocate the next watch-only deposit address
       x-required-scope: address
-      description: Allocation and diversifier-index advancement commit atomically to gateway state. The UFVK is configured at bootstrap and is never returned.
+      description: Allocation and diversifier-index advancement commit atomically to gateway state. The UFVK is configured at bootstrap, bound immutably by its SHA-256 fingerprint, and never returned.
       parameters:
         - $ref: "#/components/parameters/WalletID"
       requestBody:
@@ -171,13 +171,13 @@ paths:
       tags: [Wallets]
       summary: Poll deposit lifecycle events
       x-required-scope: read
-      description: Delivery is at-least-once. Commit the page, deduplicate by `(deposit_id,event_id)`, then persist `next_cursor`. A cursor is opaque and bound to this wallet.
+      description: Delivery is at-least-once and limited to addresses allocated by this gateway. Commit the page, deduplicate by `(deposit_id,event_id)`, then persist `next_cursor`. A cursor is opaque and bound to this wallet, scanner event epoch, and the `address`, `txid`, and `status` filters. After `cursor_reset_required`, discard the old cursor, restart without one, and idempotently replay the current epoch. Keep filters unchanged while advancing a cursor.
       parameters:
         - $ref: "#/components/parameters/WalletID"
         - name: cursor
           in: query
           schema: { type: string }
-          description: Opaque `next_cursor`; omit on the first request.
+          description: Opaque `next_cursor`; omit on the first request and after `cursor_reset_required`.
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
@@ -201,14 +201,23 @@ paths:
                 status: ok
                 data:
                   deposits:
-                    - { deposit_id: "hot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0", event_id: "81", wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, action_index: 0, address: j1example, diversifier_index: 42, amount_zat: 100000000, status: confirmed, block_height: 919901, confirmed_height: 920000, observed_at: "2026-07-21T12:00:00Z" }
-                  next_cursor: eyJ2IjoxLCJ3IjoiaG90IiwicCI6ODF9.signature
+                    - { deposit_id: "hot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0", event_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:81", wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, action_index: 0, address: j1example, diversifier_index: 42, amount_zat: 100000000, status: confirmed, block_height: 919901, confirmed_height: 920000, observed_at: "2026-07-21T12:00:00Z" }
+                  next_cursor: eyJ2IjoyLCJ3IjoiaG90IiwiZSI6ImJiYmIuLi4iLCJwIjo4MX0.signature
                   delivery: at_least_once
+                  event_epoch: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
                 request_id: req_018f
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The supplied cursor belongs to an older scanner event epoch or different filters.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              examples:
+                epoch_reset: { value: { status: error, error: { code: cursor_reset_required, message: scanner event history was reset; restart without a cursor and idempotently replay deposits, retryable: false, details: { action: restart_without_cursor, event_epoch: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb } }, request_id: req_018f } }
+                filter_mismatch: { value: { status: error, error: { code: cursor_filter_mismatch, message: cursor was created for different deposit filters, retryable: false, details: { action: restart_without_cursor_or_restore_filters } }, request_id: req_018f } }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/transactions/{txid}:
@@ -221,7 +230,7 @@ paths:
         - name: wallet_id
           in: query
           schema: { $ref: "#/components/schemas/WalletID" }
-          description: Adds scanner effects only when the credential is authorized for this wallet.
+          description: Adds all scanner effects only when the credential is authorized for this wallet. Returns `wallet_effects_limit_exceeded` instead of truncating above the configured safety cap.
         - name: include_raw
           in: query
           schema: { type: boolean, default: false }
@@ -242,6 +251,12 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
               example: { status: error, error: { code: forbidden, message: credential is not authorized for this wallet, retryable: false, details: {} }, request_id: req_018f }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Scanner event history changed during wallet enrichment; retry the request.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+        "422":
+          description: Wallet effects exceed the configured safe event cap.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
         "429": { $ref: "#/components/responses/RateLimited" }
         "502": { $ref: "#/components/responses/NodeRPCError" }
         "503": { $ref: "#/components/responses/NotReady" }
@@ -250,7 +265,7 @@ paths:
       tags: [Transactions]
       summary: Broadcast an already signed raw transaction
       x-required-scope: broadcast
-      description: Never waits for confirmations. No planning, recipient, amount, fee, seed, key, or signing fields are accepted. Keep the idempotency key stable across uncertain retries.
+      description: Never waits for confirmations. The gateway decodes the raw transaction and verifies `expected_txid` before claiming idempotency state, checking already-known state, or broadcasting. No planning, recipient, amount, fee, seed, key, or signing fields are accepted. Keep the idempotency key stable across uncertain retries.
       parameters:
         - name: Idempotency-Key
           in: header
@@ -293,11 +308,13 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
               example: { status: error, error: { code: invalid_request, message: request body exceeds the configured limit, retryable: false, details: {} }, request_id: req_018f }
         "422":
-          description: The node rejected a syntactically valid transaction.
+          description: "`expected_txid` differs from the decoded raw transaction, or the node rejected a syntactically valid transaction."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { status: error, error: { code: transaction_rejected, message: node rejected the signed transaction, retryable: false, details: {} }, request_id: req_018f }
+              examples:
+                mismatch: { value: { status: error, error: { code: expected_txid_mismatch, message: expected_txid does not match raw_tx_hex, retryable: false, details: {} }, request_id: req_018f } }
+                rejected: { value: { status: error, error: { code: transaction_rejected, message: node rejected the signed transaction, retryable: false, details: {} }, request_id: req_018f } }
         "429": { $ref: "#/components/responses/RateLimited" }
         "502": { $ref: "#/components/responses/NodeRPCError" }
         "503": { $ref: "#/components/responses/NotReady" }
@@ -400,11 +417,12 @@ components:
         verification_progress: { type: number }
     ScannerHealth:
       type: object
-      required: [status, network, ua_hrp, ready, scanned_height, scanner_lag]
+      required: [status, network, ua_hrp, event_epoch, ready, scanned_height, scanned_hash, scanner_lag]
       properties:
         status: { type: string }
         network: { type: string, enum: [mainnet, testnet, regtest] }
         ua_hrp: { type: string, enum: [j, jtest, jregtest] }
+        event_epoch: { type: string, pattern: "^[0-9a-f]{64}$" }
         ready: { type: boolean }
         node_height: { type: integer, format: int64 }
         scanned_height: { type: integer, format: int64 }
@@ -499,7 +517,7 @@ components:
       required: [deposit_id, event_id, wallet_id, txid, action_index, address, diversifier_index, amount_zat, status, block_height, observed_at]
       properties:
         deposit_id: { type: string }
-        event_id: { type: string }
+        event_id: { type: string, pattern: "^[0-9a-f]{64}:[1-9][0-9]*$" }
         wallet_id: { $ref: "#/components/schemas/WalletID" }
         txid: { $ref: "#/components/schemas/TxID" }
         action_index: { type: integer, minimum: 0 }
@@ -515,7 +533,7 @@ components:
     DepositsResponse:
       type: object
       required: [status, data, request_id]
-      properties: { status: { const: ok }, data: { type: object, required: [deposits, next_cursor, delivery], properties: { deposits: { type: array, items: { $ref: "#/components/schemas/Deposit" } }, next_cursor: { type: string }, delivery: { const: at_least_once } } }, request_id: { type: string } }
+      properties: { status: { const: ok }, data: { type: object, required: [deposits, next_cursor, delivery, event_epoch], properties: { deposits: { type: array, items: { $ref: "#/components/schemas/Deposit" } }, next_cursor: { type: string }, delivery: { const: at_least_once }, event_epoch: { type: string, pattern: "^[0-9a-f]{64}$" } } }, request_id: { type: string } }
     Transaction:
       type: object
       required: [txid, state, confirmations]

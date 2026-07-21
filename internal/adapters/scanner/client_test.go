@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -26,14 +28,37 @@ func TestBalanceUsesBearerAndAddressRoute(t *testing.T) {
 		if r.URL.Query().Get("min_confirmations") != "100" {
 			t.Errorf("query=%s", r.URL.RawQuery)
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"available_zat":12,"pending_incoming_zat":1,"pending_outgoing_zat":2,"total_unspent_zat":13,"min_confirmations":100,"as_of_node_height":10,"as_of_scanner_height":10,"scanner_lag":0}`))}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"wallet_id":"hot","recipient_address":"jregtest1example","available_zat":10,"pending_incoming_zat":1,"pending_outgoing_zat":2,"total_unspent_zat":13,"min_confirmations":100,"as_of_node_height":10,"as_of_scanner_height":10,"scanner_lag":0}`))}, nil
 	})
 	balance, found, err := client.Balance(context.Background(), "hot", address, 100, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found || balance.AvailableZat != 12 || balance.PendingOutgoingZat != 2 {
+	if !found || balance.AvailableZat != 10 || balance.PendingOutgoingZat != 2 || balance.WalletID != "hot" || balance.RecipientAddress != address {
 		t.Fatalf("balance=%+v found=%v", balance, found)
+	}
+}
+
+func TestBalanceRejectsWrongIdentityAndBrokenAccounting(t *testing.T) {
+	client := New("http://scanner.invalid", "", time.Second, time.Minute)
+	response := `{"wallet_id":"other","recipient_address":"jregtest1example","available_zat":10,"pending_incoming_zat":1,"pending_outgoing_zat":2,"total_unspent_zat":12,"min_confirmations":0,"as_of_node_height":10,"as_of_scanner_height":10,"scanner_lag":0}`
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})
+	if _, _, err := client.Balance(context.Background(), "hot", "jregtest1example", 0, 10); err == nil {
+		t.Fatal("expected invalid balance rejection")
+	}
+}
+
+func TestEventsCarriesScannerEpoch(t *testing.T) {
+	epoch := strings.Repeat("a", 64)
+	client := New("http://scanner.invalid", "", time.Second, time.Minute)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"events":[],"next_cursor":7,"event_epoch":"` + epoch + `"}`))}, nil
+	})
+	page, err := client.Events(context.Background(), "hot", 7, 100, domain.EventFilter{})
+	if err != nil || page.EventEpoch != epoch || page.NextCursor != 7 {
+		t.Fatalf("page=%+v err=%v", page, err)
 	}
 }
 
@@ -63,12 +88,13 @@ func TestBackfillUsesDedicatedClientAndValidatesProgress(t *testing.T) {
 }
 
 func TestBackfillStatusIsTyped(t *testing.T) {
+	fingerprint := strings.Repeat("a", 64)
 	client := New("http://scanner.invalid", "", time.Second, time.Minute)
 	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"wallet_id":"hot","birthday_height":50,"next_height":75,"target_height":100,"state":"running","updated_at":"2026-07-21T12:00:00Z"}`))}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"wallet_id":"hot","ufvk_fingerprint":"` + fingerprint + `","birthday_height":50,"next_height":75,"target_height":100,"state":"running","updated_at":"2026-07-21T12:00:00Z"}`))}, nil
 	})
 	status, found, err := client.BackfillStatus(context.Background(), "hot")
-	if err != nil || !found || status.NextHeight != 75 || status.State != "running" {
+	if err != nil || !found || status.UFVKFingerprint != fingerprint || status.NextHeight != 75 || status.State != "running" {
 		t.Fatalf("status=%+v found=%v err=%v", status, found, err)
 	}
 }

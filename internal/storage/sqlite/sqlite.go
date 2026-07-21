@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -80,37 +81,114 @@ CREATE TABLE IF NOT EXISTS metadata (
 	if err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read gateway schema version: %w", err)
 	}
-	if version != 1 {
+	if version > 2 {
+		return fmt.Errorf("unsupported gateway schema version %d", version)
+	}
+	if version == 1 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin gateway schema migration: %w", err)
+		}
+		defer tx.Rollback()
+		rows, err := tx.QueryContext(ctx, `PRAGMA table_info(wallets)`)
+		if err != nil {
+			return fmt.Errorf("inspect wallets schema: %w", err)
+		}
+		hasFingerprint := false
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				return fmt.Errorf("inspect wallets column: %w", err)
+			}
+			if name == "ufvk_fingerprint" {
+				hasFingerprint = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("inspect wallets schema: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("inspect wallets schema: %w", err)
+		}
+		if !hasFingerprint {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE wallets ADD COLUMN ufvk_fingerprint TEXT`); err != nil {
+				return fmt.Errorf("add wallet UFVK fingerprint: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_wallets_ufvk_fingerprint ON wallets(network,ufvk_fingerprint) WHERE ufvk_fingerprint IS NOT NULL`); err != nil {
+			return fmt.Errorf("index wallet UFVK fingerprints: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version(version) VALUES (2)`); err != nil {
+			return fmt.Errorf("record gateway schema migration: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit gateway schema migration: %w", err)
+		}
+		version = 2
+	}
+	if version != 2 {
 		return fmt.Errorf("unsupported gateway schema version %d", version)
 	}
 	return nil
 }
 
-func (s *Store) EnsureWallet(ctx context.Context, walletID, network string, birthdayHeight int64) error {
+func (s *Store) EnsureWallet(ctx context.Context, walletID, network, ufvkFingerprint string, birthdayHeight int64) error {
+	if len(ufvkFingerprint) != 64 {
+		return errors.New("UFVK fingerprint must be 64 lowercase hex characters")
+	}
+	if decoded, err := hex.DecodeString(ufvkFingerprint); err != nil || len(decoded) != 32 || ufvkFingerprint != strings.ToLower(ufvkFingerprint) {
+		return errors.New("UFVK fingerprint must be 64 lowercase hex characters")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin wallet registration: %w", err)
+	}
+	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO wallets(wallet_id,network,birthday_height,next_backfill_height,created_at) VALUES(?,?,?,?,?) ON CONFLICT(wallet_id) DO NOTHING`, walletID, network, birthdayHeight, birthdayHeight, now)
+	_, err = tx.ExecContext(ctx, `INSERT INTO wallets(wallet_id,network,ufvk_fingerprint,birthday_height,next_backfill_height,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(wallet_id) DO NOTHING`, walletID, network, ufvkFingerprint, birthdayHeight, birthdayHeight, now)
 	if err != nil {
 		return fmt.Errorf("ensure wallet: %w", err)
 	}
 	var got string
+	var storedFingerprint sql.NullString
 	var storedBirthday int64
-	if err := s.db.QueryRowContext(ctx, `SELECT network,birthday_height FROM wallets WHERE wallet_id=?`, walletID).Scan(&got, &storedBirthday); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT network,ufvk_fingerprint,birthday_height FROM wallets WHERE wallet_id=?`, walletID).Scan(&got, &storedFingerprint, &storedBirthday); err != nil {
 		return fmt.Errorf("verify wallet: %w", err)
 	}
 	if got != network {
 		return fmt.Errorf("wallet %q is registered for network %q", walletID, got)
 	}
-	if birthdayHeight != storedBirthday {
-		if _, err := s.db.ExecContext(ctx, `UPDATE wallets SET birthday_height=?,next_backfill_height=? WHERE wallet_id=?`, birthdayHeight, birthdayHeight, walletID); err != nil {
-			return fmt.Errorf("reset wallet birthday: %w", err)
+	if storedFingerprint.Valid && storedFingerprint.String != "" && storedFingerprint.String != ufvkFingerprint {
+		return fmt.Errorf("wallet %q is bound to a different UFVK fingerprint", walletID)
+	}
+	if birthdayHeight > storedBirthday {
+		return fmt.Errorf("wallet %q birthday_height cannot increase from %d to %d", walletID, storedBirthday, birthdayHeight)
+	}
+	if !storedFingerprint.Valid || storedFingerprint.String == "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE wallets SET ufvk_fingerprint=? WHERE wallet_id=? AND (ufvk_fingerprint IS NULL OR ufvk_fingerprint='')`, ufvkFingerprint, walletID); err != nil {
+			return fmt.Errorf("bind wallet UFVK fingerprint: %w", err)
 		}
+	}
+	if birthdayHeight < storedBirthday {
+		if _, err := tx.ExecContext(ctx, `UPDATE wallets SET birthday_height=?,next_backfill_height=? WHERE wallet_id=?`, birthdayHeight, birthdayHeight, walletID); err != nil {
+			return fmt.Errorf("rewind wallet birthday: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit wallet registration: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) Wallet(ctx context.Context, walletID string) (storage.Wallet, bool, error) {
 	var w storage.Wallet
-	err := s.db.QueryRowContext(ctx, `SELECT wallet_id,network,birthday_height,next_backfill_height FROM wallets WHERE wallet_id=?`, walletID).Scan(&w.WalletID, &w.Network, &w.BirthdayHeight, &w.NextBackfillHeight)
+	err := s.db.QueryRowContext(ctx, `SELECT wallet_id,network,COALESCE(ufvk_fingerprint,''),birthday_height,next_backfill_height FROM wallets WHERE wallet_id=?`, walletID).Scan(&w.WalletID, &w.Network, &w.UFVKFingerprint, &w.BirthdayHeight, &w.NextBackfillHeight)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.Wallet{}, false, nil
 	}

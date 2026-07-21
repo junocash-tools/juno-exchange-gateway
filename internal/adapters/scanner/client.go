@@ -85,8 +85,13 @@ func (c *Client) BackfillStatus(ctx context.Context, walletID string) (domain.Ba
 		}
 		return domain.BackfillStatus{}, false, &domain.UpstreamError{Kind: "unavailable", Err: err}
 	}
-	if response.WalletID != walletID || response.BirthdayHeight < 0 || response.NextHeight < response.BirthdayHeight {
+	if response.WalletID != walletID || len(response.UFVKFingerprint) != 64 || response.UFVKFingerprint != strings.ToLower(response.UFVKFingerprint) || response.BirthdayHeight < 0 || response.NextHeight < response.BirthdayHeight {
 		return domain.BackfillStatus{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned invalid backfill status")}
+	}
+	for _, character := range response.UFVKFingerprint {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return domain.BackfillStatus{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned invalid backfill status")}
+		}
 	}
 	switch response.State {
 	case "pending", "running", "complete", "error":
@@ -129,13 +134,23 @@ func (c *Client) Balance(ctx context.Context, walletID, address string, confirma
 	q := url.Values{}
 	q.Set("min_confirmations", strconv.FormatInt(confirmations, 10))
 	path := "/v1/wallets/" + url.PathEscape(walletID) + "/addresses/" + url.PathEscape(address) + "/balance?" + q.Encode()
-	var out domain.Balance
-	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+	var raw struct {
+		domain.Balance
+		WalletID         string `json:"wallet_id"`
+		RecipientAddress string `json:"recipient_address"`
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
 		var he *httpError
 		if errors.As(err, &he) && he.status == http.StatusNotFound {
 			return domain.Balance{}, false, nil
 		}
 		return domain.Balance{}, false, err
+	}
+	out := raw.Balance
+	out.WalletID = raw.WalletID
+	out.RecipientAddress = raw.RecipientAddress
+	if !out.ValidFor(walletID, address, confirmations) {
+		return domain.Balance{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned invalid address balance")}
 	}
 	return out, true, nil
 }
@@ -154,9 +169,10 @@ func (c *Client) Events(ctx context.Context, walletID string, cursor int64, limi
 	var raw struct {
 		Events     []domain.ScannerEvent `json:"events"`
 		NextCursor int64                 `json:"next_cursor"`
+		EventEpoch string                `json:"event_epoch"`
 	}
 	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
 		return domain.EventsPage{}, err
 	}
-	return domain.EventsPage{Events: raw.Events, NextCursor: raw.NextCursor}, nil
+	return domain.EventsPage{Events: raw.Events, NextCursor: raw.NextCursor, EventEpoch: strings.TrimSpace(raw.EventEpoch)}, nil
 }

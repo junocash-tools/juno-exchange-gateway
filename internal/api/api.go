@@ -25,6 +25,7 @@ import (
 
 var (
 	txIDPattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	eventEpochPattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	idempotencyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 	requestIDPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 )
@@ -298,13 +299,20 @@ func (a *API) checkReady(ctx context.Context) (readiness, string, error) {
 	if health.Network == "" || health.Network != string(a.cfg.Network) || health.UAHRP == "" || health.UAHRP != a.cfg.Network.AddressHRP() {
 		return readiness{}, "scanner_not_ready", errors.New("scanner network does not match gateway configuration")
 	}
+	if *health.ScannedHeight < 0 || *health.ScannedHeight > tip.Height || !txIDPattern.MatchString(health.ScannedHash) {
+		return readiness{}, "scanner_not_ready", errors.New("scanner indexed tip is invalid")
+	}
+	if !eventEpochPattern.MatchString(health.EventEpoch) {
+		return readiness{}, "scanner_not_ready", errors.New("scanner event epoch is invalid")
+	}
+	nodeScannedHash, err := a.node.BlockHash(ctx, *health.ScannedHeight)
+	if err != nil {
+		return readiness{}, "node_not_ready", err
+	}
+	if health.ScannedHash != nodeScannedHash {
+		return readiness{}, "scanner_not_ready", errors.New("scanner indexed tip does not match node chain")
+	}
 	lag := tip.Height - *health.ScannedHeight
-	if health.ScannerLag != nil {
-		lag = *health.ScannerLag
-	}
-	if lag < 0 {
-		lag = 0
-	}
 	if health.Ready != nil && !*health.Ready {
 		return readiness{}, "scanner_not_ready", errors.New("scanner reports not ready")
 	}
@@ -447,6 +455,10 @@ func (a *API) handleBalance(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, http.StatusNotFound, "not_found", "wallet not found in scanner", false, nil)
 		return
 	}
+	if !balance.ValidFor(walletID, address, confirmations) {
+		a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "scanner returned an invalid address balance", true, nil)
+		return
+	}
 	a.writeData(w, r, http.StatusOK, map[string]any{"wallet_id": walletID, "address": address, "balance": balance})
 }
 
@@ -465,6 +477,7 @@ func (a *API) confirmations(r *http.Request) (int64, error) {
 type depositPayload struct {
 	WalletID         string `json:"wallet_id"`
 	TxID             string `json:"txid"`
+	Origin           string `json:"origin"`
 	Height           int64  `json:"height"`
 	ActionIndex      uint32 `json:"action_index"`
 	AmountZatoshis   uint64 `json:"amount_zatoshis"`
@@ -500,11 +513,6 @@ func (a *API) handleDeposits(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, http.StatusNotFound, "not_found", "wallet not found", false, nil)
 		return
 	}
-	position, err := a.codec.decode(strings.TrimSpace(r.URL.Query().Get("cursor")), walletID)
-	if err != nil {
-		a.writeError(w, r, http.StatusBadRequest, "invalid_request", "cursor is invalid for this wallet", false, nil)
-		return
-	}
 	limit := 100
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		n, e := strconv.Atoi(raw)
@@ -537,13 +545,40 @@ func (a *API) handleDeposits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if _, code, err := a.checkReady(r.Context()); err != nil {
+	cursorFilter := depositCursorFilter(status, address, filter.TxID)
+	ready, code, err := a.checkReady(r.Context())
+	if err != nil {
 		a.writeError(w, r, http.StatusServiceUnavailable, code, "financial reads are not ready", true, nil)
+		return
+	}
+	position, err := a.codec.decode(strings.TrimSpace(r.URL.Query().Get("cursor")), walletID, ready.Scanner.EventEpoch, cursorFilter)
+	if errors.Is(err, errCursorResetRequired) {
+		a.writeCursorReset(w, r, ready.Scanner.EventEpoch)
+		return
+	}
+	if errors.Is(err, errCursorFilterMismatch) {
+		a.writeError(w, r, http.StatusConflict, "cursor_filter_mismatch", "cursor was created for different deposit filters", false, map[string]any{"action": "restart_without_cursor_or_restore_filters"})
+		return
+	}
+	if err != nil {
+		a.writeError(w, r, http.StatusBadRequest, "invalid_request", "cursor is invalid for this wallet", false, nil)
 		return
 	}
 	page, err := a.scanner.Events(r.Context(), walletID, position, 1000, filter)
 	if err != nil {
 		a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "scanner deposit request failed", true, nil)
+		return
+	}
+	if page.EventEpoch != ready.Scanner.EventEpoch {
+		a.writeCursorReset(w, r, ready.Scanner.EventEpoch)
+		return
+	}
+	if page.NextCursor < position {
+		a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned a backward deposit cursor", true, nil)
+		return
+	}
+	if (len(page.Events) == 0 && page.NextCursor != position) || (len(page.Events) > 0 && page.NextCursor != page.Events[len(page.Events)-1].ID) {
+		a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned an inconsistent deposit cursor", true, nil)
 		return
 	}
 	items := make([]deposit, 0, limit)
@@ -554,22 +589,32 @@ func (a *API) handleDeposits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var payload depositPayload
-		if err := json.Unmarshal(event.Payload, &payload); err != nil || !txIDPattern.MatchString(payload.TxID) || (payload.WalletID != "" && payload.WalletID != walletID) || !strings.HasPrefix(payload.RecipientAddress, a.cfg.Network.AddressHRP()+"1") {
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || !txIDPattern.MatchString(payload.TxID) || payload.WalletID != walletID || payload.Origin != "external" || payload.Height < 0 || !strings.HasPrefix(payload.RecipientAddress, a.cfg.Network.AddressHRP()+"1") {
 			a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned an invalid deposit event", true, nil)
 			return
 		}
 		publicStatus, ok := depositStatus(event.Kind)
 		if !ok {
-			continue
+			a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned an unexpected deposit event kind", true, nil)
+			return
 		}
 		next = event.ID
+		if allocated, registered, err := a.store.Address(r.Context(), walletID, payload.RecipientAddress); err != nil {
+			a.writeError(w, r, http.StatusInternalServerError, "internal", "state lookup failed", false, nil)
+			return
+		} else if !registered {
+			continue
+		} else if allocated.DiversifierIndex != payload.DiversifierIndex {
+			a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned a deposit with mismatched address identity", true, nil)
+			return
+		}
 		if status != "" && publicStatus != status {
 			continue
 		}
 		if address != "" && payload.RecipientAddress != address {
 			continue
 		}
-		items = append(items, deposit{DepositID: walletID + ":" + payload.TxID + ":" + strconv.FormatUint(uint64(payload.ActionIndex), 10), EventID: strconv.FormatInt(event.ID, 10), WalletID: walletID, TxID: payload.TxID, ActionIndex: payload.ActionIndex, Address: payload.RecipientAddress, DiversifierIndex: payload.DiversifierIndex, AmountZat: payload.AmountZatoshis, Status: publicStatus, BlockHeight: payload.Height, ConfirmedHeight: payload.ConfirmedHeight, OrphanedAtHeight: payload.OrphanedAtHeight, RollbackHeight: payload.RollbackHeight, ObservedAt: event.CreatedAt})
+		items = append(items, deposit{DepositID: walletID + ":" + payload.TxID + ":" + strconv.FormatUint(uint64(payload.ActionIndex), 10), EventID: page.EventEpoch + ":" + strconv.FormatInt(event.ID, 10), WalletID: walletID, TxID: payload.TxID, ActionIndex: payload.ActionIndex, Address: payload.RecipientAddress, DiversifierIndex: payload.DiversifierIndex, AmountZat: payload.AmountZatoshis, Status: publicStatus, BlockHeight: payload.Height, ConfirmedHeight: payload.ConfirmedHeight, OrphanedAtHeight: payload.OrphanedAtHeight, RollbackHeight: payload.RollbackHeight, ObservedAt: event.CreatedAt})
 		if len(items) == limit {
 			break
 		}
@@ -580,7 +625,23 @@ func (a *API) handleDeposits(w http.ResponseWriter, r *http.Request) {
 	if len(items) < limit && len(page.Events) > 0 && next == page.Events[len(page.Events)-1].ID {
 		next = page.NextCursor
 	}
-	a.writeData(w, r, http.StatusOK, map[string]any{"deposits": items, "next_cursor": a.codec.encode(walletID, next), "delivery": "at_least_once"})
+	if page.NextCursor < next {
+		a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned a backward deposit cursor", true, nil)
+		return
+	}
+	a.writeData(w, r, http.StatusOK, map[string]any{"deposits": items, "next_cursor": a.codec.encode(walletID, page.EventEpoch, cursorFilter, next), "delivery": "at_least_once", "event_epoch": page.EventEpoch})
+}
+
+func depositCursorFilter(status, address, txid string) string {
+	sum := sha256.Sum256([]byte(status + "\x00" + address + "\x00" + txid))
+	return hex.EncodeToString(sum[:])
+}
+
+func (a *API) writeCursorReset(w http.ResponseWriter, r *http.Request, eventEpoch string) {
+	a.writeError(w, r, http.StatusConflict, "cursor_reset_required", "scanner event history was reset; restart without a cursor and idempotently replay deposits", false, map[string]any{
+		"action":      "restart_without_cursor",
+		"event_epoch": eventEpoch,
+	})
 }
 
 func depositStatus(kind string) (string, bool) {
@@ -619,6 +680,7 @@ func (a *API) handleTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	walletID := strings.TrimSpace(r.URL.Query().Get("wallet_id"))
+	var ready readiness
 	if walletID != "" {
 		if !p.hasWallet(walletID) {
 			a.writeError(w, r, http.StatusForbidden, "forbidden", "credential is not authorized for this wallet", false, nil)
@@ -628,7 +690,10 @@ func (a *API) handleTransaction(w http.ResponseWriter, r *http.Request) {
 			a.writeError(w, r, http.StatusNotFound, "not_found", "wallet not found", false, nil)
 			return
 		}
-		if _, code, err := a.checkReady(r.Context()); err != nil {
+		var code string
+		var err error
+		ready, code, err = a.checkReady(r.Context())
+		if err != nil {
 			a.writeError(w, r, http.StatusServiceUnavailable, code, "wallet transaction enrichment is not ready", true, nil)
 			return
 		}
@@ -648,14 +713,62 @@ func (a *API) handleTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 	data := map[string]any{"transaction": tx}
 	if walletID != "" {
-		page, err := a.scanner.Events(r.Context(), walletID, 0, 1000, domain.EventFilter{TxID: txid})
+		effects, err := a.walletEffects(r.Context(), walletID, txid, ready.Scanner.EventEpoch)
 		if err != nil {
+			if errors.Is(err, errCursorResetRequired) {
+				a.writeError(w, r, http.StatusConflict, "event_history_reset", "scanner event history changed during transaction lookup; retry the request", true, map[string]any{"event_epoch": ready.Scanner.EventEpoch})
+				return
+			}
+			if errors.Is(err, errWalletEffectsLimit) {
+				a.writeError(w, r, http.StatusUnprocessableEntity, "wallet_effects_limit_exceeded", "wallet transaction effects exceed the configured safety cap", false, map[string]any{"max_events": a.cfg.WalletEffectsMaxEvents})
+				return
+			}
 			a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "wallet transaction lookup failed", true, nil)
 			return
 		}
-		data["wallet_id"], data["wallet_effects"] = walletID, page.Events
+		data["wallet_id"], data["wallet_effects"] = walletID, effects
 	}
 	a.writeData(w, r, http.StatusOK, data)
+}
+
+var errWalletEffectsLimit = errors.New("wallet effects limit exceeded")
+
+func (a *API) walletEffects(ctx context.Context, walletID, txid, eventEpoch string) ([]domain.ScannerEvent, error) {
+	effects := make([]domain.ScannerEvent, 0)
+	position := int64(0)
+	for {
+		remainingWithProbe := a.cfg.WalletEffectsMaxEvents + 1 - len(effects)
+		pageLimit := 1000
+		if remainingWithProbe < pageLimit {
+			pageLimit = remainingWithProbe
+		}
+		page, err := a.scanner.Events(ctx, walletID, position, pageLimit, domain.EventFilter{TxID: txid})
+		if err != nil {
+			return nil, err
+		}
+		if page.EventEpoch != eventEpoch {
+			return nil, errCursorResetRequired
+		}
+		if (len(page.Events) == 0 && page.NextCursor != position) || (len(page.Events) > 0 && page.NextCursor != page.Events[len(page.Events)-1].ID) {
+			return nil, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned an inconsistent event cursor")}
+		}
+		for _, event := range page.Events {
+			if event.ID <= position {
+				return nil, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned non-forward transaction effects")}
+			}
+			position = event.ID
+			effects = append(effects, event)
+			if len(effects) > a.cfg.WalletEffectsMaxEvents {
+				return nil, errWalletEffectsLimit
+			}
+		}
+		if page.NextCursor != position {
+			return nil, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned an inconsistent event cursor")}
+		}
+		if len(page.Events) < pageLimit {
+			return effects, nil
+		}
+	}
 }
 
 type broadcastRequest struct {
@@ -688,6 +801,19 @@ func (a *API) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := a.readyNode(r.Context()); err != nil {
 		a.writeError(w, r, http.StatusServiceUnavailable, "node_not_ready", "node is not ready", true, nil)
+		return
+	}
+	decodedTxID, err := a.node.DecodeRawTransaction(r.Context(), req.RawTxHex)
+	if err != nil {
+		if domain.IsUpstreamKind(err, "unavailable") || domain.IsUpstreamKind(err, "invalid_response") {
+			a.writeError(w, r, http.StatusBadGateway, "node_rpc_error", "transaction decoding failed", true, nil)
+			return
+		}
+		a.writeError(w, r, http.StatusBadRequest, "invalid_request", "raw_tx_hex is not a valid transaction", false, nil)
+		return
+	}
+	if decodedTxID != req.ExpectedTxID {
+		a.writeError(w, r, http.StatusUnprocessableEntity, "expected_txid_mismatch", "expected_txid does not match raw_tx_hex", false, nil)
 		return
 	}
 	digestBytes := sha256.Sum256([]byte(req.RawTxHex + "\x00" + req.ExpectedTxID))

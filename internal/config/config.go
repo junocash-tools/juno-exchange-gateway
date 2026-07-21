@@ -30,6 +30,11 @@ type Wallet struct {
 	BirthdayHeight int64  `json:"birthday_height"`
 }
 
+func (w Wallet) UFVKFingerprint() string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(w.UFVK)))
+	return hex.EncodeToString(sum[:])
+}
+
 type CredentialFile struct {
 	Credentials []Credential `json:"credentials"`
 }
@@ -82,6 +87,7 @@ type Config struct {
 	BackfillBatchSize      int64
 	BackfillYield          time.Duration
 	BackfillTimeout        time.Duration
+	WalletEffectsMaxEvents int
 }
 
 func Load() (Config, error) {
@@ -119,6 +125,7 @@ func Load() (Config, error) {
 		BackfillBatchSize:      envInt64("JUNO_GATEWAY_BACKFILL_BATCH_SIZE", 10000),
 		BackfillYield:          envDuration("JUNO_GATEWAY_BACKFILL_YIELD", 250*time.Millisecond),
 		BackfillTimeout:        envDuration("JUNO_GATEWAY_BACKFILL_TIMEOUT", 10*time.Minute),
+		WalletEffectsMaxEvents: envInt("JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS", 10000),
 	}
 
 	if path := strings.TrimSpace(os.Getenv("JUNO_GATEWAY_WALLETS_FILE")); path != "" {
@@ -166,6 +173,9 @@ func (c *Config) Validate() error {
 	if c.BackfillBatchSize < 1 || c.BackfillBatchSize > 100000 || c.BackfillYield <= 0 || c.BackfillTimeout <= 0 {
 		return errors.New("backfill batch size, yield, and timeout are invalid")
 	}
+	if c.WalletEffectsMaxEvents < 1 || c.WalletEffectsMaxEvents > 100000 {
+		return errors.New("wallet effects event cap must be between 1 and 100000")
+	}
 	if c.ReadRate.RPS <= 0 || c.ReadRate.Burst <= 0 || c.BroadcastRate.RPS <= 0 || c.BroadcastRate.Burst <= 0 {
 		return errors.New("rate limits must be positive")
 	}
@@ -173,6 +183,7 @@ func (c *Config) Validate() error {
 		return errors.New("at least one registered wallet is required")
 	}
 	seenWallets := make(map[string]struct{}, len(c.Wallets))
+	seenUFVKs := make(map[string]string, len(c.Wallets))
 	ufvkPrefix := c.Network.UFVKHRP() + "1"
 	for i := range c.Wallets {
 		w := &c.Wallets[i]
@@ -188,6 +199,11 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(w.UFVK, ufvkPrefix) {
 			return fmt.Errorf("wallet %q UFVK does not match %s", w.WalletID, c.Network)
 		}
+		fingerprint := w.UFVKFingerprint()
+		if otherWalletID, exists := seenUFVKs[fingerprint]; exists {
+			return fmt.Errorf("wallet %q duplicates the UFVK configured for wallet %q", w.WalletID, otherWalletID)
+		}
+		seenUFVKs[fingerprint] = w.WalletID
 		if w.BirthdayHeight < 0 {
 			return fmt.Errorf("wallet %q birthday_height must be non-negative", w.WalletID)
 		}
@@ -276,7 +292,7 @@ func readJSONFile(path string, out any) error {
 }
 
 func validateEnvironment() error {
-	for _, key := range []string{"JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", "JUNO_GATEWAY_MAX_CONFIRMATIONS", "JUNO_GATEWAY_MAX_SCANNER_LAG", "JUNO_GATEWAY_MAX_JSON_BODY_BYTES", "JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", "JUNO_GATEWAY_READ_RATE_BURST", "JUNO_GATEWAY_BROADCAST_RATE_BURST", "JUNO_GATEWAY_BACKFILL_BATCH_SIZE"} {
+	for _, key := range []string{"JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", "JUNO_GATEWAY_MAX_CONFIRMATIONS", "JUNO_GATEWAY_MAX_SCANNER_LAG", "JUNO_GATEWAY_MAX_JSON_BODY_BYTES", "JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", "JUNO_GATEWAY_READ_RATE_BURST", "JUNO_GATEWAY_BROADCAST_RATE_BURST", "JUNO_GATEWAY_BACKFILL_BATCH_SIZE", "JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS"} {
 		if value := os.Getenv(key); value != "" {
 			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
 				return fmt.Errorf("%s must be an integer", key)

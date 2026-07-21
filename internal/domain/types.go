@@ -83,6 +83,7 @@ type ScannerHealth struct {
 	Status          string `json:"status"`
 	Network         string `json:"network,omitempty"`
 	UAHRP           string `json:"ua_hrp,omitempty"`
+	EventEpoch      string `json:"event_epoch,omitempty"`
 	Ready           *bool  `json:"ready,omitempty"`
 	NodeHeight      *int64 `json:"node_height,omitempty"`
 	ScannedHeight   *int64 `json:"scanned_height,omitempty"`
@@ -93,14 +94,31 @@ type ScannerHealth struct {
 }
 
 type Balance struct {
-	AvailableZat       int64 `json:"available_zat"`
-	PendingIncomingZat int64 `json:"pending_incoming_zat"`
-	PendingOutgoingZat int64 `json:"pending_outgoing_zat"`
-	TotalUnspentZat    int64 `json:"total_unspent_zat"`
-	MinConfirmations   int64 `json:"min_confirmations"`
-	AsOfNodeHeight     int64 `json:"as_of_node_height"`
-	AsOfScannerHeight  int64 `json:"as_of_scanner_height"`
-	ScannerLag         int64 `json:"scanner_lag"`
+	WalletID           string `json:"-"`
+	RecipientAddress   string `json:"-"`
+	AvailableZat       int64  `json:"available_zat"`
+	PendingIncomingZat int64  `json:"pending_incoming_zat"`
+	PendingOutgoingZat int64  `json:"pending_outgoing_zat"`
+	TotalUnspentZat    int64  `json:"total_unspent_zat"`
+	MinConfirmations   int64  `json:"min_confirmations"`
+	AsOfNodeHeight     int64  `json:"as_of_node_height"`
+	AsOfScannerHeight  int64  `json:"as_of_scanner_height"`
+	ScannerLag         int64  `json:"scanner_lag"`
+}
+
+func (b Balance) ValidFor(walletID, recipientAddress string, minConfirmations int64) bool {
+	if b.WalletID != walletID || b.RecipientAddress != recipientAddress || b.MinConfirmations != minConfirmations ||
+		b.AvailableZat < 0 || b.PendingIncomingZat < 0 || b.PendingOutgoingZat < 0 || b.TotalUnspentZat < 0 ||
+		b.MinConfirmations < 0 || b.AsOfNodeHeight < 0 || b.AsOfScannerHeight < 0 || b.ScannerLag < 0 ||
+		b.AsOfScannerHeight > b.AsOfNodeHeight || b.ScannerLag != b.AsOfNodeHeight-b.AsOfScannerHeight ||
+		b.AvailableZat > b.TotalUnspentZat || b.PendingIncomingZat > b.TotalUnspentZat || b.PendingOutgoingZat > b.TotalUnspentZat {
+		return false
+	}
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if b.AvailableZat > maxInt64-b.PendingIncomingZat || b.AvailableZat+b.PendingIncomingZat > maxInt64-b.PendingOutgoingZat {
+		return false
+	}
+	return b.AvailableZat+b.PendingIncomingZat+b.PendingOutgoingZat == b.TotalUnspentZat
 }
 
 type ScannerEvent struct {
@@ -114,15 +132,17 @@ type ScannerEvent struct {
 type EventsPage struct {
 	Events     []ScannerEvent
 	NextCursor int64
+	EventEpoch string
 }
 
 type BackfillStatus struct {
-	WalletID       string    `json:"wallet_id"`
-	BirthdayHeight int64     `json:"birthday_height"`
-	NextHeight     int64     `json:"next_height"`
-	TargetHeight   int64     `json:"target_height"`
-	State          string    `json:"state"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	WalletID        string    `json:"wallet_id"`
+	UFVKFingerprint string    `json:"ufvk_fingerprint"`
+	BirthdayHeight  int64     `json:"birthday_height"`
+	NextHeight      int64     `json:"next_height"`
+	TargetHeight    int64     `json:"target_height"`
+	State           string    `json:"state"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type EventFilter struct {
@@ -145,6 +165,8 @@ type Transaction struct {
 
 type Node interface {
 	Tip(context.Context) (NodeTip, error)
+	BlockHash(context.Context, int64) (string, error)
+	DecodeRawTransaction(context.Context, string) (string, error)
 	Transaction(context.Context, string, bool) (Transaction, bool, error)
 	Broadcast(context.Context, string) (string, error)
 }
