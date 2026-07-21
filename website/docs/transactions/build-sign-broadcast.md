@@ -18,16 +18,33 @@ docker compose --profile operator run --rm txbuild send \
   --to 'j1...' \
   --amount-zat 250000 \
   --change-address 'j1...' \
+  --fee-multiplier 20 \
   --minconf 100 > tmp/withdrawal-1842/txplan.json
 ```
 
 The example is mainnet. Use coin type `8134` on testnet and `8135` on regtest; `0` asks the planner to infer it.
 
-Inspect the destination, amount, change, fee, anchor, and expiry height before approval. The default expiry offset is 40 blocks. Choose the final fee before signing; Orchard transactions do not support normal fee bumping.
+The bundled `junocashd` 0.9.12 policy is `100,000 × max(2, logical actions)` zat. The current planner's 5,000-zat base therefore requires `--fee-multiplier 20` for `send`, `send-many`, `sweep`, `consolidate`, and `rebalance` on every network. Recheck this multiplier when changing either component version.
+
+Inspect the destination, amount, change, `fee_zat`, anchor, and expiry height before approval. The default expiry offset is 40 blocks. Choose the final fee before signing; Orchard transactions do not support normal fee bumping.
 
 Use a dedicated gateway-registered change address under the spending wallet's UFVK. Never use a customer recipient or an address outside that UFVK for change, and never credit internal change as a customer deposit.
 
 Serialize planning per wallet, or atomically reserve every selected note nullifier in the exchange withdrawal ledger before approval. Concurrent plans must not select the same notes.
+
+### Planning controls
+
+| Flag | Use |
+| --- | --- |
+| `--fee-multiplier 20` | Match the bundled node's conventional fee policy. |
+| `--fee-add-zat N` | Add an explicit amount above the multiplied fee. |
+| `--min-change-zat N` | Add smaller change to the fee instead of creating a dust note. |
+| `--min-note-zat N` | Exclude smaller notes from selection. |
+| `--minconf N` | Set the minimum input confirmations; use the exchange's spend policy. |
+| `--expiry-offset N` | Set blocks until expiry; default `40`. |
+| `--max-spends N` | Bound inputs for consolidation commands. |
+
+Output and selected-input counts affect the calculated fee automatically. Run `juno-txbuild <command> -h` for that command's complete input flags.
 
 ## 2. Sign offline
 

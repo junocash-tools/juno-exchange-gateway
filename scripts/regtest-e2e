@@ -711,9 +711,13 @@ log "E2E withdrawal: online plan, offline sign, prevalidated raw broadcast"
   --to "$destination_address" \
   --amount-zat 1000000 \
   --change-address "$deposit_address" \
+  --fee-multiplier 20 \
   --minconf 100 >"$run_dir/withdrawal.txplan.json"
 assert_jq "$run_dir/withdrawal.txplan.json" \
-  '.version == "v0" and .kind == "withdrawal" and .outputs[0].amount_zat == "1000000"' \
+  '.version == "v0"
+    and .kind == "withdrawal"
+    and .outputs[0].amount_zat == "1000000"
+    and .fee_zat == "200000"' \
   "txbuild returned an invalid withdrawal plan"
 
 docker create \
@@ -813,6 +817,7 @@ log "Withdrawal expiry: payload conflict, dropped mempool transaction, and scann
   --to "$destination_address" \
   --amount-zat 500000 \
   --change-address "$deposit_address" \
+  --fee-multiplier 20 \
   --minconf 100 \
   --expiry-offset 4 >"$run_dir/expiry.txplan.json"
 expiry_height="$(jq -er '.expiry_height' "$run_dir/expiry.txplan.json")"
