@@ -353,7 +353,8 @@ jq -n \
 "$repo_root/scripts/check-clean-sources"
 assert_source_refs
 
-gateway_image_id="$("${compose[@]}" images -q gateway)"
+gateway_image_ref="$("${compose[@]}" config --format json | jq -er '.services.gateway.image')"
+gateway_image_id="$(docker image inspect --format '{{.Id}}' "$gateway_image_ref")"
 [[ -n "$gateway_image_id" ]] || fail "could not resolve the built gateway image"
 gateway_runtime_uid="$(docker run --rm --entrypoint /usr/bin/id "$gateway_image_id" -u)"
 gateway_runtime_gid="$(docker run --rm --entrypoint /usr/bin/id "$gateway_image_id" -g)"
