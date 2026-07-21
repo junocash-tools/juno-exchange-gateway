@@ -1,0 +1,12 @@
+.git
+.env
+bin
+tmp
+installation-state
+website/node_modules
+website/build
+config/auth.json
+config/wallets.json
+*.db
+*.db-shm
+*.db-wal

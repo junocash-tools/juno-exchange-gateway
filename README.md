@@ -1,19 +1,43 @@
 # Juno Exchange Gateway
 
-`juno-exchange-gateway` is the single public, watch-only HTTP API for a Juno Cash exchange integration. It exposes node tip, registered address allocation and balances, durable-cursor deposits, transaction lookup, and signed raw transaction broadcast. It never accepts or stores seeds, spending keys, signing requests, recipients, amounts, or transaction plans.
+Watch-only HTTP API for Juno Cash exchange deposits and withdrawals. It supports mainnet, testnet, and regtest, and exposes:
 
-The supported networks are `mainnet`, `testnet`, and `regtest`. Every configured wallet is registered by UFVK; balance and deposit results are limited to addresses allocated by this gateway for that wallet. A wallet ID is permanently bound to the SHA-256 fingerprint of its first UFVK. UFVK replacement, duplicate UFVKs, and later birthday heights are rejected; an earlier birthday safely rewinds backfill.
+- registered address allocation and balances
+- durable-cursor deposit lifecycle events
+- chain tip and transaction lookup
+- signed raw transaction broadcast
 
-Run all core tests with:
+The online gateway never accepts seeds, spending keys, recipients, amounts, signing requests, or transaction plans.
+
+## Quickstart
+
+Create `config/wallets.json` and `config/auth.json` from the examples, then set their absolute host paths in `.env`. Create a separate installation-state bind and initialize it once:
 
 ```sh
-go test ./...
+cp .env.example .env
+sudo chown 10001:10001 config/wallets.json config/auth.json
+sudo chmod 0600 config/wallets.json config/auth.json
+sudo install -d -o 10001 -g 10001 -m 0700 installation-state
+docker compose run --no-deps --rm gateway init \
+  --acknowledge I_UNDERSTAND_THIS_CREATES_A_NEW_JUNO_INSTALLATION
+docker compose up -d
+docker compose ps
 ```
 
-Runtime configuration is environment-based. `JUNO_GATEWAY_WALLETS_FILE` points to a JSON file containing `wallets`, and `JUNO_GATEWAY_AUTH_FILE` points to a JSON file containing scoped bearer credentials. Outside regtest, authentication is mandatory. `JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS` defaults to `10000`; transaction enrichment fails explicitly instead of truncating above this cap. The full configuration and operations reference is published with the appliance documentation.
+The gateway image always runs as UID:GID `10001:10001`. The owner-only wallet, auth, and installation-state paths must be readable, and the state directory writable, by that identity. Adjust the host mapping only when Docker user-namespace remapping is enabled; never make these paths world-readable or world-writable.
 
-The gateway SQLite state contains the allocated-address registry, diversifier counters, opaque-cursor key, wallet/UFVK binding, backfill mirror, and broadcast idempotency receipts. Back it up together with the scanner database while the appliance is stopped, or use a storage snapshot with SQLite WAL consistency. Scanner data is recoverable from `junocashd` using the same UFVK and `birthday_height`; recovery stays unready until persisted backfill reaches the node tip. A fresh scanner database has a new event epoch, so clients receive `cursor_reset_required` and restart deposit polling without a cursor.
+`init` refuses an existing installation. Normal serve requires the external manifest and a gateway database bound to its installation ID. The manifest stores network, wallet IDs, UFVK fingerprints, and crash-safe address high-water marks; it never stores raw UFVKs or keys. Keep it private and back it up separately from Compose volumes.
 
-Deposit cursors are signed and bound to wallet, scanner event epoch, and the `address`, `txid`, and `status` filters. Keep those filters unchanged while advancing a cursor; otherwise restart without it.
+The gateway reserves each address index in the manifest before writing the database. Failures may skip indices but cannot reuse them. A missing, incomplete, stale, or mismatched gateway database fails closed. Prefer a consistent database backup; the audited `recovery-checksum` and `recover` commands can rebuild the deterministic address registry from the same UFVKs up to verified high-water marks. Customer ownership and labels still come from the exchange ledger.
 
-Gateway state is not reconstructible from the scanner: losing it loses address ownership and risks reissuing diversifier index zero. Startup therefore refuses to recreate a wallet when the scanner still knows that wallet. Restore the gateway backup before allocation resumes.
+Scanner data is reproducible from the same UFVK, birthday, network, and canonical chain. Every scanner process start rotates the event epoch. Old cursors then return `cursor_reset_required`; restart without a cursor and replay by stable deposit identity.
+
+## Test
+
+```sh
+make test
+```
+
+The release test includes unit checks, Compose validation, documentation build, Postgres smoke coverage, and a manual regtest deposit/withdrawal/reorg/recovery flow.
+
+Documentation: [junocash-tools.github.io/juno-exchange-gateway](https://junocash-tools.github.io/juno-exchange-gateway/)

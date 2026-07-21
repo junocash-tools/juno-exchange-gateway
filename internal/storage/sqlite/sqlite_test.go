@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -12,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/storage"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/storage"
 )
 
 func fingerprint(value string) string {
@@ -84,14 +85,78 @@ func TestAllocateAddressIsAtomicAndPersistent(t *testing.T) {
 	}
 }
 
+func TestExactAddressAllocationAdvancesPastGaps(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.EnsureWallet(ctx, "hot", "regtest", fingerprint("hot-ufvk"), 0); err != nil {
+		t.Fatal(err)
+	}
+	derive := func(index uint32) (string, error) { return fmt.Sprintf("jregtest1exact%d", index), nil }
+	got, err := s.AllocateAddressAt(ctx, "hot", 5, "recovered", derive)
+	if err != nil || got.DiversifierIndex != 5 {
+		t.Fatalf("exact allocation=%+v err=%v", got, err)
+	}
+	got, err = s.AllocateAddressAt(ctx, "hot", 5, "ignored-on-replay", derive)
+	if err != nil || got.Label != "recovered" {
+		t.Fatalf("exact replay=%+v err=%v", got, err)
+	}
+	got, err = s.AllocateAddress(ctx, "hot", "next", derive)
+	if err != nil || got.DiversifierIndex != 6 {
+		t.Fatalf("allocation after gap=%+v err=%v", got, err)
+	}
+	if _, err := s.AllocateAddressAt(ctx, "hot", 5, "", func(uint32) (string, error) { return "jregtest1different", nil }); err == nil {
+		t.Fatal("expected conflicting exact mapping rejection")
+	}
+}
+
+func TestInstallationBindingAndInitializableGuard(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.AssertInitializable(ctx); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("%064x", 1)
+	if err := s.BeginInstallationRecovery(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindInstallation(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := s.InstallationID(ctx)
+	if err != nil || !ok || got != id {
+		t.Fatalf("installation binding=%q ok=%v err=%v", got, ok, err)
+	}
+	if err := s.BindInstallation(ctx, id); err != nil {
+		t.Fatalf("same binding should be idempotent: %v", err)
+	}
+	if err := s.BindInstallation(ctx, fmt.Sprintf("%064x", 2)); err == nil {
+		t.Fatal("expected installation binding mismatch")
+	}
+	if err := s.AssertInitializable(ctx); err == nil {
+		t.Fatal("bound database must not be initializable")
+	}
+}
+
+func TestRecoveryRejectsUnmarkedNonemptyDatabase(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.EnsureWallet(ctx, "hot", "regtest", fingerprint("legacy"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BeginInstallationRecovery(ctx, fmt.Sprintf("%064x", 1)); err == nil {
+		t.Fatal("expected unmarked nonempty recovery rejection")
+	}
+}
+
 func TestReceiptClaimReplayConflictAndLease(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	claim, err := s.ClaimReceipt(ctx, "withdrawal-1", "digest-a", "txid", now, time.Minute)
-	if err != nil || claim.State != storage.ClaimAcquired {
+	if err != nil || claim.State != storage.ClaimAcquired || claim.Receipt.Generation != 1 {
 		t.Fatalf("claim=%+v err=%v", claim, err)
 	}
+	firstGeneration := claim.Receipt.Generation
 	claim, _ = s.ClaimReceipt(ctx, "withdrawal-1", "digest-a", "txid", now.Add(time.Second), time.Minute)
 	if claim.State != storage.ClaimInProgress {
 		t.Fatalf("state=%s", claim.State)
@@ -101,15 +166,40 @@ func TestReceiptClaimReplayConflictAndLease(t *testing.T) {
 		t.Fatalf("state=%s", claim.State)
 	}
 	claim, _ = s.ClaimReceipt(ctx, "withdrawal-1", "digest-a", "txid", now.Add(2*time.Minute), time.Minute)
-	if claim.State != storage.ClaimAcquired {
+	if claim.State != storage.ClaimAcquired || claim.Receipt.Generation != firstGeneration+1 {
 		t.Fatalf("expired lease state=%s", claim.State)
 	}
-	if err := s.CompleteReceipt(ctx, "withdrawal-1", "digest-a", 202, []byte(`{"txid":"a"}`), now); err != nil {
+	secondGeneration := claim.Receipt.Generation
+	if err := s.CompleteReceipt(ctx, "withdrawal-1", "digest-a", firstGeneration, 202, []byte(`{"txid":"stale"}`), now); err == nil {
+		t.Fatal("stale claimant completed a reclaimed receipt")
+	}
+	if err := s.RenewReceipt(ctx, "withdrawal-1", "digest-a", firstGeneration, now); err == nil {
+		t.Fatal("stale claimant renewed a reclaimed receipt")
+	}
+	if err := s.AbandonReceipt(ctx, "withdrawal-1", "digest-a", firstGeneration, now); err == nil {
+		t.Fatal("stale claimant abandoned a reclaimed receipt")
+	}
+	if err := s.RenewReceipt(ctx, "withdrawal-1", "digest-a", secondGeneration, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteReceipt(ctx, "withdrawal-1", "digest-a", secondGeneration, 202, []byte(`{"txid":"a"}`), now); err != nil {
 		t.Fatal(err)
 	}
 	claim, _ = s.ClaimReceipt(ctx, "withdrawal-1", "digest-a", "txid", now, time.Minute)
 	if claim.State != storage.ClaimReplay || claim.Receipt.HTTPStatus != 202 || string(claim.Receipt.ResponseJSON) != `{"txid":"a"}` {
 		t.Fatalf("replay=%+v", claim)
+	}
+
+	abandoned, err := s.ClaimReceipt(ctx, "withdrawal-2", "digest-c", "txid", now, time.Minute)
+	if err != nil || abandoned.State != storage.ClaimAcquired {
+		t.Fatalf("abandoned claim=%+v err=%v", abandoned, err)
+	}
+	if err := s.AbandonReceipt(ctx, "withdrawal-2", "digest-c", abandoned.Receipt.Generation, now); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := s.ClaimReceipt(ctx, "withdrawal-2", "digest-c", "txid", now.Add(time.Second), time.Minute)
+	if err != nil || reclaimed.State != storage.ClaimAcquired || reclaimed.Receipt.Generation <= abandoned.Receipt.Generation {
+		t.Fatalf("reclaimed=%+v err=%v", reclaimed, err)
 	}
 }
 
@@ -204,8 +294,12 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY,value BLOB NOT NULL);`)
 		t.Fatalf("bound wallet=%+v found=%v err=%v", wallet, found, err)
 	}
 	var version int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 2 {
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 3 {
 		t.Fatalf("version=%d err=%v", version, err)
+	}
+	var generation int64
+	if err := s.db.QueryRow(`SELECT claim_generation FROM idempotency_receipts LIMIT 1`).Scan(&generation); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("receipt generation migration: %v", err)
 	}
 }
 

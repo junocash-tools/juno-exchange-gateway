@@ -3,16 +3,18 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
 )
 
 type Client struct {
@@ -24,7 +26,24 @@ type Client struct {
 }
 
 func New(rawURL, user, password string, timeout time.Duration) *Client {
-	return &Client{url: strings.TrimRight(rawURL, "/"), user: user, password: password, http: &http.Client{Timeout: timeout}}
+	return &Client{url: strings.TrimRight(rawURL, "/"), user: user, password: password, http: directHTTPClient(timeout)}
+}
+
+func directHTTPClient(timeout time.Duration) *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		transport = transport.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	transport.Proxy = nil
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 type rpcRequest struct {
@@ -51,7 +70,8 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 	if params == nil {
 		params = []any{}
 	}
-	body, err := json.Marshal(rpcRequest{JSONRPC: "1.0", ID: c.nextID.Add(1), Method: method, Params: params})
+	requestID := c.nextID.Add(1)
+	body, err := json.Marshal(rpcRequest{JSONRPC: "1.0", ID: requestID, Method: method, Params: params})
 	if err != nil {
 		return errors.New("encode node RPC request")
 	}
@@ -76,6 +96,9 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 	var decoded rpcResponse
 	if err := json.Unmarshal(raw, &decoded); err != nil {
 		return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("invalid node RPC response")}
+	}
+	if decoded.ID != requestID {
+		return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node RPC response ID does not match request")}
 	}
 	if decoded.Error != nil {
 		return decoded.Error
@@ -125,16 +148,7 @@ func (c *Client) BlockHash(ctx context.Context, height int64) (string, error) {
 	if err := c.call(ctx, "getblockhash", []any{height}, &hash); err != nil {
 		return "", err
 	}
-	hash = strings.ToLower(strings.TrimSpace(hash))
-	if len(hash) != 64 {
-		return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node returned invalid block hash")}
-	}
-	for _, character := range hash {
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node returned invalid block hash")}
-		}
-	}
-	return hash, nil
+	return normalizeHexIdentifier(hash, "block hash")
 }
 
 func (c *Client) DecodeRawTransaction(ctx context.Context, rawTxHex string) (string, error) {
@@ -144,16 +158,7 @@ func (c *Client) DecodeRawTransaction(ctx context.Context, rawTxHex string) (str
 	if err := c.call(ctx, "decoderawtransaction", []any{rawTxHex}, &decoded); err != nil {
 		return "", err
 	}
-	txid := strings.ToLower(strings.TrimSpace(decoded.TxID))
-	if len(txid) != 64 {
-		return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node decoder returned invalid transaction ID")}
-	}
-	for _, character := range txid {
-		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
-			return "", &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node decoder returned invalid transaction ID")}
-		}
-	}
-	return txid, nil
+	return normalizeHexIdentifier(decoded.TxID, "transaction ID")
 }
 
 func (c *Client) Transaction(ctx context.Context, txid string, includeRaw bool) (domain.Transaction, bool, error) {
@@ -179,14 +184,30 @@ func (c *Client) Transaction(ctx context.Context, txid string, includeRaw bool) 
 		}
 		return domain.Transaction{}, false, err
 	}
-	out := domain.Transaction{TxID: strings.ToLower(strings.TrimSpace(raw.TxID)), Confirmations: raw.Confirmations, BlockHash: raw.BlockHash}
+	if raw.Size < 0 || raw.ExpiryHeight < 0 {
+		return domain.Transaction{}, false, invalidNodeResponse("node returned negative transaction metadata")
+	}
+	out := domain.Transaction{TxID: strings.ToLower(strings.TrimSpace(raw.TxID)), Confirmations: raw.Confirmations}
 	if out.TxID == "" {
 		out.TxID = txid
 	}
-	if out.TxID != txid {
-		return domain.Transaction{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("node returned mismatched transaction ID")}
+	normalizedTxID, err := normalizeHexIdentifier(out.TxID, "transaction ID")
+	if err != nil {
+		return domain.Transaction{}, false, err
+	}
+	if normalizedTxID != txid {
+		return domain.Transaction{}, false, invalidNodeResponse("node returned mismatched transaction ID")
+	}
+	out.TxID = normalizedTxID
+	if out.Confirmations < 0 {
+		out.Confirmations = 0
 	}
 	if raw.BlockHash != "" {
+		blockHash, err := normalizeHexIdentifier(raw.BlockHash, "block hash")
+		if err != nil {
+			return domain.Transaction{}, false, err
+		}
+		out.BlockHash = blockHash
 		if raw.Confirmations > 0 {
 			out.State = "confirmed"
 		} else {
@@ -196,13 +217,23 @@ func (c *Client) Transaction(ctx context.Context, txid string, includeRaw bool) 
 			Height int64 `json:"height"`
 			Time   int64 `json:"time"`
 		}
-		if err := c.call(ctx, "getblockheader", []any{raw.BlockHash, true}, &header); err != nil {
+		if err := c.call(ctx, "getblockheader", []any{blockHash, true}, &header); err != nil {
 			return domain.Transaction{}, false, err
+		}
+		if header.Height < 0 || header.Time < 0 {
+			return domain.Transaction{}, false, invalidNodeResponse("node returned negative block metadata")
 		}
 		out.BlockHeight = &header.Height
 		out.BlockTime = &header.Time
 	} else {
-		out.State = "mempool"
+		if raw.Confirmations > 0 {
+			return domain.Transaction{}, false, invalidNodeResponse("confirmed transaction is missing its block hash")
+		}
+		if raw.Confirmations < 0 {
+			out.State = "orphaned"
+		} else {
+			out.State = "mempool"
+		}
 	}
 	if raw.Size > 0 {
 		out.SerializedSize = &raw.Size
@@ -216,9 +247,33 @@ func (c *Client) Transaction(ctx context.Context, txid string, includeRaw bool) 
 	}
 	out.OrchardActions = &actions
 	if includeRaw {
-		out.RawTxHex = raw.Hex
+		rawHex := strings.TrimSpace(raw.Hex)
+		if rawHex == "" || len(rawHex)%2 != 0 {
+			return domain.Transaction{}, false, invalidNodeResponse("node returned invalid raw transaction hex")
+		}
+		if _, err := hex.DecodeString(rawHex); err != nil {
+			return domain.Transaction{}, false, invalidNodeResponse("node returned invalid raw transaction hex")
+		}
+		out.RawTxHex = strings.ToLower(rawHex)
 	}
 	return out, true, nil
+}
+
+func normalizeHexIdentifier(value, label string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != 64 {
+		return "", invalidNodeResponse("node returned invalid " + label)
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return "", invalidNodeResponse("node returned invalid " + label)
+		}
+	}
+	return value, nil
+}
+
+func invalidNodeResponse(message string) error {
+	return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New(message)}
 }
 
 func (c *Client) Broadcast(ctx context.Context, rawTxHex string) (string, error) {
@@ -231,9 +286,36 @@ func (c *Client) Broadcast(ctx context.Context, rawTxHex string) (string, error)
 			if rpcErr.Code == -28 || strings.Contains(message, "warming up") || strings.Contains(message, "loading block") {
 				return "", &domain.UpstreamError{Kind: "unavailable", Err: errors.New("node is not ready")}
 			}
-			return "", &domain.UpstreamError{Kind: "rejected", Err: errors.New("node rejected transaction")}
+			if rpcErr.Code == -27 || isAlreadyKnownMessage(message) {
+				return "", &domain.UpstreamError{Kind: "already_known", Err: errors.New("node already knows transaction")}
+			}
+			if rpcErr.Code == -22 || isDefinitiveConsensusRejection(rpcErr.Code, message) {
+				return "", &domain.UpstreamError{Kind: "rejected", Err: errors.New("node definitively rejected transaction")}
+			}
+			return "", &domain.UpstreamError{Kind: "uncertain", Err: errors.New("node did not return a definitive broadcast outcome")}
 		}
 		return "", err
 	}
 	return strings.ToLower(strings.TrimSpace(txid)), nil
+}
+
+func isAlreadyKnownMessage(message string) bool {
+	for _, marker := range []string{"txn-already-in-mempool", "txn-already-known", "already in block chain", "already in blockchain", "already known", "already have transaction"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDefinitiveConsensusRejection(code int, message string) bool {
+	if code != -26 {
+		return false
+	}
+	prefix, _, found := strings.Cut(strings.TrimSpace(message), ":")
+	if !found {
+		return false
+	}
+	rejectCode, err := strconv.Atoi(strings.TrimSpace(prefix))
+	return err == nil && rejectCode == 0x10
 }

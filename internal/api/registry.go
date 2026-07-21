@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/config"
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/storage"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/config"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/storage"
 )
 
 type walletRegistry struct {
@@ -104,7 +105,22 @@ func (r *walletRegistry) completeThrough(ctx context.Context, height int64) (boo
 }
 
 func (r *walletRegistry) backfillOne(ctx context.Context, tipHeight, batchSize int64) (bool, error) {
-	for walletID, configured := range r.wallets {
+	if batchSize < 1 {
+		return false, errors.New("wallet backfill batch size must be positive")
+	}
+	type candidate struct {
+		walletID  string
+		status    domain.BackfillStatus
+		remaining int64
+	}
+	walletIDs := make([]string, 0, len(r.wallets))
+	for walletID := range r.wallets {
+		walletIDs = append(walletIDs, walletID)
+	}
+	sort.Strings(walletIDs)
+	candidates := make([]candidate, 0, len(walletIDs))
+	for _, walletID := range walletIDs {
+		configured := r.wallets[walletID]
 		status, ok, err := r.scanner.BackfillStatus(ctx, walletID)
 		if err != nil {
 			return false, err
@@ -121,19 +137,37 @@ func (r *walletRegistry) backfillOne(ctx context.Context, tipHeight, batchSize i
 		if status.State == "complete" && status.NextHeight > tipHeight {
 			continue
 		}
-		next, err := r.scanner.Backfill(ctx, walletID, tipHeight, batchSize)
-		if err != nil {
-			return false, fmt.Errorf("wallet %s backfill: %w", walletID, err)
+		remaining := tipHeight - status.NextHeight + 1
+		if remaining < 1 {
+			remaining = 1
 		}
-		if status.NextHeight <= tipHeight && next <= status.NextHeight {
-			return false, errors.New("scanner wallet backfill did not advance")
-		}
-		if err := r.store.SetBackfillProgress(ctx, walletID, next); err != nil {
-			return false, err
-		}
-		return true, nil
+		candidates = append(candidates, candidate{walletID: walletID, status: status, remaining: remaining})
 	}
-	return false, nil
+	if len(candidates) == 0 {
+		return false, nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].remaining != candidates[j].remaining {
+			return candidates[i].remaining > candidates[j].remaining
+		}
+		return candidates[i].walletID < candidates[j].walletID
+	})
+	selected := candidates[0]
+	effectiveBatch := batchSize
+	if effectiveBatch > selected.remaining {
+		effectiveBatch = selected.remaining
+	}
+	next, err := r.scanner.Backfill(ctx, selected.walletID, tipHeight, effectiveBatch)
+	if err != nil {
+		return false, fmt.Errorf("wallet %s backfill: %w", selected.walletID, err)
+	}
+	if selected.status.NextHeight <= tipHeight && next <= selected.status.NextHeight {
+		return false, errors.New("scanner wallet backfill did not advance")
+	}
+	if err := r.store.SetBackfillProgress(ctx, selected.walletID, next); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *walletRegistry) allocate(ctx context.Context, walletID, label string) (storage.Address, error) {

@@ -11,7 +11,7 @@ title: Troubleshooting
 | Balance `404` | Wallet and allocation record | Only gateway-owned addresses are queryable |
 | Deposit appears but is not final | Confirmations and chain height | Wait for 100 confirmations by default |
 | Deposit becomes unconfirmed/orphaned | Reorg lifecycle event | Apply the compensating ledger action |
-| Cursor rejected | Wallet mismatch or restored gateway state | Load that wallet's durable checkpoint or reconcile |
+| Cursor rejected | Wallet/filter mismatch or scanner process restart | Restore the original filters, or restart without a cursor and replay by stable deposit identity when instructed |
 | Broadcast `409` | Idempotency state | Reuse identical payload, or use a new key for a new attempt |
 | Broadcast result uncertain | `retryable`, expected txid lookup | Retry the same key and payload |
 | Transaction `404` | txid, node sync, transaction index | Verify lowercase txid and indexed node |

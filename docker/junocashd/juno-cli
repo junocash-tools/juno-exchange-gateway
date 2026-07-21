@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+chain="${JUNO_NETWORK:-regtest}"
+datadir="${JUNO_DATADIR:-/data}"
+rpcuser="${JUNO_RPC_USER:?JUNO_RPC_USER is required}"
+rpcpass="${JUNO_RPC_PASSWORD:?JUNO_RPC_PASSWORD is required}"
+rpcport="${JUNO_RPC_PORT:-8232}"
+
+case "$chain" in
+  regtest) chainflag="-regtest" ;;
+  testnet) chainflag="-testnet" ;;
+  mainnet) chainflag="" ;;
+  *)
+    echo "unknown JUNO_NETWORK: $chain (expected regtest|testnet|mainnet)" >&2
+    exit 2
+    ;;
+esac
+
+exec junocash-cli $chainflag \
+  "-datadir=$datadir" \
+  "-rpcuser=$rpcuser" \
+  "-rpcpassword=$rpcpass" \
+  "-rpcport=$rpcport" \
+  "$@"

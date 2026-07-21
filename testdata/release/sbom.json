@@ -1,0 +1,14 @@
+{
+  "linux/amd64": {
+    "SPDX": {
+      "spdxVersion": "SPDX-2.3",
+      "packages": [{"name": "gateway"}]
+    }
+  },
+  "linux/arm64": {
+    "SPDX": {
+      "spdxVersion": "SPDX-2.3",
+      "packages": [{"name": "gateway"}]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "linux/amd64": {
+    "SLSA": {
+      "buildType": "https://mobyproject.org/buildkit@v1",
+      "materials": [{"uri": "pkg:docker/debian@bookworm"}]
+    }
+  },
+  "linux/arm64": {
+    "SLSA": {
+      "buildType": "https://mobyproject.org/buildkit@v1",
+      "materials": []
+    }
+  }
+}

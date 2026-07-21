@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+command -v jq >/dev/null || {
+  echo "jq is required to validate bundle.lock.json" >&2
+  exit 1
+}
+
+jq -e '
+  .schema_version == 1 and
+  .gateway.revision_source == "release-tag-target" and
+  .api.http_version == "v1" and
+  .api.openapi_version == "3.1.0" and
+  .api.contract_version == "1.0.0" and
+  .api.installation_manifest_version == 1 and
+  .api.release_provenance_version == 1 and
+  .state_schemas.gateway_sqlite == 3 and
+  .state_schemas.scanner_migrations_through == "0016" and
+  .supported_networks == ["mainnet", "testnet", "regtest"] and
+  .supported_platforms.appliance_native == ["linux/amd64"] and
+  .supported_platforms.node == ["linux/amd64"] and
+  ([.components | keys[]] == ["addrgen", "scanner", "txbuild", "txsign"]) and
+  all(.components[]; (.revision | type == "string" and test("^[0-9a-f]{40}$"))) and
+  (.node_artifact.sha256 | test("^[0-9a-f]{64}$")) and
+  .node_artifact.platform == "linux/amd64" and
+  all((.toolchain_images + .runtime_base_images)[]; test("@sha256:[0-9a-f]{64}$")) and
+  all(.service_images[]; test("@sha256:[0-9a-f]{64}$")) and
+  (.release_tooling.buildx_version | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) and
+  all([
+    .release_tooling.buildkit_image,
+    .release_tooling.qemu_image,
+    .release_tooling.sbom_generator_image
+  ][]; test("@sha256:[0-9a-f]{64}$"))
+' bundle.lock.json >/dev/null
+
+docker_base_images=()
+while IFS= read -r image; do
+  docker_base_images+=("$image")
+done < <(
+  awk '$1 == "FROM" {
+    for (i = 2; i <= NF; i++) {
+      if ($i !~ /^--platform=/) {
+        print $i
+        break
+      }
+    }
+  }' docker/*/Dockerfile | LC_ALL=C sort -u
+)
+for image in "${docker_base_images[@]}"; do
+  if [[ "$image" != *@sha256:* ]]; then
+    echo "Dockerfile base image is not digest-pinned: $image" >&2
+    exit 1
+  fi
+done
+
+locked_base_images=()
+while IFS= read -r image; do
+  locked_base_images+=("$image")
+done < <(
+  jq -r '(.toolchain_images + .runtime_base_images)[]' bundle.lock.json | LC_ALL=C sort -u
+)
+if [[ "$(printf '%s\n' "${docker_base_images[@]}")" != "$(printf '%s\n' "${locked_base_images[@]}")" ]]; then
+  echo "Dockerfile base images differ from bundle.lock.json" >&2
+  diff -u <(printf '%s\n' "${locked_base_images[@]}") <(printf '%s\n' "${docker_base_images[@]}") || true
+  exit 1
+fi
+
+workflow_value() {
+  awk -v key="$1" '$1 == key ":" {print $2; exit}' .github/workflows/images.yml
+}
+
+check_equal() {
+  local name="$1"
+  local actual="$2"
+  local expected="$3"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$name differs from bundle.lock.json: actual=$actual expected=$expected" >&2
+    exit 1
+  fi
+}
+
+check_equal JUNO_SCAN_REPOSITORY "$(workflow_value JUNO_SCAN_REPOSITORY)" "$(jq -r '.components.scanner.repository_slug' bundle.lock.json)"
+check_equal JUNO_SCAN_REF "$(workflow_value JUNO_SCAN_REF)" "$(jq -r '.components.scanner.revision' bundle.lock.json)"
+check_equal JUNO_ADDRGEN_REPO "$(workflow_value JUNO_ADDRGEN_REPO)" "$(jq -r '.components.addrgen.repository' bundle.lock.json)"
+check_equal JUNO_ADDRGEN_REF "$(workflow_value JUNO_ADDRGEN_REF)" "$(jq -r '.components.addrgen.revision' bundle.lock.json)"
+check_equal JUNO_TXBUILD_REPO "$(workflow_value JUNO_TXBUILD_REPO)" "$(jq -r '.components.txbuild.repository' bundle.lock.json)"
+check_equal JUNO_TXBUILD_REF "$(workflow_value JUNO_TXBUILD_REF)" "$(jq -r '.components.txbuild.revision' bundle.lock.json)"
+check_equal JUNO_TXSIGN_REPO "$(workflow_value JUNO_TXSIGN_REPO)" "$(jq -r '.components.txsign.repository' bundle.lock.json)"
+check_equal JUNO_TXSIGN_REF "$(workflow_value JUNO_TXSIGN_REF)" "$(jq -r '.components.txsign.revision' bundle.lock.json)"
+check_equal JUNOCASH_VERSION "$(workflow_value JUNOCASH_VERSION)" "$(jq -r '.node_artifact.version' bundle.lock.json)"
+check_equal JUNOCASH_LINUX64_SHA256 "$(workflow_value JUNOCASH_LINUX64_SHA256)" "$(jq -r '.node_artifact.sha256' bundle.lock.json)"
+check_equal BUILDX_VERSION "$(workflow_value BUILDX_VERSION)" "$(jq -r '.release_tooling.buildx_version' bundle.lock.json)"
+check_equal BUILDKIT_IMAGE "$(workflow_value BUILDKIT_IMAGE)" "$(jq -r '.release_tooling.buildkit_image' bundle.lock.json)"
+check_equal QEMU_IMAGE "$(workflow_value QEMU_IMAGE)" "$(jq -r '.release_tooling.qemu_image' bundle.lock.json)"
+check_equal SBOM_GENERATOR_IMAGE "$(workflow_value SBOM_GENERATOR_IMAGE)" "$(jq -r '.release_tooling.sbom_generator_image' bundle.lock.json)"
+
+buildx_setups="$(rg -c 'uses: docker/setup-buildx-action@' .github/workflows/images.yml)"
+check_equal pinned_buildx_versions \
+  "$(rg -c '^          version: \$\{\{ env\.BUILDX_VERSION \}\}$' .github/workflows/images.yml)" \
+  "$buildx_setups"
+check_equal pinned_buildkit_drivers \
+  "$(rg -c '^            image=\$\{\{ env\.BUILDKIT_IMAGE \}\}$' .github/workflows/images.yml)" \
+  "$buildx_setups"
+
+qemu_setups="$(rg -c 'uses: docker/setup-qemu-action@' .github/workflows/images.yml)"
+check_equal pinned_qemu_images \
+  "$(rg -c '^          image: \$\{\{ env\.QEMU_IMAGE \}\}$' .github/workflows/images.yml)" \
+  "$qemu_setups"
+
+build_pushes="$(rg -c 'uses: docker/build-push-action@' .github/workflows/images.yml)"
+check_equal pinned_sbom_generators \
+  "$(rg -c '^            type=sbom,generator=\$\{\{ env\.SBOM_GENERATOR_IMAGE \}\}$' .github/workflows/images.yml)" \
+  "$build_pushes"
+check_equal max_provenance_attestations \
+  "$(rg -c '^            type=provenance,mode=max$' .github/workflows/images.yml)" \
+  "$build_pushes"
+if rg -q '^          (provenance:|sbom:)' .github/workflows/images.yml; then
+  echo "Release workflow uses a mutable shorthand attestation input" >&2
+  exit 1
+fi
+
+check_equal node_Dockerfile_version \
+  "$(awk -F= '$1 == "ARG JUNOCASH_VERSION" {print $2; exit}' docker/junocashd/Dockerfile)" \
+  "$(jq -r '.node_artifact.version' bundle.lock.json)"
+check_equal node_Dockerfile_sha256 \
+  "$(awk -F= '$1 == "ARG JUNOCASH_LINUX64_SHA256" {print $2; exit}' docker/junocashd/Dockerfile)" \
+  "$(jq -r '.node_artifact.sha256' bundle.lock.json)"
+
+openapi_version="$(awk '$1 == "openapi:" {print $2; exit}' api/openapi.yaml)"
+contract_version="$(awk '$1 == "info:" {in_info=1; next} in_info && $1 == "version:" {print $2; exit}' api/openapi.yaml)"
+check_equal openapi_version "$openapi_version" "$(jq -r '.api.openapi_version' bundle.lock.json)"
+check_equal contract_version "$contract_version" "$(jq -r '.api.contract_version' bundle.lock.json)"
+
+postgres_image="$(jq -r '.service_images.postgres' bundle.lock.json)"
+rg -Fq "$postgres_image" compose.postgres.yaml
+rg -Fq "$postgres_image" .env.example
+
+echo "bundle lock: passed"

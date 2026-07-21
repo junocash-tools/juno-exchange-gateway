@@ -1,0 +1,10 @@
+{
+  "credentials": [
+    {
+      "name": "exchange",
+      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "scopes": ["read", "address", "broadcast", "raw"],
+      "wallets": ["exchange-hot"]
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 /bin/
 /tmp/
+/installation-state/
 .env
 config/auth.json
 config/wallets.json

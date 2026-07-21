@@ -1,0 +1,10 @@
+extends:
+  - recommended-strict
+
+rules:
+  # This repository intentionally has no declared license yet.
+  info-license: off
+  # The server URL is an operator-supplied deployment placeholder.
+  no-server-example.com: off
+  # The unauthenticated liveness probe has no normal client-error response.
+  operation-4xx-response: off

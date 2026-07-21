@@ -1,0 +1,448 @@
+name: Container images
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  BUILDX_VERSION: v0.35.0
+  BUILDKIT_IMAGE: moby/buildkit:v0.31.2@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+  QEMU_IMAGE: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+  SBOM_GENERATOR_IMAGE: docker.io/docker/buildkit-syft-scanner:1.11.0@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68
+  JUNO_SCAN_REPOSITORY: junocash-tools/juno-scan
+  # Repin this one full SHA after each approved scanner release.
+  JUNO_SCAN_REF: b4a4801ae8c98cdcdb4e51e1abc84311ffa1bd3a
+  JUNO_ADDRGEN_REPO: https://github.com/junocash-tools/juno-addrgen.git
+  JUNO_ADDRGEN_REF: 4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834
+  JUNO_TXBUILD_REPO: https://github.com/junocash-tools/juno-txbuild.git
+  JUNO_TXBUILD_REF: e7b1d5c01aaf705be1d76da7966e36437fdbc75f
+  JUNO_TXSIGN_REPO: https://github.com/junocash-tools/juno-txsign.git
+  JUNO_TXSIGN_REF: 29a58cc0a840a8e58b05981c0674475841ae6890
+  JUNOCASH_VERSION: 0.9.12
+  JUNOCASH_LINUX64_SHA256: 41f74d61feb9a4284a4200b1fc163ecd072da3314a25db7222522f2e548ec386
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out gateway
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate release-tag syntax checker
+        run: |
+          ./scripts/check-release-tag v1.2.3
+          ./scripts/check-release-tag v1.2.3-rc.1
+          if ./scripts/check-release-tag v01.2.3; then exit 1; fi
+          if ./scripts/check-release-tag v1.2; then exit 1; fi
+          if ./scripts/check-release-tag v1.2.3+build.7; then exit 1; fi
+          long_tag="v1.2.3-$(printf '%123s' '' | tr ' ' a)"
+          if ./scripts/check-release-tag "$long_tag"; then exit 1; fi
+
+      - name: Set up pinned Buildx for release preflight
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Enforce immutable release identity
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/check-release-tag "$GITHUB_REF_NAME"
+          set +e
+          response="$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" 2>&1)"
+          result=$?
+          set -e
+          if [[ "$result" -eq 0 ]]; then
+            echo "GitHub Release already exists for immutable tag $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if ! grep -Eq '^HTTP/[^ ]+ 404 ' <<<"$response"; then
+            echo "$response" >&2
+            echo "Could not prove that no GitHub Release exists for $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          for component in gateway scanner txbuild txsign node; do
+            image="${REGISTRY}/${GITHUB_REPOSITORY}-${component}:${version}"
+            set +e
+            response="$(docker buildx imagetools inspect "$image" 2>&1)"
+            result=$?
+            set -e
+            if [[ "$result" -eq 0 ]]; then
+              echo "Immutable release image already exists: $image" >&2
+              exit 1
+            fi
+            if ! grep -Eiq '(manifest unknown|name unknown|not found)' <<<"$response"; then
+              echo "$response" >&2
+              echo "Could not prove that release image is absent: $image" >&2
+              exit 1
+            fi
+          done
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test gateway
+        run: |
+          env GOWORK=off go test -race ./...
+          env GOWORK=off go vet ./...
+          git diff --check
+
+      - name: Validate Compose configurations
+        run: ./scripts/check-compose
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Build documentation
+        working-directory: website
+        run: |
+          npm ci --ignore-scripts
+          npm run lint:openapi
+          npm run build
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: gateway
+            context: .
+            dockerfile: docker/gateway/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - component: scanner
+            context: .release/juno-scan
+            dockerfile: .release/juno-scan/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - component: txbuild
+            context: .
+            dockerfile: docker/txbuild/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - component: txsign
+            context: .
+            dockerfile: docker/txsign/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - component: node
+            context: .
+            dockerfile: docker/junocashd/Dockerfile
+            platforms: linux/amd64
+    steps:
+      - name: Check out gateway
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned scanner
+        if: matrix.component == 'scanner'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ env.JUNO_SCAN_REPOSITORY }}
+          ref: ${{ env.JUNO_SCAN_REF }}
+          path: .release/juno-scan
+          persist-credentials: false
+
+      - name: Set build identity
+        shell: bash
+        run: |
+          echo "BUILD_TIME=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "GATEWAY_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "GATEWAY_VERSION=main" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          image: ${{ env.QEMU_IMAGE }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.component }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=long,prefix=sha-,enable=${{ github.ref_type == 'branch' }}
+            type=semver,pattern={{version}}
+
+      - name: Build and publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          attests: |
+            type=provenance,mode=max
+            type=sbom,generator=${{ env.SBOM_GENERATOR_IMAGE }}
+          build-args: |
+            VERSION=${{ env.GATEWAY_VERSION }}
+            REVISION=${{ github.sha }}
+            BUILD_TIME=${{ env.BUILD_TIME }}
+            COMPONENTS_JSON={"juno-addrgen":"${{ env.JUNO_ADDRGEN_REF }}","juno-scan":"${{ env.JUNO_SCAN_REF }}","juno-txbuild":"${{ env.JUNO_TXBUILD_REF }}","juno-txsign":"${{ env.JUNO_TXSIGN_REF }}","junocashd":"v${{ env.JUNOCASH_VERSION }}"}
+            JUNO_ADDRGEN_REPO=${{ env.JUNO_ADDRGEN_REPO }}
+            JUNO_ADDRGEN_REF=${{ env.JUNO_ADDRGEN_REF }}
+            JUNO_TXBUILD_REPO=${{ env.JUNO_TXBUILD_REPO }}
+            JUNO_TXBUILD_REF=${{ env.JUNO_TXBUILD_REF }}
+            JUNO_TXSIGN_REPO=${{ env.JUNO_TXSIGN_REPO }}
+            JUNO_TXSIGN_REF=${{ env.JUNO_TXSIGN_REF }}
+            JUNOCASH_VERSION=${{ env.JUNOCASH_VERSION }}
+            JUNOCASH_LINUX64_SHA256=${{ env.JUNOCASH_LINUX64_SHA256 }}
+
+  release:
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Check out gateway
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check out pinned scanner
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ env.JUNO_SCAN_REPOSITORY }}
+          ref: ${{ env.JUNO_SCAN_REF }}
+          path: .release/juno-scan
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: ${{ env.BUILDX_VERSION }}
+          driver-opts: |
+            image=${{ env.BUILDKIT_IMAGE }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release provenance manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          ./scripts/check-bundle-lock
+          version="${GITHUB_REF_NAME#v}"
+          images='[]'
+
+          mapfile -t base_images_list < <(
+            awk '$1 == "FROM" {
+              for (i = 2; i <= NF; i++) {
+                if ($i !~ /^--platform=/) {
+                  print $i
+                  break
+                }
+              }
+            }' docker/*/Dockerfile .release/juno-scan/Dockerfile | sort -u
+          )
+          for base_image in "${base_images_list[@]}"; do
+            if [[ "$base_image" != *@sha256:* ]]; then
+              echo "Unpinned release base image: $base_image" >&2
+              exit 1
+            fi
+          done
+          base_images="$(printf '%s\n' "${base_images_list[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+          locked_base_images="$(jq -c '[(.toolchain_images + .runtime_base_images)[]] | sort' bundle.lock.json)"
+          used_base_images="$(jq -c 'sort' <<<"$base_images")"
+          if [[ "$used_base_images" != "$locked_base_images" ]]; then
+            echo "Release Dockerfile base images differ from bundle.lock.json" >&2
+            exit 1
+          fi
+          bundle_lock="$(jq -c . bundle.lock.json)"
+
+          for component in gateway scanner txbuild txsign node; do
+            image="${REGISTRY}/${GITHUB_REPOSITORY}-${component}:${version}"
+            docker buildx imagetools inspect "$image" \
+              --format '{{json .Manifest}}' > "release/${component}-oci-index.json"
+            mapfile -t expected_platforms < <(
+              jq -er --arg component "$component" '.supported_platforms[$component][]' bundle.lock.json
+            )
+            ./scripts/check-oci-index "release/${component}-oci-index.json" "${expected_platforms[@]}"
+            docker buildx imagetools inspect "$image" \
+              --format '{{json .Provenance}}' > "release/${component}-provenance.json"
+            docker buildx imagetools inspect "$image" \
+              --format '{{json .SBOM}}' > "release/${component}-sbom.json"
+            ./scripts/check-attestations \
+              "release/${component}-provenance.json" \
+              "release/${component}-sbom.json" \
+              "${expected_platforms[@]}"
+            digest="$(jq -er '.digest' "release/${component}-oci-index.json")"
+            images="$(jq -cn \
+              --argjson images "$images" \
+              --arg component "$component" \
+              --arg image "$image" \
+              --arg digest "$digest" \
+              '$images + [{component: $component, image: $image, digest: $digest}]')"
+          done
+
+          image_ref() {
+            jq -er --arg component "$1" '.[] | select(.component == $component) | "\(.image)@\(.digest)"' <<<"$images"
+          }
+          bundle_dir="release/juno-exchange-gateway-${version}"
+          mkdir -p "$bundle_dir/config"
+          cp .env.example "$bundle_dir/release.env"
+          sed -i \
+            -e "s|^JUNO_GATEWAY_IMAGE=.*|JUNO_GATEWAY_IMAGE=$(image_ref gateway)|" \
+            -e "s|^JUNO_SCAN_IMAGE=.*|JUNO_SCAN_IMAGE=$(image_ref scanner)|" \
+            -e "s|^JUNO_TXBUILD_IMAGE=.*|JUNO_TXBUILD_IMAGE=$(image_ref txbuild)|" \
+            -e "s|^JUNO_TXSIGN_IMAGE=.*|JUNO_TXSIGN_IMAGE=$(image_ref txsign)|" \
+            -e "s|^JUNO_NODE_IMAGE=.*|JUNO_NODE_IMAGE=$(image_ref node)|" \
+            -e "s|^JUNO_SCAN_REF=.*|JUNO_SCAN_REF=${JUNO_SCAN_REF}|" \
+            "$bundle_dir/release.env"
+          cp compose.yaml compose.postgres.yaml bundle.lock.json "$bundle_dir/"
+          cp config/*.example.json "$bundle_dir/config/"
+          (
+            cd release
+            tar -czf "juno-exchange-gateway-${version}.tar.gz" "juno-exchange-gateway-${version}"
+          )
+          archive="release/juno-exchange-gateway-${version}.tar.gz"
+          [[ "$(tar -tzf "$archive" | cut -d/ -f1 | sort -u)" == "juno-exchange-gateway-${version}" ]]
+          for required in compose.yaml compose.postgres.yaml release.env bundle.lock.json config/auth.example.json config/wallets.example.json; do
+            tar -tzf "$archive" "juno-exchange-gateway-${version}/${required}" >/dev/null
+          done
+          rm -rf "$bundle_dir"
+
+          jq -n \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg version "$version" \
+            --arg gateway_revision "$GITHUB_SHA" \
+            --argjson images "$images" \
+            --argjson bundle "$bundle_lock" \
+            '{
+              schema_version: $bundle.api.release_provenance_version,
+              release_tag: $tag,
+              version: $version,
+              gateway: ($bundle.gateway + {revision: $gateway_revision} | del(.revision_source)),
+              api: $bundle.api,
+              state_schemas: $bundle.state_schemas,
+              supported_networks: $bundle.supported_networks,
+              appliance_platforms: $bundle.supported_platforms,
+              component_sources: $bundle.components,
+              node_artifact: $bundle.node_artifact,
+              base_images: {
+                toolchain: $bundle.toolchain_images,
+                runtime: $bundle.runtime_base_images,
+                services: $bundle.service_images
+              },
+              release_tooling: $bundle.release_tooling,
+              images: $images,
+              build_attestations: ["slsa-provenance", "spdx-sbom"],
+              bundle_lock: $bundle
+            }' > release/release-provenance.json
+
+          (
+            cd release
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+              | sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+          )
+
+      - name: Verify release images without registry credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          anonymous_docker_config="$(mktemp -d)"
+          trap 'rm -rf "$anonymous_docker_config"' EXIT
+          current_docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
+          mkdir -p "$anonymous_docker_config/cli-plugins"
+          if [[ -x "$current_docker_config/cli-plugins/docker-buildx" ]]; then
+            ln -s "$current_docker_config/cli-plugins/docker-buildx" \
+              "$anonymous_docker_config/cli-plugins/docker-buildx"
+          fi
+          printf '{}\n' > "$anonymous_docker_config/config.json"
+          export DOCKER_CONFIG="$anonymous_docker_config"
+          docker buildx version
+          while IFS=$'\t' read -r component image expected_digest; do
+            actual_digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' | jq -er '.digest')"
+            if [[ "$actual_digest" != "$expected_digest" ]]; then
+              echo "Anonymous digest mismatch for $image: actual=$actual_digest expected=$expected_digest" >&2
+              exit 1
+            fi
+            mapfile -t expected_platforms < <(
+              jq -er --arg component "$component" '.bundle_lock.supported_platforms[$component][]' release/release-provenance.json
+            )
+            docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "/tmp/${component}-anonymous-oci-index.json"
+            ./scripts/check-oci-index "/tmp/${component}-anonymous-oci-index.json" "${expected_platforms[@]}"
+            docker buildx imagetools inspect "$image" --format '{{json .Provenance}}' > "/tmp/${component}-anonymous-provenance.json"
+            docker buildx imagetools inspect "$image" --format '{{json .SBOM}}' > "/tmp/${component}-anonymous-sbom.json"
+            ./scripts/check-attestations \
+              "/tmp/${component}-anonymous-provenance.json" \
+              "/tmp/${component}-anonymous-sbom.json" \
+              "${expected_platforms[@]}"
+            docker pull --platform linux/amd64 "${image}@${expected_digest}"
+          done < <(jq -r '.images[] | [.component, .image, .digest] | @tsv' release/release-provenance.json)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_flags=(--latest)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_flags=(--prerelease --latest=false)
+          fi
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME" \
+            "${release_flags[@]}"

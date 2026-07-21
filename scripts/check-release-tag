@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tag="${1:-}"
+identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+semver="^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(${identifier})(\.(${identifier}))*)?$"
+
+if [[ ! "$tag" =~ $semver ]]; then
+  echo "release tag must be exact SemVer with a v prefix and no build metadata: $tag" >&2
+  exit 1
+fi
+
+version="${tag#v}"
+if (( ${#version} > 128 )); then
+  echo "release version exceeds the OCI tag limit of 128 bytes: $tag" >&2
+  exit 1
+fi

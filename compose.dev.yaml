@@ -1,0 +1,36 @@
+services:
+  junocashd:
+    image: juno-exchange-gateway/junocashd:0.9.12
+    build:
+      context: .
+      dockerfile: docker/junocashd/Dockerfile
+      args:
+        JUNOCASH_VERSION: ${JUNOCASH_VERSION:-0.9.12}
+        JUNOCASH_LINUX64_SHA256: ${JUNOCASH_LINUX64_SHA256:-41f74d61feb9a4284a4200b1fc163ecd072da3314a25db7222522f2e548ec386}
+
+  juno-scan:
+    image: juno-exchange-gateway/juno-scan:dev
+    build:
+      context: ../juno-scan
+      dockerfile: Dockerfile
+
+  gateway:
+    image: juno-exchange-gateway/gateway:dev
+    build:
+      context: .
+      dockerfile: docker/gateway/Dockerfile
+      args:
+        JUNO_ADDRGEN_REF: ${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}
+        VERSION: ${JUNO_GATEWAY_VERSION:-dev}
+        REVISION: ${JUNO_GATEWAY_REVISION:-local}
+        BUILD_TIME: ${JUNO_GATEWAY_BUILD_TIME:-}
+        COMPONENTS_JSON: >-
+          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-b4a4801ae8c98cdcdb4e51e1abc84311ffa1bd3a}","juno-txbuild":"${JUNO_TXBUILD_REF:-e7b1d5c01aaf705be1d76da7966e36437fdbc75f}","juno-txsign":"${JUNO_TXSIGN_REF:-29a58cc0a840a8e58b05981c0674475841ae6890}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
+
+  txbuild:
+    image: juno-exchange-gateway/txbuild:dev
+    build:
+      context: .
+      dockerfile: docker/txbuild/Dockerfile
+      args:
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-e7b1d5c01aaf705be1d76da7966e36437fdbc75f}

@@ -1,4 +1,4 @@
-module github.com/Abdullah1738/juno-exchange-gateway
+module github.com/junocash-tools/juno-exchange-gateway
 
 go 1.24.0
 

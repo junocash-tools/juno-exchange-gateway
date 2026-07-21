@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+provenance="${1:-}"
+sbom="${2:-}"
+shift 2 || true
+if [[ ! -f "$provenance" || ! -f "$sbom" || "$#" -eq 0 ]]; then
+  echo "usage: $0 PROVENANCE_JSON SBOM_JSON PLATFORM [PLATFORM...]" >&2
+  exit 2
+fi
+
+expected="$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')"
+
+jq -e --argjson expected "$expected" '
+  (type == "object") and
+  ((keys | sort) == $expected) and
+  all(.[];
+    ((.SLSA | type) == "object") and
+    ((.SLSA.buildType | type) == "string") and
+    ((.SLSA.buildType | length) > 0) and
+    ((.SLSA.materials | type) == "array") and
+    ((.SLSA.materials | length) > 0))
+' "$provenance" >/dev/null
+
+jq -e --argjson expected "$expected" '
+  (type == "object") and
+  ((keys | sort) == $expected) and
+  all(.[];
+    ((.SPDX | type) == "object") and
+    ((.SPDX.spdxVersion | type) == "string") and
+    (.SPDX.spdxVersion | test("^SPDX-[0-9]+(\\.[0-9]+)+$")) and
+    ((.SPDX.packages | type) == "array") and
+    ((.SPDX.packages | length) > 0))
+' "$sbom" >/dev/null

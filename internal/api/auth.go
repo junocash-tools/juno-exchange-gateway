@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/config"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/config"
 )
 
 type principal struct {

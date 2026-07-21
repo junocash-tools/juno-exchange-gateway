@@ -4,6 +4,8 @@ title: Allocate deposit addresses
 
 The gateway derives watch-only addresses from a registered UFVK and persists each diversifier index.
 
+Before derivation, it atomically reserves the index in the external installation manifest. A failed request may skip an index, but restart, database loss, and ambiguous failures cannot reuse one.
+
 ```bash
 curl --fail-with-body -X POST \
   -H "Authorization: Bearer $GATEWAY_TOKEN" \

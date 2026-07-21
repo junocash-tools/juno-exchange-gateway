@@ -1,4 +1,4 @@
-const repository = process.env.GITHUB_REPOSITORY || 'juno-cash/juno-exchange-gateway';
+const repository = process.env.GITHUB_REPOSITORY || 'junocash-tools/juno-exchange-gateway';
 const [organizationName, projectName] = repository.split('/');
 const pagesProject = `${organizationName}.github.io`.toLowerCase();
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,15 +17,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/config"
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/storage"
-	storagepkg "github.com/Abdullah1738/juno-exchange-gateway/internal/storage/sqlite"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/config"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/storage"
+	storagepkg "github.com/junocash-tools/juno-exchange-gateway/internal/storage/sqlite"
 )
 
 type fakeNode struct {
 	mu             sync.Mutex
 	tip            domain.NodeTip
+	tipErr         error
+	tipCalls       int
 	blockHashes    map[int64]string
 	blockHashErr   error
 	blockHashCalls int
@@ -32,12 +35,16 @@ type fakeNode struct {
 	decodeErr      error
 	decodeCalls    int
 	transactions   map[string]domain.Transaction
+	transactionErr error
 	broadcastTxID  string
 	broadcastErr   error
 	broadcastCalls int
 }
 
-func (f *fakeNode) Tip(context.Context) (domain.NodeTip, error) { return f.tip, nil }
+func (f *fakeNode) Tip(context.Context) (domain.NodeTip, error) {
+	f.tipCalls++
+	return f.tip, f.tipErr
+}
 func (f *fakeNode) BlockHash(_ context.Context, height int64) (string, error) {
 	f.blockHashCalls++
 	if f.blockHashErr != nil {
@@ -58,6 +65,9 @@ func (f *fakeNode) DecodeRawTransaction(context.Context, string) (string, error)
 func (f *fakeNode) Transaction(_ context.Context, txid string, _ bool) (domain.Transaction, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.transactionErr != nil {
+		return domain.Transaction{}, false, f.transactionErr
+	}
 	tx, ok := f.transactions[txid]
 	return tx, ok, nil
 }
@@ -81,6 +91,7 @@ type fakeScanner struct {
 	backfillFrom      int64
 	backfillTo        int64
 	backfillBatch     int64
+	backfillWallet    string
 	backfillCalls     int
 	backfillStatuses  map[string]domain.BackfillStatus
 }
@@ -102,6 +113,7 @@ func (f *fakeScanner) BackfillStatus(_ context.Context, walletID string) (domain
 }
 func (f *fakeScanner) Backfill(_ context.Context, walletID string, toHeight, batchSize int64) (int64, error) {
 	f.backfillCalls++
+	f.backfillWallet = walletID
 	status := f.backfillStatuses[walletID]
 	f.backfillFrom = status.NextHeight
 	f.backfillTo = toHeight
@@ -134,6 +146,22 @@ func (f fakeDeriver) Derive(_ context.Context, _ string, index uint32) (string, 
 
 type legacyWalletStore struct{ *storagepkg.Store }
 
+type renewRecordingStore struct {
+	storage.Store
+	renewed chan struct{}
+}
+
+func (s renewRecordingStore) RenewReceipt(ctx context.Context, key, digest string, generation int64, now time.Time) error {
+	if err := s.Store.RenewReceipt(ctx, key, digest, generation, now); err != nil {
+		return err
+	}
+	select {
+	case s.renewed <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
 func (s legacyWalletStore) Wallet(ctx context.Context, walletID string) (storage.Wallet, bool, error) {
 	wallet, found, err := s.Store.Wallet(ctx, walletID)
 	wallet.UFVKFingerprint = ""
@@ -162,7 +190,8 @@ func newTestAPI(t *testing.T, cfg config.Config) (*API, *fakeNode, *fakeScanner)
 	ready := true
 	scanned := int64(100)
 	lag := int64(0)
-	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag}, balanceFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
+	confirmations := cfg.DefaultConfirmations
+	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), Confirmations: &confirmations, EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag}, balanceFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
 	service, err := New(cfg, store, node, scanner, fakeDeriver{network: cfg.Network}, slog.New(slog.NewTextHandler(io.Discard, nil)), BuildInfo{Version: "test", Revision: "abc", APIVersion: "v1"})
 	if err != nil {
 		t.Fatal(err)
@@ -220,6 +249,11 @@ func allocate(t *testing.T, handler http.Handler) string {
 		t.Fatal(err)
 	}
 	return out.Data.Address
+}
+
+func walletEffectPayload(walletID, txid string) json.RawMessage {
+	raw, _ := json.Marshal(map[string]string{"wallet_id": walletID, "txid": txid})
+	return raw
 }
 
 func TestBalanceRequiresAllocatedAddressAndUsesDefaultConfirmations(t *testing.T) {
@@ -422,6 +456,9 @@ func TestBroadcastIsSignedRawOnlyAndIdempotent(t *testing.T) {
 	if rec.Code != http.StatusOK || node.broadcastCalls != 1 {
 		t.Fatalf("status=%d calls=%d body=%s", rec.Code, node.broadcastCalls, rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"accepted":false`) || !strings.Contains(rec.Body.String(), `"already_known":true`) {
+		t.Fatalf("replay body=%s", rec.Body.String())
+	}
 	rec = request(t, handler, http.MethodPost, "/v1/transactions/broadcast", `{"raw_tx_hex":"01","expected_txid":"`+txid+`"}`, headers)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "idempotency_conflict") {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -429,6 +466,66 @@ func TestBroadcastIsSignedRawOnlyAndIdempotent(t *testing.T) {
 	rec = request(t, handler, http.MethodPost, "/v1/transactions/broadcast", `{"raw_tx_hex":"00","expected_txid":"`+txid+`","seed":"secret"}`, map[string]string{"Idempotency-Key": "withdrawal-2"})
 	if rec.Code != http.StatusBadRequest || node.broadcastCalls != 1 {
 		t.Fatalf("secret field accepted status=%d", rec.Code)
+	}
+}
+
+func TestCompletedBroadcastReplaysWhileNodeIsUnavailable(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, _ := newTestAPI(t, cfg)
+	handler := service.Handler()
+	txid := strings.Repeat("c", 64)
+	node.broadcastTxID = txid
+	node.decodedTxID = txid
+	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	headers := map[string]string{"Idempotency-Key": "withdrawal-replay-outage"}
+	if rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers); rec.Code != http.StatusAccepted {
+		t.Fatalf("initial status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	tipCalls, decodeCalls := node.tipCalls, node.decodeCalls
+	node.tipErr = &domain.UpstreamError{Kind: "unavailable", Err: io.EOF}
+	node.decodeErr = &domain.UpstreamError{Kind: "unavailable", Err: io.EOF}
+	replay := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
+	if replay.Code != http.StatusOK || node.tipCalls != tipCalls || node.decodeCalls != decodeCalls || node.broadcastCalls != 1 {
+		t.Fatalf("replay status=%d tips=%d decodes=%d broadcasts=%d body=%s", replay.Code, node.tipCalls, node.decodeCalls, node.broadcastCalls, replay.Body.String())
+	}
+}
+
+func TestReceiptLeaseRenewsDuringLongNodeOperation(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, _ := newTestAPI(t, cfg)
+	now := time.Now()
+	claim, err := service.store.ClaimReceipt(context.Background(), "lease-key", "lease-digest", strings.Repeat("a", 64), now, 30*time.Millisecond)
+	if err != nil || claim.State != storage.ClaimAcquired {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	recorded := renewRecordingStore{Store: service.store, renewed: make(chan struct{}, 1)}
+	lease := newReceiptLease(context.Background(), recorded, "lease-key", "lease-digest", claim.Receipt.Generation, 30*time.Millisecond)
+	select {
+	case <-recorded.renewed:
+	case <-time.After(time.Second):
+		lease.Abandon()
+		t.Fatal("receipt lease was not renewed")
+	}
+	if err := lease.Complete(http.StatusAccepted, []byte(`{"data":{"txid":"ok"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := service.store.ClaimReceipt(context.Background(), "lease-key", "lease-digest", strings.Repeat("a", 64), time.Now(), 30*time.Millisecond)
+	if err != nil || replay.State != storage.ClaimReplay {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+}
+
+func TestBroadcastRejectsJSONLikeContentTypes(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, _ := newTestAPI(t, cfg)
+	txid := strings.Repeat("c", 64)
+	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, map[string]string{
+		"Content-Type":    "application/jsonp",
+		"Idempotency-Key": "wrong-media-type",
+	})
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Content-Type must be application/json") || node.decodeCalls != 0 || node.broadcastCalls != 0 {
+		t.Fatalf("status=%d decodes=%d broadcasts=%d body=%s", rec.Code, node.decodeCalls, node.broadcastCalls, rec.Body.String())
 	}
 }
 
@@ -454,6 +551,43 @@ func TestBroadcastRejectsExpectedTxIDMismatchBeforeStateOrBroadcast(t *testing.T
 	}
 }
 
+func TestBroadcastIdempotencyIsScopedToPrincipal(t *testing.T) {
+	cfg := testConfig(domain.Mainnet)
+	tokenA := strings.Repeat("a", 24)
+	tokenB := strings.Repeat("b", 24)
+	hashA := sha256.Sum256([]byte(tokenA))
+	hashB := sha256.Sum256([]byte(tokenB))
+	cfg.Credentials = []config.Credential{
+		{Name: "broadcaster-a", TokenHash: hashA, Scopes: []string{"broadcast"}, Wallets: []string{"hot"}},
+		{Name: "broadcaster-b", TokenHash: hashB, Scopes: []string{"broadcast"}, Wallets: []string{"hot"}},
+	}
+	service, node, _ := newTestAPI(t, cfg)
+	handler := service.Handler()
+	key := "shared-upstream-withdrawal-id"
+	txidA := strings.Repeat("a", 64)
+	txidB := strings.Repeat("b", 64)
+
+	node.decodedTxID, node.broadcastTxID = txidA, txidA
+	bodyA := `{"raw_tx_hex":"00","expected_txid":"` + txidA + `"}`
+	headersA := map[string]string{"Authorization": "Bearer " + tokenA, "Idempotency-Key": key}
+	if rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", bodyA, headersA); rec.Code != http.StatusAccepted {
+		t.Fatalf("principal A status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	node.decodedTxID, node.broadcastTxID = txidB, txidB
+	bodyB := `{"raw_tx_hex":"01","expected_txid":"` + txidB + `"}`
+	headersB := map[string]string{"Authorization": "Bearer " + tokenB, "Idempotency-Key": key}
+	if rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", bodyB, headersB); rec.Code != http.StatusAccepted {
+		t.Fatalf("principal B status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if node.broadcastCalls != 2 {
+		t.Fatalf("broadcast calls=%d", node.broadcastCalls)
+	}
+	if rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", bodyB, headersA); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "idempotency_conflict") {
+		t.Fatalf("same-principal conflict status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 	txid := strings.Repeat("a", 64)
 	t.Run("all pages", func(t *testing.T) {
@@ -462,11 +596,11 @@ func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 		node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
 		first := make([]domain.ScannerEvent, 1000)
 		for i := range first {
-			first[i] = domain.ScannerEvent{ID: int64(i + 1), Kind: "DepositEvent"}
+			first[i] = domain.ScannerEvent{ID: int64(i + 1), Kind: "DepositEvent", Payload: walletEffectPayload("hot", txid)}
 		}
 		scanner.eventPages = map[int64]domain.EventsPage{
 			0:    {Events: first, NextCursor: 1000, EventEpoch: scanner.health.EventEpoch},
-			1000: {Events: []domain.ScannerEvent{{ID: 1001, Kind: "DepositConfirmed"}}, NextCursor: 1001, EventEpoch: scanner.health.EventEpoch},
+			1000: {Events: []domain.ScannerEvent{{ID: 1001, Kind: "DepositConfirmed", Payload: walletEffectPayload("hot", txid)}}, NextCursor: 1001, EventEpoch: scanner.health.EventEpoch},
 		}
 		rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
 		if rec.Code != http.StatusOK {
@@ -486,9 +620,99 @@ func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 		cfg.WalletEffectsMaxEvents = 2
 		service, node, scanner := newTestAPI(t, cfg)
 		node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
-		scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1}, {ID: 2}, {ID: 3}}, NextCursor: 3, EventEpoch: scanner.health.EventEpoch}}
+		payload := walletEffectPayload("hot", txid)
+		scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1, Payload: payload}, {ID: 2, Payload: payload}, {ID: 3, Payload: payload}}, NextCursor: 3, EventEpoch: scanner.health.EventEpoch}}
 		rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
 		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "wallet_effects_limit_exceeded") {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestWalletTransactionEffectsRejectMismatchedIdentity(t *testing.T) {
+	txid := strings.Repeat("a", 64)
+	for name, payload := range map[string]json.RawMessage{
+		"wallet": walletEffectPayload("other", txid),
+		"txid":   walletEffectPayload("hot", strings.Repeat("b", 64)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, node, scanner := newTestAPI(t, cfg)
+			node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
+			scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Payload: payload}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}}
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestWalletTransactionUsesLatestTerminalScannerState(t *testing.T) {
+	txid := strings.Repeat("a", 64)
+	for name, test := range map[string]struct {
+		kind       string
+		payload    string
+		state      string
+		extraCheck string
+	}{
+		"orphaned": {
+			kind:    "DepositOrphaned",
+			payload: `{"wallet_id":"hot","txid":"` + txid + `","height":90,"status":{"state":"orphaned"}}`,
+			state:   "orphaned",
+		},
+		"expired": {
+			kind:       "OutgoingOutputExpired",
+			payload:    `{"wallet_id":"hot","txid":"` + txid + `","expiry_height":90,"status":{"state":"expired"}}`,
+			state:      "expired",
+			extraCheck: `"expiry_height":90`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			scanner.events = domain.EventsPage{
+				Events:     []domain.ScannerEvent{{ID: 1, Kind: test.kind, Payload: json.RawMessage(test.payload)}},
+				NextCursor: 1,
+				EventEpoch: scanner.health.EventEpoch,
+			}
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"state":"`+test.state+`"`) || (test.extraCheck != "" && !strings.Contains(rec.Body.String(), test.extraCheck)) {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestWalletTransactionTerminalFallbackRequiresFinalValidLifecycleEvent(t *testing.T) {
+	txid := strings.Repeat("a", 64)
+	expired := json.RawMessage(`{"wallet_id":"hot","txid":"` + txid + `","expiry_height":90,"status":{"state":"expired"}}`)
+	t.Run("later nonterminal event wins", func(t *testing.T) {
+		cfg := testConfig(domain.Regtest)
+		service, _, scanner := newTestAPI(t, cfg)
+		scanner.events = domain.EventsPage{
+			Events: []domain.ScannerEvent{
+				{ID: 1, Kind: "OutgoingOutputExpired", Payload: expired},
+				{ID: 2, Kind: "OutgoingOutputEvent", Payload: json.RawMessage(`{"wallet_id":"hot","txid":"` + txid + `","status":{"state":"mempool"}}`)},
+			},
+			NextCursor: 2,
+			EventEpoch: scanner.health.EventEpoch,
+		}
+		rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+	t.Run("terminal payload must agree", func(t *testing.T) {
+		cfg := testConfig(domain.Regtest)
+		service, _, scanner := newTestAPI(t, cfg)
+		scanner.events = domain.EventsPage{
+			Events:     []domain.ScannerEvent{{ID: 1, Kind: "OutgoingOutputExpired", Payload: json.RawMessage(`{"wallet_id":"hot","txid":"` + txid + `","expiry_height":90,"status":{"state":"mempool"}}`)}},
+			NextCursor: 1,
+			EventEpoch: scanner.health.EventEpoch,
+		}
+		rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
+		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
 			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 		}
 	})
@@ -507,6 +731,50 @@ func TestRejectedBroadcastIsPersistedForIdempotentReplay(t *testing.T) {
 	second := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
 	if first.Code != http.StatusUnprocessableEntity || second.Code != http.StatusUnprocessableEntity || node.broadcastCalls != 1 {
 		t.Fatalf("first=%d second=%d calls=%d", first.Code, second.Code, node.broadcastCalls)
+	}
+}
+
+func TestAlreadyKnownBroadcastIsSuccessfulAndPersisted(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, _ := newTestAPI(t, cfg)
+	handler := service.Handler()
+	txid := strings.Repeat("e", 64)
+	node.broadcastErr = &domain.UpstreamError{Kind: "already_known", Err: io.EOF}
+	node.decodedTxID = txid
+	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	headers := map[string]string{"Idempotency-Key": "withdrawal-already-known"}
+	first := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
+	second := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
+	if first.Code != http.StatusOK || second.Code != http.StatusOK || node.broadcastCalls != 1 {
+		t.Fatalf("first=%d second=%d calls=%d first_body=%s", first.Code, second.Code, node.broadcastCalls, first.Body.String())
+	}
+	if !strings.Contains(first.Body.String(), `"state":"known"`) || !strings.Contains(first.Body.String(), `"accepted":false`) || !strings.Contains(first.Body.String(), `"already_known":true`) {
+		t.Fatalf("body=%s", first.Body.String())
+	}
+}
+
+func TestAmbiguousBroadcastFailuresRemainRetryable(t *testing.T) {
+	for _, kind := range []string{"uncertain", "unavailable"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			cfg.IdempotencyLease = 0
+			service, node, _ := newTestAPI(t, cfg)
+			txid := strings.Repeat("f", 64)
+			node.decodedTxID = txid
+			node.transactionErr = &domain.UpstreamError{Kind: "unavailable", Err: io.EOF}
+			node.broadcastErr = &domain.UpstreamError{Kind: kind, Err: io.EOF}
+			body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+			headers := map[string]string{"Idempotency-Key": "withdrawal-retryable-" + kind}
+			for attempt := 0; attempt < 2; attempt++ {
+				rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, headers)
+				if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), `"retryable":true`) || strings.Contains(rec.Body.String(), "transaction_rejected") {
+					t.Fatalf("attempt=%d status=%d body=%s", attempt, rec.Code, rec.Body.String())
+				}
+			}
+			if node.broadcastCalls != 2 {
+				t.Fatalf("broadcast calls=%d", node.broadcastCalls)
+			}
+		})
 	}
 }
 
@@ -546,6 +814,22 @@ func TestProductionAuthProtectsVersionAndWalletAuthorization(t *testing.T) {
 	}
 }
 
+func TestWrongMethodUsesAuthenticatedJSONEnvelope(t *testing.T) {
+	cfg := testConfig(domain.Mainnet)
+	token := strings.Repeat("a", 24)
+	hash := sha256.Sum256([]byte(token))
+	cfg.Credentials = []config.Credential{{Name: "exchange", TokenHash: hash, Scopes: []string{"read"}, Wallets: []string{"hot"}}}
+	service, _, _ := newTestAPI(t, cfg)
+	handler := service.Handler()
+	if rec := request(t, handler, http.MethodPost, "/v1/network/tip", ``, nil); rec.Code != http.StatusUnauthorized || rec.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("unauthenticated status=%d content_type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	rec := request(t, handler, http.MethodPost, "/v1/network/tip", ``, map[string]string{"Authorization": "Bearer " + token})
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Content-Type") != "application/json" || !strings.Contains(rec.Body.String(), `"code":"method_not_allowed"`) || rec.Header().Get("X-Request-ID") == "" {
+		t.Fatalf("status=%d content_type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+}
+
 func TestReadinessFailsClosedOnNetworkAndLag(t *testing.T) {
 	cfg := testConfig(domain.Regtest)
 	service, _, scanner := newTestAPI(t, cfg)
@@ -564,6 +848,60 @@ func TestReadinessFailsClosedOnNetworkAndLag(t *testing.T) {
 	rec = request(t, handler, http.MethodGet, "/v1/health/ready", ``, nil)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("lag status=%d", rec.Code)
+	}
+}
+
+func TestReadinessFailsClosedOnScannerConfirmationPolicy(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, scanner := newTestAPI(t, cfg)
+	handler := service.Handler()
+
+	scanner.health.Confirmations = nil
+	if rec := request(t, handler, http.MethodGet, "/v1/health/ready", ``, nil); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+		t.Fatalf("missing policy status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, value := range []int64{0, cfg.DefaultConfirmations + 1} {
+		scanner.health.Confirmations = &value
+		if rec := request(t, handler, http.MethodGet, "/v1/health/ready", ``, nil); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+			t.Fatalf("policy=%d status=%d body=%s", value, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestReadyNodeRejectsInvalidTipInvariants(t *testing.T) {
+	cases := map[string]func(*domain.NodeTip){
+		"uppercase hash":        func(tip *domain.NodeTip) { tip.Hash = strings.Repeat("A", 64) },
+		"short hash":            func(tip *domain.NodeTip) { tip.Hash = "abc" },
+		"headers behind blocks": func(tip *domain.NodeTip) { tip.Headers = tip.Height - 1 },
+		"negative progress":     func(tip *domain.NodeTip) { tip.VerificationProgress = -0.01 },
+		"excess progress":       func(tip *domain.NodeTip) { tip.VerificationProgress = 1.01 },
+		"nan progress":          func(tip *domain.NodeTip) { tip.VerificationProgress = math.NaN() },
+		"infinite progress":     func(tip *domain.NodeTip) { tip.VerificationProgress = math.Inf(1) },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, node, _ := newTestAPI(t, cfg)
+			mutate(&node.tip)
+			if _, err := service.readyNode(context.Background()); err == nil {
+				t.Fatal("expected invalid node tip rejection")
+			}
+		})
+	}
+}
+
+func TestNetworkTipRejectsInvalidStructureButReportsInitialSync(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, _ := newTestAPI(t, cfg)
+	handler := service.Handler()
+	node.tip.Headers = node.tip.Height - 1
+	if rec := request(t, handler, http.MethodGet, "/v1/network/tip", ``, nil); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "node_not_ready") {
+		t.Fatalf("invalid tip status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	node.tip.Headers = node.tip.Height
+	node.tip.InitialBlockDownload = true
+	if rec := request(t, handler, http.MethodGet, "/v1/network/tip", ``, nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"initial_sync":true`) {
+		t.Fatalf("syncing tip status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -674,7 +1012,7 @@ func TestBirthdayBackfillProgressIsRequiredAndPersisted(t *testing.T) {
 	if err != nil || !worked {
 		t.Fatalf("worked=%v err=%v", worked, err)
 	}
-	if scanner.backfillFrom != 50 || scanner.backfillTo != 100 || scanner.backfillBatch != 10000 {
+	if scanner.backfillFrom != 50 || scanner.backfillTo != 100 || scanner.backfillBatch != 51 {
 		t.Fatalf("backfill from=%d to=%d batch=%d", scanner.backfillFrom, scanner.backfillTo, scanner.backfillBatch)
 	}
 	complete, err = registry.completeThrough(context.Background(), 100)
@@ -684,5 +1022,40 @@ func TestBirthdayBackfillProgressIsRequiredAndPersisted(t *testing.T) {
 	wallet, ok, err := store.Wallet(context.Background(), "hot")
 	if err != nil || !ok || wallet.NextBackfillHeight != 101 {
 		t.Fatalf("wallet=%+v ok=%v err=%v", wallet, ok, err)
+	}
+}
+
+func TestBackfillChoosesDeepestLagDeterministicallyAndCapsBatch(t *testing.T) {
+	for name, nextHeights := range map[string]map[string]int64{
+		"deepest": {"hot": 90, "cold": 10},
+		"tie":     {"hot": 10, "cold": 10},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			cfg.Wallets = append(cfg.Wallets, config.Wallet{WalletID: "cold", UFVK: "jviewregtest1cold", BirthdayHeight: 0})
+			store, err := storagepkg.Open(context.Background(), "file:"+filepath.Join(t.TempDir(), "adaptive-backfill.db")+"?_pragma=foreign_keys(ON)&_pragma=journal_mode(WAL)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			scanner := &fakeScanner{backfillStatuses: map[string]domain.BackfillStatus{}}
+			for _, wallet := range cfg.Wallets {
+				if err := store.EnsureWallet(context.Background(), wallet.WalletID, string(cfg.Network), wallet.UFVKFingerprint(), wallet.BirthdayHeight); err != nil {
+					t.Fatal(err)
+				}
+				scanner.backfillStatuses[wallet.WalletID] = domain.BackfillStatus{WalletID: wallet.WalletID, UFVKFingerprint: wallet.UFVKFingerprint(), BirthdayHeight: wallet.BirthdayHeight, NextHeight: nextHeights[wallet.WalletID], State: "running"}
+			}
+			registry, err := newWalletRegistry(cfg, store, scanner, fakeDeriver{network: cfg.Network})
+			if err != nil {
+				t.Fatal(err)
+			}
+			worked, err := registry.backfillOne(context.Background(), 100, 10000)
+			if err != nil || !worked {
+				t.Fatalf("worked=%v err=%v", worked, err)
+			}
+			if scanner.backfillWallet != "cold" || scanner.backfillBatch != 91 {
+				t.Fatalf("wallet=%s batch=%d", scanner.backfillWallet, scanner.backfillBatch)
+			}
+		})
 	}
 }

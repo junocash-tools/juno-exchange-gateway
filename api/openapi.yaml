@@ -12,12 +12,17 @@ security:
   - bearerAuth: []
 tags:
   - name: Health
+    description: Liveness, readiness, and build identity.
   - name: Network
+    description: Validated node and scanner chain state.
   - name: Wallets
+    description: Registered-wallet addresses, balances, and deposit events.
   - name: Transactions
+    description: Signed transaction broadcast and lifecycle lookup.
 paths:
   /v1/health/live:
     get:
+      operationId: getLive
       tags: [Health]
       summary: Process liveness
       description: Does not check the node, scanner, or state database. This is the only unauthenticated endpoint.
@@ -32,6 +37,7 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
   /v1/health/ready:
     get:
+      operationId: getReady
       tags: [Health]
       summary: Financial-read readiness
       x-required-scope: read
@@ -47,7 +53,7 @@ paths:
                 data:
                   network: mainnet
                   node: { network: main, height: 920000, hash: "0000000000000000000000000000000000000000000000000000000000000001", block_time: 1784631000, headers: 920000, initial_sync: false, verification_progress: 1 }
-                  scanner: { status: ok, ready: true, network: mainnet, ua_hrp: j, event_epoch: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, scanned_height: 920000, scanned_hash: "0000000000000000000000000000000000000000000000000000000000000001", scanner_lag: 0 }
+                  scanner: { status: ok, ready: true, network: mainnet, ua_hrp: j, confirmations: 100, event_epoch: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, scanned_height: 920000, scanned_hash: "0000000000000000000000000000000000000000000000000000000000000001", scanner_lag: 0 }
                   scanner_lag: 0
                   max_scanner_lag: 2
                 request_id: req_018f
@@ -68,6 +74,7 @@ paths:
                   value: { status: error, error: { code: gateway_state_not_ready, message: financial reads are not ready, retryable: true, details: {} }, request_id: req_018f }
   /v1/version:
     get:
+      operationId: getVersion
       tags: [Health]
       summary: Version and component identity
       x-required-scope: read
@@ -84,6 +91,7 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
   /v1/network/tip:
     get:
+      operationId: getNetworkTip
       tags: [Network]
       summary: Latest validated node and scanner heights
       x-required-scope: read
@@ -101,6 +109,7 @@ paths:
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/wallets/{wallet_id}/addresses:
     post:
+      operationId: allocateWalletAddress
       tags: [Wallets]
       summary: Allocate the next watch-only deposit address
       x-required-scope: address
@@ -134,6 +143,7 @@ paths:
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/wallets/{wallet_id}/addresses/{address}/balance:
     get:
+      operationId: getWalletAddressBalance
       tags: [Wallets]
       summary: Balance of one allocated address
       x-required-scope: read
@@ -168,10 +178,11 @@ paths:
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/wallets/{wallet_id}/deposits:
     get:
+      operationId: listWalletDeposits
       tags: [Wallets]
       summary: Poll deposit lifecycle events
       x-required-scope: read
-      description: Delivery is at-least-once and limited to addresses allocated by this gateway. Commit the page, deduplicate by `(deposit_id,event_id)`, then persist `next_cursor`. A cursor is opaque and bound to this wallet, scanner event epoch, and the `address`, `txid`, and `status` filters. After `cursor_reset_required`, discard the old cursor, restart without one, and idempotently replay the current epoch. Keep filters unchanged while advancing a cursor.
+      description: Production ledger consumers must poll the unfiltered lifecycle stream. The `address`, `txid`, and `status` filters are for diagnostics unless each filtered stream has its own complete cursor. Delivery is at-least-once and limited to addresses allocated by this gateway. Within one event epoch, `(deposit_id,event_id)` is transport deduplication; ledger credit and reversal idempotency must use the stable `deposit_id`, including after an epoch reset or scanner rebuild. Commit the ledger mutation and unfiltered `next_cursor` atomically. A cursor is opaque and bound to its wallet, event epoch, and exact filter set. After `cursor_reset_required`, discard the old cursor, restart without one, and replay by `deposit_id`.
       parameters:
         - $ref: "#/components/parameters/WalletID"
         - name: cursor
@@ -222,6 +233,7 @@ paths:
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/transactions/{txid}:
     get:
+      operationId: getTransaction
       tags: [Transactions]
       summary: Look up transaction state
       x-required-scope: read
@@ -230,14 +242,14 @@ paths:
         - name: wallet_id
           in: query
           schema: { $ref: "#/components/schemas/WalletID" }
-          description: Adds all scanner effects only when the credential is authorized for this wallet. Returns `wallet_effects_limit_exceeded` instead of truncating above the configured safety cap.
+          description: Adds all scanner effects only when the credential is authorized for this wallet. If the node no longer has the transaction, the final valid wallet lifecycle event can supply `orphaned` or `expired` state. Returns `wallet_effects_limit_exceeded` instead of truncating above the configured safety cap.
         - name: include_raw
           in: query
           schema: { type: boolean, default: false }
           description: Requires the additional `raw` scope when true.
       responses:
         "200":
-          description: Node state and optional authorized wallet effects.
+          description: Node state and optional authorized wallet effects, or wallet-scoped terminal scanner state when the node no longer has the transaction.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TransactionResponse" }
@@ -262,10 +274,11 @@ paths:
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/transactions/broadcast:
     post:
+      operationId: broadcastTransaction
       tags: [Transactions]
       summary: Broadcast an already signed raw transaction
       x-required-scope: broadcast
-      description: Never waits for confirmations. The gateway decodes the raw transaction and verifies `expected_txid` before claiming idempotency state, checking already-known state, or broadcasting. No planning, recipient, amount, fee, seed, key, or signing fields are accepted. Keep the idempotency key stable across uncertain retries.
+      description: Never waits for confirmations. The gateway validates request shape and claims or replays durable idempotency state before contacting the node, so a completed receipt can replay during a node outage. A newly acquired claim must then pass node readiness, raw-transaction decoding, and `expected_txid` verification before lookup or broadcast; pre-broadcast failures abandon the claim. No planning, recipient, amount, fee, seed, key, or signing fields are accepted. Keep the idempotency key stable across uncertain retries.
       parameters:
         - name: Idempotency-Key
           in: header
@@ -289,7 +302,10 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BroadcastResponse" }
-              example: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: true, already_known: false }, request_id: req_018f }
+              examples:
+                replay: { summary: Idempotent replay of a previously accepted transaction, value: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: false, already_known: true }, request_id: req_018f } }
+                existing: { summary: Transaction found by the node, value: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, accepted: false, already_known: true }, request_id: req_018f } }
+                already_known: { summary: Node reports the transaction as known before a concrete state is available, value: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: known, accepted: false, already_known: true }, request_id: req_018f } }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -365,9 +381,6 @@ components:
     NodeRPCError:
       description: Node call failed or produced an uncertain result.
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: node_rpc_error, message: node request failed, retryable: true, details: {} }, request_id: req_018f } } }
-    ScannerNotReady:
-      description: Scanner is unavailable, incomplete, mismatched, or too far behind.
-      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: scanner_not_ready, message: financial reads are not ready, retryable: true, details: {} }, request_id: req_018f } } }
     NotReady:
       description: The configured node, scanner, wallet history, or gateway state is not safe for this operation.
       content:
@@ -409,24 +422,25 @@ components:
       required: [network, height, hash, block_time, headers, initial_sync, verification_progress]
       properties:
         network: { type: string, enum: [main, test, regtest] }
-        height: { type: integer, format: int64 }
-        hash: { type: string }
+        height: { type: integer, format: int64, minimum: 0 }
+        hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         block_time: { type: integer, format: int64 }
-        headers: { type: integer, format: int64 }
+        headers: { type: integer, format: int64, minimum: 0 }
         initial_sync: { type: boolean }
-        verification_progress: { type: number }
+        verification_progress: { type: number, minimum: 0, maximum: 1 }
     ScannerHealth:
       type: object
-      required: [status, network, ua_hrp, event_epoch, ready, scanned_height, scanned_hash, scanner_lag]
+      required: [status, network, ua_hrp, confirmations, event_epoch, ready, scanned_height, scanned_hash, scanner_lag]
       properties:
         status: { type: string }
         network: { type: string, enum: [mainnet, testnet, regtest] }
         ua_hrp: { type: string, enum: [j, jtest, jregtest] }
+        confirmations: { type: integer, format: int64, minimum: 1 }
         event_epoch: { type: string, pattern: "^[0-9a-f]{64}$" }
         ready: { type: boolean }
         node_height: { type: integer, format: int64 }
         scanned_height: { type: integer, format: int64 }
-        scanned_hash: { type: string }
+        scanned_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         scanner_lag: { type: integer, format: int64 }
         max_ready_lag: { type: integer, format: int64 }
         history_complete: { type: boolean }
@@ -516,8 +530,13 @@ components:
       type: object
       required: [deposit_id, event_id, wallet_id, txid, action_index, address, diversifier_index, amount_zat, status, block_height, observed_at]
       properties:
-        deposit_id: { type: string }
-        event_id: { type: string, pattern: "^[0-9a-f]{64}:[1-9][0-9]*$" }
+        deposit_id:
+          type: string
+          description: Stable note identity for ledger idempotency across lifecycle changes, event epochs, and scanner rebuilds.
+        event_id:
+          type: string
+          pattern: "^[0-9a-f]{64}:[1-9][0-9]*$"
+          description: Delivery identity for transport deduplication within the returned event epoch; it is not the ledger credit key.
         wallet_id: { $ref: "#/components/schemas/WalletID" }
         txid: { $ref: "#/components/schemas/TxID" }
         action_index: { type: integer, minimum: 0 }
@@ -539,14 +558,14 @@ components:
       required: [txid, state, confirmations]
       properties:
         txid: { $ref: "#/components/schemas/TxID" }
-        state: { type: string, enum: [mempool, confirmed, unknown, orphaned, expired] }
-        confirmations: { type: integer, format: int64 }
-        block_hash: { type: string }
-        block_height: { type: integer, format: int64 }
-        block_time: { type: integer, format: int64 }
-        expiry_height: { type: integer, format: int64 }
-        serialized_size: { type: integer, format: int64 }
-        orchard_action_count: { type: integer, format: int64 }
+        state: { type: string, enum: [mempool, confirmed, orphaned, expired] }
+        confirmations: { type: integer, format: int64, minimum: 0 }
+        block_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        block_height: { type: integer, format: int64, minimum: 0 }
+        block_time: { type: integer, format: int64, minimum: 0 }
+        expiry_height: { type: integer, format: int64, minimum: 0 }
+        serialized_size: { type: integer, format: int64, minimum: 0 }
+        orchard_action_count: { type: integer, format: int64, minimum: 0 }
         raw_tx_hex: { type: string, pattern: "^[0-9a-f]*$" }
     TransactionResponse:
       type: object
@@ -562,4 +581,14 @@ components:
     BroadcastResponse:
       type: object
       required: [status, data, request_id]
-      properties: { status: { const: ok }, data: { type: object, required: [txid, state, accepted, already_known], properties: { txid: { $ref: "#/components/schemas/TxID" }, state: { type: string, enum: [mempool, confirmed] }, accepted: { type: boolean }, already_known: { type: boolean } } }, request_id: { type: string } }
+      properties:
+        status: { const: ok }
+        data:
+          type: object
+          required: [txid, state, accepted, already_known]
+          properties:
+            txid: { $ref: "#/components/schemas/TxID" }
+            state: { type: string, enum: [mempool, confirmed, known], description: "`known` means the node reported the transaction as already known but a concrete mempool or confirmed state was unavailable." }
+            accepted: { type: boolean, description: True only when the node newly accepted the transaction during this HTTP request. }
+            already_known: { type: boolean, description: True for an idempotent replay or when the node already knew the transaction. }
+        request_id: { type: string }

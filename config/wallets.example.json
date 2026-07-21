@@ -1,0 +1,9 @@
+{
+  "wallets": [
+    {
+      "wallet_id": "exchange-hot",
+      "ufvk": "jviewregtest1replace-with-a-ufvk-derived-offline",
+      "birthday_height": 0
+    }
+  ]
+}

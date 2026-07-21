@@ -1,0 +1,946 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workspace_root="$(cd "$repo_root/.." && pwd)"
+run_id="$(date -u +%Y%m%dt%H%M%Sz)-$$"
+run_dir="$repo_root/tmp/regtest-e2e/$run_id"
+project="juno-gateway-e2e-${run_id//[^A-Za-z0-9]/}"
+
+mkdir -p "$run_dir/config"
+chmod 0700 "$run_dir"
+umask 077
+
+for command in cargo curl docker go jq make npm openssl; do
+  command -v "$command" >/dev/null || {
+    echo "missing required command: $command" >&2
+    exit 1
+  }
+done
+
+"$repo_root/scripts/check-clean-sources"
+
+export JUNO_NETWORK=regtest
+export JUNO_GATEWAY_PORT=0
+export JUNO_GATEWAY_WALLETS_FILE="$run_dir/config/wallets.json"
+export JUNO_GATEWAY_AUTH_FILE="$run_dir/config/auth.json"
+export JUNO_INSTALLATION_STATE_DIR="$run_dir/installation-state"
+export JUNO_RPC_USER="e2e-rpc-$(openssl rand -hex 8)"
+export JUNO_RPC_PASSWORD="$(openssl rand -hex 32)"
+export JUNO_SCAN_API_BEARER_TOKEN="$(openssl rand -hex 32)"
+export JUNO_NODE_PERSIST_MEMPOOL=0
+export JUNO_GATEWAY_DEFAULT_CONFIRMATIONS=100
+export JUNO_SCAN_CONFIRMATIONS=100
+export JUNO_GATEWAY_BACKFILL_BATCH_SIZE=10
+export JUNO_GATEWAY_BACKFILL_YIELD=250ms
+export JUNO_GATEWAY_REVISION="$(git -C "$repo_root" rev-parse HEAD)"
+export JUNO_GATEWAY_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export JUNO_SCAN_REF="$(git -C "$workspace_root/juno-scan" rev-parse HEAD)"
+export JUNO_ADDRGEN_REF="$(git -C "$workspace_root/juno-addrgen" rev-parse HEAD)"
+export JUNO_TXBUILD_REF="$(git -C "$workspace_root/juno-txbuild" rev-parse HEAD)"
+export JUNO_TXSIGN_REF="$(git -C "$workspace_root/juno-txsign" rev-parse HEAD)"
+export JUNO_KEYS_REF="$(git -C "$workspace_root/juno-keys" rev-parse HEAD)"
+
+read_token="$(openssl rand -hex 32)"
+address_token="$(openssl rand -hex 32)"
+broadcast_token="$(openssl rand -hex 32)"
+cold_wallet_token="$(openssl rand -hex 32)"
+wallet_id="exchange-hot"
+cold_wallet_id="exchange-cold"
+signer_image="$project/txsign:$JUNO_TXSIGN_REF"
+signer_container="${project}-offline-signer"
+init_ack="I_UNDERSTAND_THIS_CREATES_A_NEW_JUNO_INSTALLATION"
+recover_ack="I_UNDERSTAND_RECOVERY_REBUILDS_JUNO_ADDRESS_STATE"
+
+mkdir -p "$JUNO_INSTALLATION_STATE_DIR"
+chmod 0700 "$JUNO_INSTALLATION_STATE_DIR"
+
+compose=(
+  docker compose
+  --project-name "$project"
+  --profile operator
+  -f "$repo_root/compose.yaml"
+  -f "$repo_root/compose.dev.yaml"
+)
+
+base_url=""
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  docker rm -f "$signer_container" >/dev/null 2>&1 || true
+  docker image rm "$signer_image" >/dev/null 2>&1 || true
+  "${compose[@]}" ps -a >"$run_dir/compose-ps.txt" 2>&1 || true
+  if (( status != 0 )); then
+    "${compose[@]}" logs --no-color >"$run_dir/compose.log" 2>&1 || true
+    echo "regtest E2E failed; private evidence is in $run_dir" >&2
+  fi
+  if [[ "${KEEP_STACK:-0}" != "1" ]]; then
+    "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  else
+    echo "stack retained: project=$project evidence=$run_dir"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+log() {
+  printf '\n== %s ==\n' "$1"
+}
+
+fail() {
+  echo "$1" >&2
+  exit 1
+}
+
+assert_source_ref() {
+  local label=$1
+  local path=$2
+  local expected=$3
+  local actual
+  actual="$(git -C "$path" rev-parse HEAD)"
+  [[ "$actual" == "$expected" ]] || fail "$label HEAD moved during release E2E setup"
+}
+
+assert_source_refs() {
+  assert_source_ref gateway "$repo_root" "$JUNO_GATEWAY_REVISION"
+  assert_source_ref scanner "$workspace_root/juno-scan" "$JUNO_SCAN_REF"
+  assert_source_ref addrgen "$workspace_root/juno-addrgen" "$JUNO_ADDRGEN_REF"
+  assert_source_ref txbuild "$workspace_root/juno-txbuild" "$JUNO_TXBUILD_REF"
+  assert_source_ref txsign "$workspace_root/juno-txsign" "$JUNO_TXSIGN_REF"
+  assert_source_ref keys "$workspace_root/juno-keys" "$JUNO_KEYS_REF"
+}
+
+assert_jq() {
+  local file=$1
+  shift
+  local count=$#
+  local message="${!count}"
+  set -- "${@:1:$((count - 1))}"
+  jq -e "$@" "$file" >/dev/null || fail "$message"
+}
+
+api_status() {
+  local method=$1
+  local path=$2
+  local output=$3
+  local body_file=${4:-}
+  local idempotency_key=${5:-}
+  local token="${6-$read_token}"
+  local args=(
+    -sS
+    -o "$output"
+    -w '%{http_code}'
+    -X "$method"
+    -H 'Accept: application/json'
+  )
+  if [[ -n "$token" ]]; then
+    args+=( -H "Authorization: Bearer $token" )
+  fi
+  if [[ -n "$body_file" ]]; then
+    args+=( -H 'Content-Type: application/json' --data-binary "@$body_file" )
+  fi
+  if [[ -n "$idempotency_key" ]]; then
+    args+=( -H "Idempotency-Key: $idempotency_key" )
+  fi
+  curl "${args[@]}" "$base_url$path" || true
+}
+
+wait_live() {
+  local deadline=$((SECONDS + 180))
+  while (( SECONDS < deadline )); do
+    if curl -fsS "$base_url/v1/health/live" >"$run_dir/live.json" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "gateway liveness timeout"
+}
+
+wait_ready() {
+  local output=$1
+  local deadline=$((SECONDS + 600))
+  local scratch="$run_dir/.ready.json"
+  while (( SECONDS < deadline )); do
+    local code
+    code="$(api_status GET /v1/health/ready "$scratch")"
+    if [[ "$code" == "200" ]] && jq -e '.status == "ok"' "$scratch" >/dev/null 2>&1; then
+      cp "$scratch" "$output"
+      return 0
+    fi
+    sleep 0.25
+  done
+  cp "$scratch" "$output" 2>/dev/null || true
+  fail "gateway readiness timeout"
+}
+
+wait_deposit_status() {
+  local txid=$1
+  local status=$2
+  local output=$3
+  local deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
+    local code
+    code="$(api_status GET "/v1/wallets/$wallet_id/deposits?txid=$txid&status=$status&limit=100" "$output")"
+    if [[ "$code" == "200" ]] && jq -e --arg txid "$txid" --arg status "$status" \
+      '.data.deposits | any(.txid == $txid and .status == $status)' "$output" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "deposit $txid did not reach status $status"
+}
+
+wait_wallet_deposit_status() {
+  local target_wallet=$1
+  local token=$2
+  local txid=$3
+  local status=$4
+  local output=$5
+  local deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
+    local code
+    code="$(api_status GET "/v1/wallets/$target_wallet/deposits?txid=$txid&status=$status&limit=100" "$output" "" "" "$token")"
+    if [[ "$code" == "200" ]] && jq -e --arg txid "$txid" --arg status "$status" \
+      '.data.deposits | any(.txid == $txid and .status == $status)' "$output" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "wallet $target_wallet deposit $txid did not reach status $status"
+}
+
+wait_wallet_effect_kind() {
+  local target_wallet=$1
+  local token=$2
+  local txid=$3
+  local kind=$4
+  local output=$5
+  local deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
+    local code
+    code="$(api_status GET "/v1/transactions/$txid?wallet_id=$target_wallet" "$output" "" "" "$token")"
+    if [[ "$code" == "200" ]] && jq -e --arg kind "$kind" \
+      '.data.wallet_effects | any(.kind == $kind)' "$output" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "wallet $target_wallet transaction $txid did not expose effect $kind"
+}
+
+wait_node() {
+  local deadline=$((SECONDS + 180))
+  while (( SECONDS < deadline )); do
+    if node_cli getblockcount >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "junocashd readiness timeout"
+}
+
+wait_scanner_event_kind() {
+  local target_wallet=$1
+  local txid=$2
+  local kind=$3
+  local output=$4
+  local deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
+    if "${compose[@]}" exec -T juno-scan curl -fsS \
+      -H "Authorization: Bearer $JUNO_SCAN_API_BEARER_TOKEN" \
+      "http://127.0.0.1:8080/v1/wallets/$target_wallet/events?cursor=0&limit=1000&kind=$kind&txid=$txid" \
+      >"$output" 2>/dev/null && jq -e --arg kind "$kind" --arg txid "$txid" \
+      '.events | any(.kind == $kind and .payload.txid == $txid)' "$output" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "scanner event $kind for $txid did not appear"
+}
+
+assert_no_deposit() {
+  local txid=$1
+  local output=$2
+  local code
+  code="$(api_status GET "/v1/wallets/$wallet_id/deposits?txid=$txid&limit=100" "$output")"
+  [[ "$code" == "200" ]] || fail "deposit exclusion request returned HTTP $code"
+  assert_jq "$output" '.data.deposits | length == 0' "excluded transaction appeared in public deposits"
+}
+
+node_cli() {
+  "${compose[@]}" exec -T junocashd juno-cli "$@"
+}
+
+wait_operation() {
+  local opid=$1
+  local output=$2
+  local deadline=$((SECONDS + 600))
+  while (( SECONDS < deadline )); do
+    node_cli z_getoperationstatus "[\"$opid\"]" >"$output"
+    local state
+    state="$(jq -r '.[0].status // ""' "$output")"
+    case "$state" in
+      success)
+        jq -er '.[0].result.txid' "$output"
+        return 0
+        ;;
+      failed)
+        jq -r '.[0].error.message // "operation failed"' "$output" >&2
+        return 1
+        ;;
+    esac
+    sleep 0.25
+  done
+  fail "asynchronous node operation timed out"
+}
+
+shield_to() {
+  local address=$1
+  local prefix=$2
+  node_cli z_shieldcoinbase '*' "$address" >"$run_dir/${prefix}-shield-request.json"
+  local opid
+  opid="$(jq -er '.opid' "$run_dir/${prefix}-shield-request.json")"
+  wait_operation "$opid" "$run_dir/${prefix}-shield-operation.json"
+}
+
+log "Build clean-source tools and appliance images"
+GOWORK=off make -C "$workspace_root/juno-addrgen" build
+make -C "$workspace_root/juno-keys" build
+docker build \
+  --file "$repo_root/docker/txsign/Dockerfile" \
+  --build-arg "JUNO_TXSIGN_REF=$JUNO_TXSIGN_REF" \
+  --tag "$signer_image" \
+  "$repo_root"
+"$repo_root/scripts/check-clean-sources"
+assert_source_refs
+
+"$workspace_root/juno-keys/bin/juno-keys" seed new --out "$run_dir/hot.seed" >/dev/null
+"$workspace_root/juno-keys/bin/juno-keys" --json ufvk from-seed \
+  --seed-file "$run_dir/hot.seed" \
+  --network regtest >"$run_dir/ufvk.json"
+ufvk="$(jq -er '.data.ufvk' "$run_dir/ufvk.json")"
+
+"$workspace_root/juno-keys/bin/juno-keys" seed new --out "$run_dir/cold.seed" >/dev/null
+"$workspace_root/juno-keys/bin/juno-keys" --json ufvk from-seed \
+  --seed-file "$run_dir/cold.seed" \
+  --network regtest >"$run_dir/cold-ufvk.json"
+cold_ufvk="$(jq -er '.data.ufvk' "$run_dir/cold-ufvk.json")"
+
+jq -n \
+  --arg wallet "$wallet_id" \
+  --arg ufvk "$ufvk" \
+  --arg cold_wallet "$cold_wallet_id" \
+  --arg cold_ufvk "$cold_ufvk" \
+  '{wallets:[{wallet_id:$wallet,ufvk:$ufvk,birthday_height:0},{wallet_id:$cold_wallet,ufvk:$cold_ufvk,birthday_height:0}]}' \
+  >"$JUNO_GATEWAY_WALLETS_FILE"
+jq -n \
+  --arg read_token "$read_token" \
+  --arg address_token "$address_token" \
+  --arg broadcast_token "$broadcast_token" \
+  --arg cold_wallet_token "$cold_wallet_token" \
+  --arg wallet "$wallet_id" \
+  --arg cold_wallet "$cold_wallet_id" \
+  '{credentials:[
+    {name:"exchange-read",token:$read_token,scopes:["read","raw"],wallets:[$wallet]},
+    {name:"exchange-address",token:$address_token,scopes:["address"],wallets:[$wallet]},
+    {name:"exchange-broadcast",token:$broadcast_token,scopes:["broadcast"],wallets:[$wallet]},
+    {name:"cold-wallet",token:$cold_wallet_token,scopes:["read","address"],wallets:[$cold_wallet]}
+  ]}' \
+  >"$JUNO_GATEWAY_AUTH_FILE"
+
+"${compose[@]}" build
+"$repo_root/scripts/check-clean-sources"
+assert_source_refs
+
+gateway_image_id="$("${compose[@]}" images -q gateway)"
+[[ -n "$gateway_image_id" ]] || fail "could not resolve the built gateway image"
+gateway_runtime_uid="$(docker run --rm --entrypoint /usr/bin/id "$gateway_image_id" -u)"
+gateway_runtime_gid="$(docker run --rm --entrypoint /usr/bin/id "$gateway_image_id" -g)"
+[[ "$gateway_runtime_uid:$gateway_runtime_gid" == "10001:10001" ]] || \
+  fail "gateway image must run as deterministic UID:GID 10001:10001"
+if [[ "$(uname -s)" == "Linux" ]]; then
+  docker run --rm --user 0:0 --entrypoint /bin/chown \
+    --volume "$run_dir/config:/setup/config" \
+    --volume "$JUNO_INSTALLATION_STATE_DIR:/setup/installation-state" \
+    "$gateway_image_id" -R 10001:10001 /setup/config /setup/installation-state
+fi
+docker run --rm --read-only --entrypoint /bin/sh \
+  --volume "$run_dir/config:/run/juno:ro" \
+  --volume "$JUNO_INSTALLATION_STATE_DIR:/var/lib/juno-installation" \
+  "$gateway_image_id" -ec \
+  'test "$(id -u):$(id -g)" = "10001:10001"; test -r /run/juno/wallets.json; test -r /run/juno/auth.json; test -w /var/lib/juno-installation'
+
+log "Installation guard: serve fails before one-time init"
+if "${compose[@]}" run --no-deps --rm -T gateway >"$run_dir/serve-before-init.log" 2>&1; then
+  fail "gateway served before installation init"
+fi
+grep -F 'installation manifest is missing' "$run_dir/serve-before-init.log" >/dev/null || \
+  fail "pre-init serve did not report the missing installation manifest"
+
+"${compose[@]}" run --no-deps --rm -T gateway init --acknowledge "$init_ack" \
+  >"$run_dir/init.json"
+assert_jq "$run_dir/init.json" \
+  '.status == "initialized" and (.installation_id | test("^[0-9a-f]{64}$"))' \
+  "one-time installation init returned invalid output"
+
+if "${compose[@]}" run --no-deps --rm -T gateway init --acknowledge "$init_ack" \
+  >"$run_dir/init-repeat.log" 2>&1; then
+  fail "repeated installation init succeeded"
+fi
+grep -F 'one-time only' "$run_dir/init-repeat.log" >/dev/null || \
+  fail "repeated init did not report the one-time guard"
+
+"${compose[@]}" up -d junocashd juno-scan gateway
+
+for _ in $(seq 1 120); do
+  published="$("${compose[@]}" port gateway 8080 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$published" ]]; then
+    base_url="http://$published"
+    break
+  fi
+  sleep 0.25
+done
+[[ -n "$base_url" ]] || fail "gateway did not publish its port"
+
+wait_live
+wait_ready "$run_dir/ready-initial.json"
+assert_jq "$run_dir/ready-initial.json" '.data.scanner.confirmations == 100' \
+  "scanner and gateway confirmation policies differ"
+
+log "Verify private topology and all three network configurations"
+"$repo_root/scripts/check-compose"
+for service in junocashd juno-scan; do
+  container_id="$("${compose[@]}" ps -q "$service")"
+  bindings="$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$container_id")"
+  [[ "$(jq -nr --argjson value "${bindings:-null}" '($value // {}) | length')" == "0" ]] || \
+    fail "$service unexpectedly publishes a host port"
+done
+gateway_id="$("${compose[@]}" ps -q gateway)"
+bindings="$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$gateway_id")"
+[[ "$(jq -nr --argjson value "$bindings" '($value // {}) | length')" == "1" ]] || \
+  fail "gateway must publish exactly one host port"
+gateway_networks="$(docker inspect -f '{{json .NetworkSettings.Networks}}' "$gateway_id")"
+[[ "$(jq -nr --argjson value "$gateway_networks" '$value | keys | length')" == "1" ]] || \
+  fail "gateway must join exactly one network"
+jq -nr --argjson value "$gateway_networks" --arg network "${project}_backend" \
+  '$value | has($network)' >/dev/null || fail "gateway is not isolated to the internal backend network"
+backend_id="$(docker network inspect -f '{{.Id}}' "${project}_backend")"
+[[ "$(docker network inspect -f '{{.Internal}}' "$backend_id")" == "true" ]] || \
+  fail "gateway backend network must be internal"
+scanner_id="$("${compose[@]}" ps -q juno-scan)"
+scanner_networks="$(docker inspect -f '{{json .NetworkSettings.Networks}}' "$scanner_id")"
+jq -nr --argjson value "$scanner_networks" \
+  --arg backend "${project}_backend" --arg storage "${project}_storage" \
+  '$value | keys | sort == ([$backend,$storage] | sort)' >/dev/null || \
+  fail "scanner must join only backend and storage networks"
+
+code="$(api_status GET /v1/version "$run_dir/version.json")"
+[[ "$code" == "200" ]] || fail "version returned HTTP $code"
+assert_jq "$run_dir/version.json" \
+  --arg revision "$JUNO_GATEWAY_REVISION" \
+  --arg scanner "$JUNO_SCAN_REF" \
+  --arg addrgen "$JUNO_ADDRGEN_REF" \
+  --arg txbuild "$JUNO_TXBUILD_REF" \
+  --arg txsign "$JUNO_TXSIGN_REF" \
+  '.data.network == "regtest"
+    and .data.build.revision == $revision
+    and .data.build.components["juno-scan"] == $scanner
+    and .data.build.components["juno-addrgen"] == $addrgen
+    and .data.build.components["juno-txbuild"] == $txbuild
+    and .data.build.components["juno-txsign"] == $txsign
+    and .data.build.components.junocashd == "v0.9.12"' \
+  "version manifest is incomplete"
+
+log "API boundary: chain tip, authentication, scopes, and wallet isolation"
+code="$(api_status GET /v1/network/tip "$run_dir/network-tip.json")"
+[[ "$code" == "200" ]] || fail "network tip returned HTTP $code"
+assert_jq "$run_dir/network-tip.json" \
+  '.data.network == "regtest"
+    and (.data.height | type == "number")
+    and (.data.scanner_height | type == "number")
+    and .data.scanner_height <= .data.height
+    and .data.scanner_lag == (.data.height - .data.scanner_height)
+    and (.data.hash | test("^[0-9a-f]{64}$"))' \
+  "network tip response is invalid"
+
+code="$(api_status GET /v1/version "$run_dir/auth-missing.json" "" "" "")"
+[[ "$code" == "401" ]] || fail "missing authentication must return 401, got HTTP $code"
+assert_jq "$run_dir/auth-missing.json" '.error.code == "unauthorized"' \
+  "missing authentication returned the wrong error"
+
+code="$(api_status GET /v1/version "$run_dir/auth-invalid.json" "" "" "invalid-$(openssl rand -hex 16)")"
+[[ "$code" == "401" ]] || fail "invalid authentication must return 401, got HTTP $code"
+assert_jq "$run_dir/auth-invalid.json" '.error.code == "unauthorized"' \
+  "invalid authentication returned the wrong error"
+
+jq -n '{label:"must-not-allocate"}' >"$run_dir/insufficient-scope-request.json"
+code="$(api_status POST "/v1/wallets/$wallet_id/addresses" "$run_dir/insufficient-scope.json" "$run_dir/insufficient-scope-request.json" "" "$read_token")"
+[[ "$code" == "403" ]] || fail "insufficient scope must return 403, got HTTP $code"
+assert_jq "$run_dir/insufficient-scope.json" '.error.code == "forbidden"' \
+  "insufficient scope returned the wrong error"
+
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1" "$run_dir/cross-wallet.json" "" "" "$cold_wallet_token")"
+[[ "$code" == "403" ]] || fail "cross-wallet access must return 403, got HTTP $code"
+assert_jq "$run_dir/cross-wallet.json" '.error.code == "forbidden"' \
+  "cross-wallet access returned the wrong error"
+
+log "Integration: watch-only allocation and owned-address enforcement"
+jq -n '{label:"customer-1001"}' >"$run_dir/allocate-1-request.json"
+code="$(api_status POST "/v1/wallets/$wallet_id/addresses" "$run_dir/address-1.json" "$run_dir/allocate-1-request.json" "" "$address_token")"
+[[ "$code" == "201" ]] || fail "first address allocation returned HTTP $code"
+deposit_address="$(jq -er '.data.address' "$run_dir/address-1.json")"
+
+jq -n '{label:"customer-1002"}' >"$run_dir/allocate-2-request.json"
+code="$(api_status POST "/v1/wallets/$wallet_id/addresses" "$run_dir/address-2.json" "$run_dir/allocate-2-request.json" "" "$address_token")"
+[[ "$code" == "201" ]] || fail "second address allocation returned HTTP $code"
+zero_address="$(jq -er '.data.address' "$run_dir/address-2.json")"
+assert_jq "$run_dir/address-2.json" '.data.diversifier_index == 1' "address index did not advance atomically"
+
+log "Address ledger: allocation survives a gateway restart"
+for index in 0 1; do
+  jq -n --arg label "cold-$index" '{label:$label}' >"$run_dir/cold-allocate-$index-request.json"
+  code="$(api_status POST "/v1/wallets/$cold_wallet_id/addresses" "$run_dir/cold-address-$index.json" "$run_dir/cold-allocate-$index-request.json" "" "$cold_wallet_token")"
+  [[ "$code" == "201" ]] || fail "cold-wallet allocation $index returned HTTP $code"
+  assert_jq "$run_dir/cold-address-$index.json" --argjson index "$index" \
+    '.data.diversifier_index == $index' "cold-wallet address index $index was not allocated"
+done
+"${compose[@]}" restart gateway >/dev/null
+wait_live
+wait_ready "$run_dir/ready-after-gateway-restart.json"
+jq -n '{label:"cold-after-restart"}' >"$run_dir/cold-allocate-2-request.json"
+code="$(api_status POST "/v1/wallets/$cold_wallet_id/addresses" "$run_dir/cold-address-2.json" "$run_dir/cold-allocate-2-request.json" "" "$cold_wallet_token")"
+[[ "$code" == "201" ]] || fail "cold-wallet allocation after restart returned HTTP $code"
+assert_jq "$run_dir/cold-address-2.json" '.data.diversifier_index == 2' \
+  "external address ledger did not survive gateway restart"
+cold_deposit_address="$(jq -er '.data.address' "$run_dir/cold-address-0.json")"
+
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$zero_address/balance" "$run_dir/balance-zero.json")"
+[[ "$code" == "200" ]] || fail "known empty address returned HTTP $code"
+assert_jq "$run_dir/balance-zero.json" \
+  '.data.balance.available_zat == 0 and .data.balance.pending_incoming_zat == 0 and .data.balance.total_unspent_zat == 0 and .data.balance.min_confirmations == 100' \
+  "known empty address did not return explicit zero balances"
+
+account="$(node_cli z_getnewaccount | jq -er '.')"
+destination_address="$(node_cli z_getaddressforaccount "$account" | jq -er '.address')"
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$destination_address/balance" "$run_dir/balance-unowned.json")"
+[[ "$code" == "404" ]] || fail "unallocated address balance must return 404, got HTTP $code"
+
+log "Manual deposit: detect at one confirmation and finalize at 100"
+node_cli generate 101 >"$run_dir/mature-blocks.json"
+wait_ready "$run_dir/ready-after-maturity.json"
+deposit_txid="$(shield_to "$deposit_address" deposit-1)"
+node_cli generate 1 >"$run_dir/deposit-1-block.json"
+wait_ready "$run_dir/ready-deposit-detected.json"
+wait_deposit_status "$deposit_txid" detected "$run_dir/deposit-detected.json"
+
+log "Second wallet: observe a real deposit and wallet-scoped transaction effect"
+cold_deposit_txid="$(shield_to "$cold_deposit_address" cold-wallet-deposit)"
+node_cli generate 1 >"$run_dir/cold-wallet-deposit-block.json"
+wait_ready "$run_dir/ready-cold-wallet-deposit.json"
+wait_wallet_deposit_status "$cold_wallet_id" "$cold_wallet_token" "$cold_deposit_txid" detected \
+  "$run_dir/cold-wallet-deposit-detected.json"
+wait_wallet_effect_kind "$cold_wallet_id" "$cold_wallet_token" "$cold_deposit_txid" DepositEvent \
+  "$run_dir/cold-wallet-transaction-effects.json"
+
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$deposit_address/balance" "$run_dir/balance-pending.json")"
+[[ "$code" == "200" ]] || fail "pending balance returned HTTP $code"
+assert_jq "$run_dir/balance-pending.json" \
+  '.data.balance.available_zat == 0 and .data.balance.pending_incoming_zat > 0 and .data.balance.total_unspent_zat > 0' \
+  "one-confirmation deposit was not held pending"
+
+node_cli generate 99 >"$run_dir/deposit-confirmation-blocks.json"
+wait_ready "$run_dir/ready-deposit-confirmed.json"
+wait_deposit_status "$deposit_txid" confirmed "$run_dir/deposit-confirmed.json"
+wait_wallet_deposit_status "$cold_wallet_id" "$cold_wallet_token" "$cold_deposit_txid" confirmed \
+  "$run_dir/cold-wallet-deposit-confirmed.json"
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$deposit_address/balance" "$run_dir/balance-funded.json")"
+[[ "$code" == "200" ]] || fail "funded balance returned HTTP $code"
+assert_jq "$run_dir/balance-funded.json" \
+  '.data.balance.available_zat > 1000000 and .data.balance.pending_incoming_zat == 0' \
+  "100-confirmation deposit did not become available"
+funded_total="$(jq -er '.data.balance.total_unspent_zat' "$run_dir/balance-funded.json")"
+
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1" "$run_dir/deposits-page-1.json")"
+[[ "$code" == "200" ]] || fail "first deposit page returned HTTP $code"
+cursor_page_1="$(jq -er '.data.next_cursor' "$run_dir/deposits-page-1.json")"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1&cursor=$cursor_page_1" "$run_dir/deposits-page-2.json")"
+[[ "$code" == "200" ]] || fail "second deposit page returned HTTP $code"
+assert_jq "$run_dir/deposits-page-1.json" '.data.deposits | length == 1' "deposit pagination did not honor limit"
+assert_jq "$run_dir/deposits-page-1.json" --arg txid "$deposit_txid" \
+  '.data.deposits[0].txid == $txid and .data.deposits[0].status == "detected"' \
+  "first deposit page did not contain the detected lifecycle event"
+assert_jq "$run_dir/deposits-page-2.json" --arg txid "$deposit_txid" --arg cursor "$cursor_page_1" \
+  '.data.deposits[0].txid == $txid and .data.deposits[0].status == "confirmed" and .data.next_cursor != $cursor' \
+  "second deposit page did not advance to the confirmed lifecycle event"
+continuity_cursor="$(jq -er '.data.next_cursor' "$run_dir/deposits-page-2.json")"
+continuity_epoch="$(jq -er '.data.event_epoch' "$run_dir/deposits-page-2.json")"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1&status=confirmed&cursor=$cursor_page_1" "$run_dir/deposits-filter-mismatch.json")"
+[[ "$code" == "409" ]] || fail "cursor reuse under changed filters must return 409"
+assert_jq "$run_dir/deposits-filter-mismatch.json" '.error.code == "cursor_filter_mismatch"' \
+  "changed deposit filters returned the wrong cursor error"
+
+log "Scanner restart: rotate event epoch and require explicit cursor reset"
+"${compose[@]}" restart juno-scan >/dev/null
+wait_ready "$run_dir/ready-after-ordinary-scanner-restart.json"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=100&cursor=$continuity_cursor" "$run_dir/deposits-after-ordinary-scanner-restart.json")"
+[[ "$code" == "409" ]] || fail "retained cursor after scanner restart must return 409, got HTTP $code"
+assert_jq "$run_dir/deposits-after-ordinary-scanner-restart.json" --arg epoch "$continuity_epoch" \
+  '.error.code == "cursor_reset_required"
+    and .error.details.action == "restart_without_cursor"
+    and .error.details.event_epoch != $epoch' \
+  "ordinary scanner restart did not rotate the epoch with reset instructions"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=100" "$run_dir/deposits-replayed-after-ordinary-restart.json")"
+[[ "$code" == "200" ]] || fail "cursorless replay after scanner restart returned HTTP $code"
+assert_jq "$run_dir/deposits-replayed-after-ordinary-restart.json" --arg txid "$deposit_txid" \
+  '(.data.deposits | any(.txid == $txid and .status == "detected"))
+    and (.data.deposits | any(.txid == $txid and .status == "confirmed"))
+    and ([.data.deposits[] | select(.txid == $txid) | .deposit_id] | unique | length == 1)' \
+  "cursorless replay after scanner restart skipped or changed the deposit identity"
+
+log "Integration: exclude a real deposit sent to an unallocated UFVK address"
+"$workspace_root/juno-addrgen/bin/juno-addrgen" derive \
+  --ufvk "$ufvk" \
+  --index 100 \
+  --json >"$run_dir/unallocated-address.json"
+unallocated_address="$(jq -er '.address' "$run_dir/unallocated-address.json")"
+unallocated_txid="$(shield_to "$unallocated_address" deposit-unallocated)"
+node_cli generate 1 >"$run_dir/unallocated-deposit-block.json"
+wait_ready "$run_dir/ready-unallocated-detected.json"
+assert_no_deposit "$unallocated_txid" "$run_dir/unallocated-deposit-detected.json"
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$unallocated_address/balance" "$run_dir/unallocated-balance.json")"
+[[ "$code" == "404" ]] || fail "real unallocated UFVK address balance must return 404"
+node_cli generate 99 >"$run_dir/unallocated-confirmation-blocks.json"
+wait_ready "$run_dir/ready-unallocated-confirmed.json"
+assert_no_deposit "$unallocated_txid" "$run_dir/unallocated-deposit-confirmed.json"
+
+log "E2E withdrawal: online plan, offline sign, prevalidated raw broadcast"
+"${compose[@]}" run --rm -T txbuild send \
+  --wallet-id "$wallet_id" \
+  --coin-type 8135 \
+  --account 0 \
+  --to "$destination_address" \
+  --amount-zat 1000000 \
+  --change-address "$deposit_address" \
+  --minconf 100 >"$run_dir/withdrawal.txplan.json"
+assert_jq "$run_dir/withdrawal.txplan.json" \
+  '.version == "v0" and .kind == "withdrawal" and .outputs[0].amount_zat == "1000000"' \
+  "txbuild returned an invalid withdrawal plan"
+
+docker create \
+  --name "$signer_container" \
+  --network none \
+  --read-only \
+  --tmpfs /tmp:size=64m,mode=1777 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --pids-limit 128 \
+  --user "$(id -u):$(id -g)" \
+  --volume "$run_dir/withdrawal.txplan.json:/work/withdrawal.txplan.json:ro" \
+  --volume "$run_dir/hot.seed:/work/hot.seed:ro" \
+  "$signer_image" sign \
+  --txplan /work/withdrawal.txplan.json \
+  --seed-file /work/hot.seed \
+  --action-indices \
+  --json >"$run_dir/offline-signer-container-id.txt"
+docker inspect -f '{{.HostConfig.NetworkMode}}' "$signer_container" >"$run_dir/offline-signer-network-mode.txt"
+[[ "$(tr -d '\r\n' <"$run_dir/offline-signer-network-mode.txt")" == "none" ]] || \
+  fail "signer container was not network-isolated"
+docker start -a "$signer_container" \
+  >"$run_dir/withdrawal-signed.json" \
+  2>"$run_dir/offline-signer.stderr"
+docker rm "$signer_container" >/dev/null
+withdrawal_txid="$(jq -er '.data.txid' "$run_dir/withdrawal-signed.json")"
+raw_tx="$(jq -er '.data.raw_tx_hex' "$run_dir/withdrawal-signed.json")"
+
+wrong_txid="$(printf '0%.0s' {1..64})"
+jq -n --arg raw "$raw_tx" --arg txid "$wrong_txid" \
+  '{raw_tx_hex:$raw,expected_txid:$txid}' >"$run_dir/broadcast-wrong-request.json"
+code="$(api_status POST /v1/transactions/broadcast "$run_dir/broadcast-wrong-response.json" "$run_dir/broadcast-wrong-request.json" "wrong-$(openssl rand -hex 8)" "$broadcast_token")"
+[[ "$code" == "422" ]] || fail "wrong expected_txid must fail before broadcast, got HTTP $code"
+assert_jq "$run_dir/broadcast-wrong-response.json" '.error.code == "expected_txid_mismatch"' \
+  "wrong expected_txid returned the wrong error code"
+node_cli getrawmempool >"$run_dir/mempool-after-wrong-txid.json"
+assert_jq "$run_dir/mempool-after-wrong-txid.json" \
+  --arg txid "$withdrawal_txid" 'index($txid) == null' \
+  "wrong expected_txid still mutated the mempool"
+
+jq -n --arg raw "$raw_tx" --arg txid "$withdrawal_txid" \
+  '{raw_tx_hex:$raw,expected_txid:$txid}' >"$run_dir/broadcast-request.json"
+idempotency_key="withdrawal-$(openssl rand -hex 8)"
+code="$(api_status POST /v1/transactions/broadcast "$run_dir/broadcast-accepted.json" "$run_dir/broadcast-request.json" "$idempotency_key" "$broadcast_token")"
+[[ "$code" == "202" ]] || fail "signed broadcast returned HTTP $code"
+assert_jq "$run_dir/broadcast-accepted.json" \
+  --arg txid "$withdrawal_txid" '.data.txid == $txid and .data.accepted == true and .data.already_known == false' \
+  "broadcast acceptance response is invalid"
+
+code="$(api_status POST /v1/transactions/broadcast "$run_dir/broadcast-replay.json" "$run_dir/broadcast-request.json" "$idempotency_key" "$broadcast_token")"
+[[ "$code" == "200" ]] || fail "idempotent replay returned HTTP $code"
+assert_jq "$run_dir/broadcast-replay.json" --arg txid "$withdrawal_txid" '.data.txid == $txid' \
+  "idempotent replay changed transaction identity"
+
+code="$(api_status GET "/v1/transactions/$withdrawal_txid?wallet_id=$wallet_id&include_raw=true" "$run_dir/withdrawal-mempool.json")"
+[[ "$code" == "200" ]] || fail "mempool lookup returned HTTP $code"
+assert_jq "$run_dir/withdrawal-mempool.json" \
+  --arg raw "$raw_tx" '.data.transaction.state == "mempool" and .data.transaction.raw_tx_hex == $raw' \
+  "mempool/raw transaction lookup is invalid"
+
+node_cli generate 1 >"$run_dir/withdrawal-block.json"
+wait_ready "$run_dir/ready-withdrawal-mined.json"
+code="$(api_status GET "/v1/transactions/$withdrawal_txid?wallet_id=$wallet_id" "$run_dir/withdrawal-confirmed.json")"
+[[ "$code" == "200" ]] || fail "confirmed lookup returned HTTP $code"
+assert_jq "$run_dir/withdrawal-confirmed.json" \
+  '.data.transaction.state == "confirmed" and .data.transaction.confirmations >= 1' \
+  "withdrawal did not confirm"
+
+wait_wallet_effect_kind "$wallet_id" "$read_token" "$withdrawal_txid" SpendEvent \
+  "$run_dir/withdrawal-wallet-effects.json"
+assert_jq "$run_dir/withdrawal-wallet-effects.json" --arg txid "$withdrawal_txid" \
+  '(.data.wallet_effects | any(.kind == "SpendEvent" and .payload.txid == $txid))
+    and (.data.wallet_effects | any(.kind == "OutgoingOutputEvent" and .payload.txid == $txid))' \
+  "transaction lookup did not expose both outgoing wallet effects"
+
+node_cli z_listunspent 1 9999999 true >"$run_dir/destination-unspent.json"
+assert_jq "$run_dir/destination-unspent.json" --arg txid "$withdrawal_txid" \
+  'any(.txid == $txid and .pool == "orchard" and .spendable == true)' \
+  "node destination did not receive the withdrawal"
+
+assert_no_deposit "$withdrawal_txid" "$run_dir/withdrawal-change-not-deposit.json"
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$deposit_address/balance?min_confirmations=0" "$run_dir/balance-after-withdrawal.json")"
+[[ "$code" == "200" ]] || fail "post-withdrawal balance returned HTTP $code"
+assert_jq "$run_dir/balance-after-withdrawal.json" --argjson before "$funded_total" \
+  '.data.balance.total_unspent_zat < $before' \
+  "withdrawal did not reduce the source address balance"
+
+node_cli generate 99 >"$run_dir/withdrawal-confirmation-blocks.json"
+wait_ready "$run_dir/ready-withdrawal-final.json"
+assert_no_deposit "$withdrawal_txid" "$run_dir/withdrawal-change-still-not-deposit.json"
+
+log "Withdrawal expiry: payload conflict, dropped mempool transaction, and scanner expiry"
+"${compose[@]}" run --rm -T txbuild send \
+  --wallet-id "$wallet_id" \
+  --coin-type 8135 \
+  --account 0 \
+  --to "$destination_address" \
+  --amount-zat 500000 \
+  --change-address "$deposit_address" \
+  --minconf 100 \
+  --expiry-offset 4 >"$run_dir/expiry.txplan.json"
+expiry_height="$(jq -er '.expiry_height' "$run_dir/expiry.txplan.json")"
+
+docker create \
+  --name "$signer_container" \
+  --network none \
+  --read-only \
+  --tmpfs /tmp:size=64m,mode=1777 \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --pids-limit 128 \
+  --user "$(id -u):$(id -g)" \
+  --volume "$run_dir/expiry.txplan.json:/work/expiry.txplan.json:ro" \
+  --volume "$run_dir/hot.seed:/work/hot.seed:ro" \
+  "$signer_image" sign \
+  --txplan /work/expiry.txplan.json \
+  --seed-file /work/hot.seed \
+  --action-indices \
+  --json >"$run_dir/expiry-signer-container-id.txt"
+docker start -a "$signer_container" \
+  >"$run_dir/expiry-signed.json" \
+  2>"$run_dir/expiry-signer.stderr"
+docker rm "$signer_container" >/dev/null
+expiry_txid="$(jq -er '.data.txid' "$run_dir/expiry-signed.json")"
+expiry_raw_tx="$(jq -er '.data.raw_tx_hex' "$run_dir/expiry-signed.json")"
+jq -n --arg raw "$expiry_raw_tx" --arg txid "$expiry_txid" \
+  '{raw_tx_hex:$raw,expected_txid:$txid}' >"$run_dir/expiry-broadcast-request.json"
+
+code="$(api_status POST /v1/transactions/broadcast "$run_dir/broadcast-payload-conflict.json" "$run_dir/expiry-broadcast-request.json" "$idempotency_key" "$broadcast_token")"
+[[ "$code" == "409" ]] || fail "same idempotency key with a different valid payload must return 409, got HTTP $code"
+assert_jq "$run_dir/broadcast-payload-conflict.json" \
+  '.error.code == "idempotency_conflict" and .error.retryable == false' \
+  "same-key payload conflict returned the wrong error"
+node_cli getrawmempool >"$run_dir/mempool-after-payload-conflict.json"
+assert_jq "$run_dir/mempool-after-payload-conflict.json" --arg txid "$expiry_txid" \
+  'index($txid) == null' "payload conflict still broadcast the second transaction"
+
+expiry_idempotency_key="expiry-$(openssl rand -hex 8)"
+code="$(api_status POST /v1/transactions/broadcast "$run_dir/expiry-broadcast-accepted.json" "$run_dir/expiry-broadcast-request.json" "$expiry_idempotency_key" "$broadcast_token")"
+[[ "$code" == "202" ]] || fail "expiry transaction broadcast returned HTTP $code"
+wait_wallet_effect_kind "$wallet_id" "$read_token" "$expiry_txid" OutgoingOutputEvent \
+  "$run_dir/expiry-mempool-wallet-effects.json"
+
+"${compose[@]}" restart junocashd >/dev/null
+wait_node
+node_cli getrawmempool >"$run_dir/mempool-after-node-restart.json"
+assert_jq "$run_dir/mempool-after-node-restart.json" --arg txid "$expiry_txid" \
+  'index($txid) == null' "persistmempool=0 restart did not drop the expiry transaction"
+tip_height="$(node_cli getblockcount | jq -er '.')"
+blocks_to_expiry=$((expiry_height + 1 - tip_height))
+if (( blocks_to_expiry < 1 )); then
+  blocks_to_expiry=1
+fi
+node_cli generate "$blocks_to_expiry" >"$run_dir/expiry-blocks.json"
+wait_ready "$run_dir/ready-after-expiry.json"
+wait_scanner_event_kind "$wallet_id" "$expiry_txid" OutgoingOutputExpired \
+  "$run_dir/expiry-scanner-event.json"
+assert_jq "$run_dir/expiry-scanner-event.json" --arg txid "$expiry_txid" --argjson expiry "$expiry_height" \
+  '.events | any(.kind == "OutgoingOutputExpired"
+    and .payload.txid == $txid
+    and .payload.status.state == "expired"
+    and .payload.expiry_height == $expiry)' \
+  "scanner expiry event did not retain transaction expiry identity"
+code="$(api_status GET "/v1/transactions/$expiry_txid?wallet_id=$wallet_id" "$run_dir/expiry-transaction-dropped.json")"
+[[ "$code" == "200" ]] || fail "dropped expired transaction lookup must return terminal scanner state, got HTTP $code"
+assert_jq "$run_dir/expiry-transaction-dropped.json" --arg txid "$expiry_txid" --argjson expiry "$expiry_height" \
+  '.data.transaction.txid == $txid
+    and .data.transaction.state == "expired"
+    and .data.transaction.confirmations == 0
+    and .data.transaction.expiry_height == $expiry
+    and (.data.wallet_effects | last | .kind == "OutgoingOutputExpired")' \
+  "dropped expired transaction did not return the final scanner lifecycle state"
+
+log "Recovery: wipe scanner only, require epoch reset, replay, then detect a new deposit"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1000" "$run_dir/deposits-before-recovery.json")"
+[[ "$code" == "200" ]] || fail "pre-recovery deposits returned HTTP $code"
+old_cursor="$(jq -er '.data.next_cursor' "$run_dir/deposits-before-recovery.json")"
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$deposit_address/balance" "$run_dir/balance-before-recovery.json")"
+[[ "$code" == "200" ]] || fail "pre-recovery balance returned HTTP $code"
+
+scanner_id="$("${compose[@]}" ps -q juno-scan)"
+scanner_volume="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/juno-scan"}}{{.Name}}{{end}}{{end}}' "$scanner_id")"
+[[ -n "$scanner_volume" ]] || fail "could not identify scanner data volume"
+"${compose[@]}" stop gateway juno-scan >/dev/null
+"${compose[@]}" rm -f juno-scan >/dev/null
+docker volume rm "$scanner_volume" >/dev/null
+"${compose[@]}" up -d juno-scan gateway
+
+wait_live
+code="$(api_status GET /v1/health/ready "$run_dir/ready-during-scanner-recovery.json")"
+[[ "$code" == "503" ]] || fail "financial readiness did not close during scanner rebuild (HTTP $code)"
+wait_ready "$run_dir/ready-after-scanner-recovery.json"
+
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1000&cursor=$old_cursor" "$run_dir/deposits-old-cursor.json")"
+[[ "$code" == "409" ]] || fail "pre-recovery cursor must require explicit reset, got HTTP $code"
+assert_jq "$run_dir/deposits-old-cursor.json" \
+  '.error.code == "cursor_reset_required" and .error.details.action == "restart_without_cursor"' \
+  "cursor epoch mismatch did not return reset instructions"
+
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1000" "$run_dir/deposits-after-recovery.json")"
+[[ "$code" == "200" ]] || fail "post-recovery replay returned HTTP $code"
+reset_cursor="$(jq -er '.data.next_cursor' "$run_dir/deposits-after-recovery.json")"
+assert_jq "$run_dir/deposits-after-recovery.json" --arg txid "$deposit_txid" \
+  '.data.deposits | any(.txid == $txid and .status == "confirmed")' \
+  "confirmed external deposit was not replayed after scanner rebuild"
+assert_jq "$run_dir/deposits-after-recovery.json" --arg txid "$withdrawal_txid" \
+  '.data.deposits | all(.txid != $txid)' \
+  "withdrawal change appeared after scanner rebuild"
+
+code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$deposit_address/balance" "$run_dir/balance-after-recovery.json")"
+[[ "$code" == "200" ]] || fail "post-recovery balance returned HTTP $code"
+jq -S '.data.balance' "$run_dir/balance-before-recovery.json" >"$run_dir/balance-before.normalized.json"
+jq -S '.data.balance' "$run_dir/balance-after-recovery.json" >"$run_dir/balance-after.normalized.json"
+cmp -s "$run_dir/balance-before.normalized.json" "$run_dir/balance-after.normalized.json" || \
+  fail "scanner rebuild changed the recovered address balance"
+
+post_recovery_txid="$(shield_to "$deposit_address" deposit-after-recovery)"
+node_cli generate 1 >"$run_dir/post-recovery-deposit-block.json"
+post_recovery_block_hash="$(jq -er '.[0]' "$run_dir/post-recovery-deposit-block.json")"
+wait_ready "$run_dir/ready-post-recovery-deposit.json"
+code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=100&cursor=$reset_cursor" "$run_dir/post-recovery-new-deposit.json")"
+[[ "$code" == "200" ]] || fail "new post-recovery deposit poll returned HTTP $code"
+assert_jq "$run_dir/post-recovery-new-deposit.json" --arg txid "$post_recovery_txid" \
+  '.data.deposits | any(.txid == $txid and .status == "detected")' \
+  "new deposit was skipped after controlled cursor reset"
+
+log "Manual reorg: confirmed to unconfirmed to orphaned"
+node_cli generate 99 >"$run_dir/post-recovery-confirmation-blocks.json"
+wait_ready "$run_dir/ready-before-reorg.json"
+wait_deposit_status "$post_recovery_txid" confirmed "$run_dir/post-recovery-deposit-confirmed.json"
+confirmation_tip_hash="$(jq -er '.[-1]' "$run_dir/post-recovery-confirmation-blocks.json")"
+node_cli invalidateblock "$confirmation_tip_hash" >"$run_dir/reorg-confirmation-tip-invalidate.json"
+wait_ready "$run_dir/ready-after-confirmation-rollback.json"
+wait_deposit_status "$post_recovery_txid" unconfirmed "$run_dir/post-recovery-deposit-unconfirmed.json"
+node_cli invalidateblock "$post_recovery_block_hash" >"$run_dir/reorg-deposit-invalidate.json"
+wait_ready "$run_dir/ready-after-deposit-orphan.json"
+wait_deposit_status "$post_recovery_txid" orphaned "$run_dir/post-recovery-deposit-orphaned.json"
+node_cli getrawmempool >"$run_dir/mempool-after-reorg.json"
+if jq -e --arg txid "$post_recovery_txid" 'index($txid) != null' "$run_dir/mempool-after-reorg.json" >/dev/null; then
+  printf 'returned_to_mempool\n' >"$run_dir/reorg-transaction-disposition.txt"
+else
+  printf 'not_in_mempool\n' >"$run_dir/reorg-transaction-disposition.txt"
+fi
+node_cli generate 1 >"$run_dir/reorg-replacement-block.json"
+wait_ready "$run_dir/ready-after-reorg-replacement.json"
+
+if [[ "${SKIP_GATEWAY_LOSS_TEST:-0}" != "1" ]]; then
+  log "Audited recovery: wipe gateway and scanner databases while retaining installation state"
+  gateway_id="$("${compose[@]}" ps -q gateway)"
+  gateway_volume="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/juno-gateway"}}{{.Name}}{{end}}{{end}}' "$gateway_id")"
+  [[ -n "$gateway_volume" ]] || fail "could not identify gateway data volume"
+  scanner_id="$("${compose[@]}" ps -q juno-scan)"
+  scanner_volume="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/juno-scan"}}{{.Name}}{{end}}{{end}}' "$scanner_id")"
+  [[ -n "$scanner_volume" ]] || fail "could not identify scanner data volume for joint recovery"
+  "${compose[@]}" stop gateway juno-scan >/dev/null
+  "${compose[@]}" rm -f gateway juno-scan >/dev/null
+  docker volume rm "$gateway_volume" >/dev/null
+  docker volume rm "$scanner_volume" >/dev/null
+  if "${compose[@]}" run --no-deps --rm -T gateway >"$run_dir/joint-loss-guard.log" 2>&1; then
+    fail "fresh gateway and scanner databases served against a retained manifest"
+  fi
+  grep -F 'gateway database is not bound to this installation' "$run_dir/joint-loss-guard.log" >/dev/null || \
+    fail "joint database loss did not require explicit audited recovery"
+  if curl -fsS --max-time 2 "$base_url/v1/health/live" >"$run_dir/gateway-loss-live.txt" 2>&1; then
+    fail "fresh gateway DB exposed a live endpoint before audited recovery"
+  fi
+
+  "${compose[@]}" run --no-deps --rm -T gateway recovery-checksum \
+    --next-index "$cold_wallet_id=7" >"$run_dir/recovery-checksum.json"
+  recovery_checksum="$(jq -er '.mapping_sha256' "$run_dir/recovery-checksum.json")"
+  "${compose[@]}" run --no-deps --rm -T gateway recover \
+    --acknowledge "$recover_ack" \
+    --mapping-sha256 "$recovery_checksum" \
+    --next-index "$cold_wallet_id=7" >"$run_dir/recovery.json"
+  assert_jq "$run_dir/recovery.json" --arg checksum "$recovery_checksum" \
+    '.status == "recovered" and .mapping_sha256 == $checksum' \
+    "audited gateway recovery returned invalid output"
+
+  "${compose[@]}" up -d juno-scan gateway
+  wait_live
+  wait_ready "$run_dir/ready-after-joint-recovery.json"
+
+  jq -n '{label:"customer-1003"}' >"$run_dir/allocate-3-request.json"
+  code="$(api_status POST "/v1/wallets/$wallet_id/addresses" "$run_dir/address-3.json" "$run_dir/allocate-3-request.json" "" "$address_token")"
+  [[ "$code" == "201" ]] || fail "allocation after audited recovery returned HTTP $code"
+  assert_jq "$run_dir/address-3.json" '.data.diversifier_index == 2' \
+    "recovered gateway reused or skipped the expected next hot-wallet index"
+
+  jq -n '{label:"cold-explicit-high-water"}' >"$run_dir/cold-allocate-7-request.json"
+  code="$(api_status POST "/v1/wallets/$cold_wallet_id/addresses" "$run_dir/cold-address-7.json" "$run_dir/cold-allocate-7-request.json" "" "$cold_wallet_token")"
+  [[ "$code" == "201" ]] || fail "allocation after explicit high-water recovery returned HTTP $code"
+  assert_jq "$run_dir/cold-address-7.json" '.data.diversifier_index == 7' \
+    "explicit high-water recovery did not start at index 7"
+
+  code="$(api_status GET "/v1/wallets/$wallet_id/deposits?txid=$deposit_txid&status=confirmed&limit=100" "$run_dir/deposit-after-joint-recovery.json")"
+  [[ "$code" == "200" ]] || fail "deposit query after joint recovery returned HTTP $code"
+  assert_jq "$run_dir/deposit-after-joint-recovery.json" --arg txid "$deposit_txid" \
+    '.data.deposits | any(.txid == $txid and .status == "confirmed")' \
+    "scanner did not rescan the confirmed deposit after joint recovery"
+fi
+
+jq -n \
+  --arg project "$project" \
+  --arg deposit_txid "$deposit_txid" \
+  --arg cold_deposit_txid "$cold_deposit_txid" \
+  --arg withdrawal_txid "$withdrawal_txid" \
+  --arg expiry_txid "$expiry_txid" \
+  --arg post_recovery_txid "$post_recovery_txid" \
+  --arg addrgen_ref "$JUNO_ADDRGEN_REF" \
+  --arg gateway_ref "$JUNO_GATEWAY_REVISION" \
+  --arg keys_ref "$JUNO_KEYS_REF" \
+  --arg scanner_ref "$JUNO_SCAN_REF" \
+  --arg txbuild_ref "$JUNO_TXBUILD_REF" \
+  --arg txsign_ref "$JUNO_TXSIGN_REF" \
+  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref},checks:["clean source provenance","one-time installation init","single public port","egress-isolated gateway","chain tip","least-privilege authentication","wallet isolation","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","online build","network-disabled offline sign","prevalidated raw broadcast","idempotent replay","same-key payload conflict","outgoing wallet effects","withdrawal expiry and drop","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
+  >"$run_dir/summary.json"
+
+log "PASS"
+jq . "$run_dir/summary.json"

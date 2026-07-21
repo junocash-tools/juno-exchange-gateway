@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+run_id="$(date -u +%Y%m%dt%H%M%Sz)-$$"
+run_dir="$repo_root/tmp/postgres-smoke/$run_id"
+project="juno-gateway-postgres-${run_id//[^A-Za-z0-9]/}"
+
+for command in docker jq openssl; do
+  command -v "$command" >/dev/null || {
+    echo "missing required command: $command" >&2
+    exit 1
+  }
+done
+
+mkdir -p "$run_dir"
+chmod 0700 "$run_dir"
+umask 077
+
+export JUNO_NETWORK=regtest
+export JUNO_RPC_USER="postgres-smoke-rpc"
+export JUNO_RPC_PASSWORD="$(openssl rand -hex 32)"
+export JUNO_SCAN_API_BEARER_TOKEN="$(openssl rand -hex 32)"
+export JUNO_POSTGRES_DB=junoscan
+export JUNO_POSTGRES_USER=junoscan
+export JUNO_POSTGRES_PASSWORD="pg:\$/%?@#&=+$(openssl rand -hex 16)"
+
+compose=(
+  docker compose
+  --project-name "$project"
+  -f "$repo_root/compose.yaml"
+  -f "$repo_root/compose.dev.yaml"
+  -f "$repo_root/compose.postgres.yaml"
+)
+
+cleanup() {
+  status=$?
+  trap - EXIT
+  "${compose[@]}" ps -a >"$run_dir/compose-ps.txt" 2>&1 || true
+  if (( status != 0 )); then
+    "${compose[@]}" logs --no-color >"$run_dir/compose.log" 2>&1 || true
+    echo "Postgres smoke failed; private evidence is in $run_dir" >&2
+  fi
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  exit "$status"
+}
+trap cleanup EXIT
+
+"${compose[@]}" up -d --build postgres junocashd juno-scan
+
+scanner_id="$("${compose[@]}" ps -q juno-scan)"
+[[ -n "$scanner_id" ]] || {
+  echo "scanner container was not created" >&2
+  exit 1
+}
+
+deadline=$((SECONDS + 300))
+while (( SECONDS < deadline )); do
+  health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$scanner_id")"
+  if [[ "$health" == "healthy" ]]; then
+    break
+  fi
+  if [[ "$health" == "unhealthy" || "$health" == "exited" || "$health" == "dead" ]]; then
+    echo "scanner entered state $health" >&2
+    exit 1
+  fi
+  sleep 1
+done
+[[ "${health:-}" == "healthy" ]] || {
+  echo "scanner did not become healthy with Postgres" >&2
+  exit 1
+}
+
+"${compose[@]}" exec -T juno-scan sh -eu -c \
+  'curl -fsS -H "Authorization: Bearer $JUNO_SCAN_API_BEARER_TOKEN" http://127.0.0.1:8080/v1/health' \
+  >"$run_dir/scanner-health.json"
+jq -e '(.status == "ok" or .status == "degraded") and (.event_epoch | test("^[0-9a-f]{64}$"))' \
+  "$run_dir/scanner-health.json" >/dev/null
+
+migration_count="$("${compose[@]}" exec -T postgres sh -eu -c \
+  'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT COUNT(*) FROM schema_migrations"')"
+[[ "$migration_count" =~ ^[1-9][0-9]*$ ]] || {
+  echo "scanner migrations were not applied" >&2
+  exit 1
+}
+
+for service in postgres junocashd juno-scan; do
+  container_id="$("${compose[@]}" ps -q "$service")"
+  bindings="$(docker inspect -f '{{json .HostConfig.PortBindings}}' "$container_id")"
+  [[ "$(jq -nr --argjson value "${bindings:-null}" '($value // {}) | length')" == "0" ]] || {
+    echo "$service unexpectedly publishes a host port" >&2
+    exit 1
+  }
+done
+
+jq -n --argjson migrations "$migration_count" \
+  '{status:"passed",storage:"postgres",reserved_character_password:true,migrations:$migrations,public_ports:0}' \
+  >"$run_dir/summary.json"
+jq . "$run_dir/summary.json"

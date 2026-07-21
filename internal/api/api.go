@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"mime"
 	"net"
 	"net/http"
 	"regexp"
@@ -18,9 +20,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/config"
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/storage"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/config"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/storage"
 )
 
 var (
@@ -136,7 +138,59 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("/", a.protected("read", false, false, func(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, http.StatusNotFound, "not_found", "route not found", false, nil)
 	}))
-	return a.requestMiddleware(a.recoverMiddleware(mux))
+	methodNotAllowed := a.authenticated(func(w http.ResponseWriter, r *http.Request) {
+		allowed, _ := knownRouteMethod(r.URL.Path)
+		w.Header().Set("Allow", allowed)
+		a.writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", false, nil)
+	})
+	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if allowed, known := knownRouteMethod(r.URL.Path); known && r.Method != allowed && !(allowed == http.MethodGet && r.Method == http.MethodHead) {
+			methodNotAllowed(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return a.requestMiddleware(a.recoverMiddleware(router))
+}
+
+func knownRouteMethod(path string) (string, bool) {
+	switch path {
+	case "/v1/health/live", "/v1/version", "/v1/health/ready", "/v1/network/tip":
+		return http.MethodGet, true
+	case "/v1/transactions/broadcast":
+		return http.MethodPost, true
+	}
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) == 3 && segments[0] == "v1" && segments[1] == "transactions" && segments[2] != "" {
+		return http.MethodGet, true
+	}
+	if len(segments) >= 4 && segments[0] == "v1" && segments[1] == "wallets" && segments[2] != "" {
+		switch {
+		case len(segments) == 4 && segments[3] == "addresses":
+			return http.MethodPost, true
+		case len(segments) == 4 && segments[3] == "deposits":
+			return http.MethodGet, true
+		case len(segments) == 6 && segments[3] == "addresses" && segments[4] != "" && segments[5] == "balance":
+			return http.MethodGet, true
+		}
+	}
+	return "", false
+}
+
+func (a *API) authenticated(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, ok := a.auth.authenticate(r)
+		if !ok {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			a.writeError(w, r, http.StatusUnauthorized, "unauthorized", "a valid bearer credential is required", false, nil)
+			return
+		}
+		*r = *r.WithContext(withPrincipal(r.Context(), p))
+		if metadata, ok := r.Context().Value(requestMetadataKey{}).(*requestMetadata); ok {
+			metadata.principal = p.name
+		}
+		next(w, r)
+	}
 }
 
 func (a *API) protected(scope string, walletScoped, broadcast bool, next http.HandlerFunc) http.HandlerFunc {
@@ -299,6 +353,9 @@ func (a *API) checkReady(ctx context.Context) (readiness, string, error) {
 	if health.Network == "" || health.Network != string(a.cfg.Network) || health.UAHRP == "" || health.UAHRP != a.cfg.Network.AddressHRP() {
 		return readiness{}, "scanner_not_ready", errors.New("scanner network does not match gateway configuration")
 	}
+	if health.Confirmations == nil || *health.Confirmations <= 0 || *health.Confirmations != a.cfg.DefaultConfirmations {
+		return readiness{}, "scanner_not_ready", errors.New("scanner confirmation policy does not match gateway configuration")
+	}
 	if *health.ScannedHeight < 0 || *health.ScannedHeight > tip.Height || !txIDPattern.MatchString(health.ScannedHash) {
 		return readiness{}, "scanner_not_ready", errors.New("scanner indexed tip is invalid")
 	}
@@ -345,10 +402,20 @@ func (a *API) readyNode(ctx context.Context) (domain.NodeTip, error) {
 	if err != nil {
 		return domain.NodeTip{}, err
 	}
-	if tip.Network != a.cfg.Network.NodeChain() || tip.InitialBlockDownload || tip.Height < 0 || tip.Hash == "" {
+	if a.validateNodeTip(tip) != nil || tip.InitialBlockDownload {
 		return domain.NodeTip{}, errors.New("node is not ready for configured network")
 	}
 	return tip, nil
+}
+
+func (a *API) validateNodeTip(tip domain.NodeTip) error {
+	if tip.Network != a.cfg.Network.NodeChain() || tip.Height < 0 ||
+		!txIDPattern.MatchString(tip.Hash) || tip.Headers < tip.Height ||
+		math.IsNaN(tip.VerificationProgress) || math.IsInf(tip.VerificationProgress, 0) ||
+		tip.VerificationProgress < 0 || tip.VerificationProgress > 1 {
+		return errors.New("node returned an invalid tip for the configured network")
+	}
+	return nil
 }
 
 func (a *API) handleReady(w http.ResponseWriter, r *http.Request) {
@@ -366,8 +433,8 @@ func (a *API) handleTip(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, http.StatusBadGateway, "node_rpc_error", "node request failed", true, nil)
 		return
 	}
-	if tip.Network != a.cfg.Network.NodeChain() {
-		a.writeError(w, r, http.StatusServiceUnavailable, "node_not_ready", "node network does not match gateway configuration", true, nil)
+	if err := a.validateNodeTip(tip); err != nil {
+		a.writeError(w, r, http.StatusServiceUnavailable, "node_not_ready", "node tip is invalid for the configured network", true, nil)
 		return
 	}
 	health, err := a.scanner.Health(r.Context())
@@ -702,18 +769,10 @@ func (a *API) handleTransaction(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, http.StatusServiceUnavailable, "node_not_ready", "node is not ready", true, nil)
 		return
 	}
-	tx, found, err := a.node.Transaction(r.Context(), txid, includeRaw)
-	if err != nil {
-		a.writeError(w, r, http.StatusBadGateway, "node_rpc_error", "transaction lookup failed", true, nil)
-		return
-	}
-	if !found {
-		a.writeError(w, r, http.StatusNotFound, "not_found", "transaction not found", false, nil)
-		return
-	}
-	data := map[string]any{"transaction": tx}
+	var effects []domain.ScannerEvent
 	if walletID != "" {
-		effects, err := a.walletEffects(r.Context(), walletID, txid, ready.Scanner.EventEpoch)
+		var err error
+		effects, err = a.walletEffects(r.Context(), walletID, txid, ready.Scanner.EventEpoch)
 		if err != nil {
 			if errors.Is(err, errCursorResetRequired) {
 				a.writeError(w, r, http.StatusConflict, "event_history_reset", "scanner event history changed during transaction lookup; retry the request", true, map[string]any{"event_epoch": ready.Scanner.EventEpoch})
@@ -726,9 +785,73 @@ func (a *API) handleTransaction(w http.ResponseWriter, r *http.Request) {
 			a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "wallet transaction lookup failed", true, nil)
 			return
 		}
+	}
+	tx, found, err := a.node.Transaction(r.Context(), txid, includeRaw)
+	if err != nil {
+		a.writeError(w, r, http.StatusBadGateway, "node_rpc_error", "transaction lookup failed", true, nil)
+		return
+	}
+	if !found {
+		if walletID != "" && !includeRaw {
+			tx, found, err = terminalScannerTransaction(txid, effects, ready.Node.Height)
+			if err != nil {
+				a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "wallet transaction terminal state is invalid", true, nil)
+				return
+			}
+		}
+		if !found {
+			a.writeError(w, r, http.StatusNotFound, "not_found", "transaction not found", false, nil)
+			return
+		}
+	}
+	data := map[string]any{"transaction": tx}
+	if walletID != "" {
 		data["wallet_id"], data["wallet_effects"] = walletID, effects
 	}
 	a.writeData(w, r, http.StatusOK, data)
+}
+
+func terminalScannerTransaction(txid string, effects []domain.ScannerEvent, nodeHeight int64) (domain.Transaction, bool, error) {
+	var latest *domain.ScannerEvent
+	state := ""
+	for index := range effects {
+		effect := &effects[index]
+		switch effect.Kind {
+		case "DepositEvent", "DepositConfirmed", "DepositUnconfirmed",
+			"SpendEvent", "SpendConfirmed", "SpendUnconfirmed",
+			"OutgoingOutputEvent", "OutgoingOutputConfirmed", "OutgoingOutputUnconfirmed":
+			latest, state = effect, ""
+		case "DepositOrphaned", "SpendOrphaned", "OutgoingOutputOrphaned":
+			latest, state = effect, "orphaned"
+		case "OutgoingOutputExpired":
+			latest, state = effect, "expired"
+		}
+	}
+	if latest == nil || state == "" {
+		return domain.Transaction{}, false, nil
+	}
+	var payload struct {
+		TxID         string `json:"txid"`
+		Height       *int64 `json:"height,omitempty"`
+		ExpiryHeight *int64 `json:"expiry_height,omitempty"`
+		Status       struct {
+			State string `json:"state"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(latest.Payload, &payload); err != nil || payload.TxID != txid || payload.Status.State != state {
+		return domain.Transaction{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned an invalid terminal transaction event")}
+	}
+	if payload.Height != nil && *payload.Height < 0 {
+		return domain.Transaction{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned an invalid terminal transaction height")}
+	}
+	tx := domain.Transaction{TxID: txid, State: state, Confirmations: 0, BlockHeight: payload.Height}
+	if state == "expired" {
+		if payload.ExpiryHeight == nil || *payload.ExpiryHeight < 0 || nodeHeight <= *payload.ExpiryHeight {
+			return domain.Transaction{}, false, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned an invalid expired transaction event")}
+		}
+		tx.ExpiryHeight = payload.ExpiryHeight
+	}
+	return tx, true, nil
 }
 
 var errWalletEffectsLimit = errors.New("wallet effects limit exceeded")
@@ -756,6 +879,9 @@ func (a *API) walletEffects(ctx context.Context, walletID, txid, eventEpoch stri
 			if event.ID <= position {
 				return nil, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned non-forward transaction effects")}
 			}
+			if err := validateWalletEffectIdentity(event, walletID, txid); err != nil {
+				return nil, err
+			}
 			position = event.ID
 			effects = append(effects, event)
 			if len(effects) > a.cfg.WalletEffectsMaxEvents {
@@ -769,6 +895,20 @@ func (a *API) walletEffects(ctx context.Context, walletID, txid, eventEpoch stri
 			return effects, nil
 		}
 	}
+}
+
+func validateWalletEffectIdentity(event domain.ScannerEvent, walletID, txid string) error {
+	var identity struct {
+		WalletID string `json:"wallet_id"`
+		TxID     string `json:"txid"`
+	}
+	if err := json.Unmarshal(event.Payload, &identity); err != nil {
+		return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned a transaction effect with an invalid payload")}
+	}
+	if identity.WalletID != walletID || !txIDPattern.MatchString(identity.TxID) || identity.TxID != txid {
+		return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned a transaction effect outside the requested wallet or transaction")}
+	}
+	return nil
 }
 
 type broadcastRequest struct {
@@ -799,26 +939,10 @@ func (a *API) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, http.StatusBadRequest, "invalid_request", "expected_txid must be 64 lowercase hex characters", false, nil)
 		return
 	}
-	if _, err := a.readyNode(r.Context()); err != nil {
-		a.writeError(w, r, http.StatusServiceUnavailable, "node_not_ready", "node is not ready", true, nil)
-		return
-	}
-	decodedTxID, err := a.node.DecodeRawTransaction(r.Context(), req.RawTxHex)
-	if err != nil {
-		if domain.IsUpstreamKind(err, "unavailable") || domain.IsUpstreamKind(err, "invalid_response") {
-			a.writeError(w, r, http.StatusBadGateway, "node_rpc_error", "transaction decoding failed", true, nil)
-			return
-		}
-		a.writeError(w, r, http.StatusBadRequest, "invalid_request", "raw_tx_hex is not a valid transaction", false, nil)
-		return
-	}
-	if decodedTxID != req.ExpectedTxID {
-		a.writeError(w, r, http.StatusUnprocessableEntity, "expected_txid_mismatch", "expected_txid does not match raw_tx_hex", false, nil)
-		return
-	}
 	digestBytes := sha256.Sum256([]byte(req.RawTxHex + "\x00" + req.ExpectedTxID))
 	digest := hex.EncodeToString(digestBytes[:])
-	claim, err := a.store.ClaimReceipt(r.Context(), key, digest, req.ExpectedTxID, time.Now(), a.cfg.IdempotencyLease)
+	receiptKey := scopedIdempotencyKey(principalFrom(r.Context()).name, key)
+	claim, err := a.store.ClaimReceipt(r.Context(), receiptKey, digest, req.ExpectedTxID, time.Now(), a.cfg.IdempotencyLease)
 	if err != nil {
 		a.writeError(w, r, http.StatusInternalServerError, "internal", "idempotency state failed", false, nil)
 		return
@@ -840,28 +964,55 @@ func (a *API) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 			a.writeError(w, r, claim.Receipt.HTTPStatus, stored.Error.Code, stored.Error.Message, stored.Error.Retryable, stored.Error.Details)
 			return
 		}
-		var data any
-		if err := json.Unmarshal(stored.Data, &data); err != nil {
+		var data map[string]any
+		if err := json.Unmarshal(stored.Data, &data); err != nil || data == nil {
 			a.writeError(w, r, http.StatusInternalServerError, "internal", "stored idempotency response is invalid", false, nil)
 			return
 		}
+		data["accepted"] = false
+		data["already_known"] = true
 		a.writeData(w, r, http.StatusOK, data)
 		return
 	}
-	if existing, found, err := a.node.Transaction(r.Context(), req.ExpectedTxID, false); err == nil && found {
-		data := map[string]any{"txid": req.ExpectedTxID, "state": existing.State, "accepted": false, "already_known": true}
-		a.completeAndWrite(w, r, key, digest, http.StatusOK, data)
+	lease := newReceiptLease(r.Context(), a.store, receiptKey, digest, claim.Receipt.Generation, a.cfg.IdempotencyLease)
+	defer lease.Abandon()
+	operationCtx := lease.Context()
+	if _, err := a.readyNode(operationCtx); err != nil {
+		a.writeError(w, r, http.StatusServiceUnavailable, "node_not_ready", "node is not ready", true, nil)
 		return
 	}
-	txid, err := a.node.Broadcast(r.Context(), req.RawTxHex)
+	decodedTxID, err := a.node.DecodeRawTransaction(operationCtx, req.RawTxHex)
 	if err != nil {
-		if existing, found, lookupErr := a.node.Transaction(r.Context(), req.ExpectedTxID, false); lookupErr == nil && found {
+		if domain.IsUpstreamKind(err, "unavailable") || domain.IsUpstreamKind(err, "invalid_response") {
+			a.writeError(w, r, http.StatusBadGateway, "node_rpc_error", "transaction decoding failed", true, nil)
+			return
+		}
+		a.writeError(w, r, http.StatusBadRequest, "invalid_request", "raw_tx_hex is not a valid transaction", false, nil)
+		return
+	}
+	if decodedTxID != req.ExpectedTxID {
+		a.writeError(w, r, http.StatusUnprocessableEntity, "expected_txid_mismatch", "expected_txid does not match raw_tx_hex", false, nil)
+		return
+	}
+	if existing, found, err := a.node.Transaction(operationCtx, req.ExpectedTxID, false); err == nil && found {
+		data := map[string]any{"txid": req.ExpectedTxID, "state": existing.State, "accepted": false, "already_known": true}
+		a.completeAndWrite(w, r, lease, http.StatusOK, data)
+		return
+	}
+	txid, err := a.node.Broadcast(operationCtx, req.RawTxHex)
+	if err != nil {
+		if existing, found, lookupErr := a.node.Transaction(operationCtx, req.ExpectedTxID, false); lookupErr == nil && found {
 			data := map[string]any{"txid": req.ExpectedTxID, "state": existing.State, "accepted": false, "already_known": true}
-			a.completeAndWrite(w, r, key, digest, http.StatusOK, data)
+			a.completeAndWrite(w, r, lease, http.StatusOK, data)
 			return
 		}
 		if domain.IsUpstreamKind(err, "rejected") {
-			a.completeErrorAndWrite(w, r, key, digest, http.StatusUnprocessableEntity, "transaction_rejected", "node rejected the signed transaction", false)
+			a.completeErrorAndWrite(w, r, lease, http.StatusUnprocessableEntity, "transaction_rejected", "node rejected the signed transaction", false)
+			return
+		}
+		if domain.IsUpstreamKind(err, "already_known") {
+			data := map[string]any{"txid": req.ExpectedTxID, "state": "known", "accepted": false, "already_known": true}
+			a.completeAndWrite(w, r, lease, http.StatusOK, data)
 			return
 		}
 		a.writeError(w, r, http.StatusBadGateway, "node_rpc_error", "broadcast result is uncertain; retry with the same idempotency key", true, nil)
@@ -872,10 +1023,112 @@ func (a *API) handleBroadcast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := map[string]any{"txid": txid, "state": "mempool", "accepted": true, "already_known": false}
-	a.completeAndWrite(w, r, key, digest, http.StatusAccepted, data)
+	a.completeAndWrite(w, r, lease, http.StatusAccepted, data)
 }
 
-func (a *API) completeAndWrite(w http.ResponseWriter, r *http.Request, key, digest string, status int, data any) {
+func scopedIdempotencyKey(principalName, key string) string {
+	sum := sha256.Sum256([]byte("v1\x00" + principalName + "\x00" + key))
+	return "v1:" + hex.EncodeToString(sum[:])
+}
+
+type receiptLease struct {
+	ctx             context.Context
+	cancelOperation context.CancelFunc
+	cancelHeartbeat context.CancelFunc
+	done            chan error
+	store           storage.Store
+	key             string
+	digest          string
+	generation      int64
+	stopped         bool
+	stopErr         error
+	finished        bool
+}
+
+func newReceiptLease(parent context.Context, store storage.Store, key, digest string, generation int64, duration time.Duration) *receiptLease {
+	operationCtx, cancelOperation := context.WithCancel(parent)
+	stopHeartbeat := make(chan struct{})
+	cancelHeartbeat := func() { close(stopHeartbeat) }
+	l := &receiptLease{ctx: operationCtx, cancelOperation: cancelOperation, cancelHeartbeat: cancelHeartbeat, done: make(chan error, 1), store: store, key: key, digest: digest, generation: generation}
+	interval := duration / 3
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopHeartbeat:
+				l.done <- nil
+				return
+			default:
+			}
+			select {
+			case <-stopHeartbeat:
+				l.done <- nil
+				return
+			case <-parent.Done():
+				cancelOperation()
+				l.done <- parent.Err()
+				return
+			case now := <-ticker.C:
+				if err := store.RenewReceipt(parent, key, digest, generation, now); err != nil {
+					cancelOperation()
+					l.done <- err
+					return
+				}
+			}
+		}
+	}()
+	return l
+}
+
+func (l *receiptLease) Context() context.Context { return l.ctx }
+
+func (l *receiptLease) stop() error {
+	if l.stopped {
+		return l.stopErr
+	}
+	l.cancelHeartbeat()
+	l.stopErr = <-l.done
+	l.stopped = true
+	return l.stopErr
+}
+
+func (l *receiptLease) Complete(status int, response []byte) error {
+	if l.finished {
+		return errors.New("receipt lease is already finished")
+	}
+	if err := l.stop(); err != nil {
+		l.finished = true
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := l.store.CompleteReceipt(ctx, l.key, l.digest, l.generation, status, response, time.Now())
+	if err != nil {
+		_ = l.store.AbandonReceipt(ctx, l.key, l.digest, l.generation, time.Now())
+	}
+	l.finished = true
+	l.cancelOperation()
+	return err
+}
+
+func (l *receiptLease) Abandon() {
+	if l.finished {
+		return
+	}
+	if err := l.stop(); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = l.store.AbandonReceipt(ctx, l.key, l.digest, l.generation, time.Now())
+		cancel()
+	}
+	l.finished = true
+	l.cancelOperation()
+}
+
+func (a *API) completeAndWrite(w http.ResponseWriter, r *http.Request, lease *receiptLease, status int, data any) {
 	dataRaw, err := json.Marshal(data)
 	if err != nil {
 		a.writeError(w, r, http.StatusInternalServerError, "internal", "response encoding failed", false, nil)
@@ -886,7 +1139,7 @@ func (a *API) completeAndWrite(w http.ResponseWriter, r *http.Request, key, dige
 		a.writeError(w, r, http.StatusInternalServerError, "internal", "response encoding failed", false, nil)
 		return
 	}
-	if err := a.store.CompleteReceipt(r.Context(), key, digest, status, raw, time.Now()); err != nil {
+	if err := lease.Complete(status, raw); err != nil {
 		a.writeError(w, r, http.StatusInternalServerError, "internal", "idempotency state failed", false, nil)
 		return
 	}
@@ -898,10 +1151,10 @@ type storedReceipt struct {
 	Error *errorBody      `json:"error,omitempty"`
 }
 
-func (a *API) completeErrorAndWrite(w http.ResponseWriter, r *http.Request, key, digest string, status int, code, message string, retryable bool) {
+func (a *API) completeErrorAndWrite(w http.ResponseWriter, r *http.Request, lease *receiptLease, status int, code, message string, retryable bool) {
 	body := &errorBody{Code: code, Message: message, Retryable: retryable, Details: map[string]any{}}
 	raw, err := json.Marshal(storedReceipt{Error: body})
-	if err != nil || a.store.CompleteReceipt(r.Context(), key, digest, status, raw, time.Now()) != nil {
+	if err != nil || lease.Complete(status, raw) != nil {
 		a.writeError(w, r, http.StatusInternalServerError, "internal", "idempotency state failed", false, nil)
 		return
 	}
@@ -911,7 +1164,8 @@ func (a *API) completeErrorAndWrite(w http.ResponseWriter, r *http.Request, key,
 var errBodyTooLarge = errors.New("request body exceeds the configured limit")
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, out any) error {
-	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
 		return errors.New("Content-Type must be application/json")
 	}
 	if r.ContentLength > limit {

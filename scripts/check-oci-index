@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+manifest="${1:-}"
+shift || true
+if [[ ! -f "$manifest" || "$#" -eq 0 ]]; then
+  echo "usage: $0 OCI_INDEX_JSON PLATFORM [PLATFORM...]" >&2
+  exit 2
+fi
+
+expected="$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')"
+jq -e --argjson expected "$expected" '
+  def platform_name:
+    .platform.os + "/" + .platform.architecture;
+  (.mediaType == "application/vnd.oci.image.index.v1+json") and
+  (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+  (.manifests | type == "array") and
+  ([.manifests[] | select(.platform.os != "unknown") | platform_name] | unique | sort) == $expected and
+  ([.manifests[] | select(.platform.os != "unknown")]) as $images |
+  ([.manifests[] | select(.platform.os == "unknown" and .platform.architecture == "unknown")]) as $attestations |
+  ($images | length) == ($expected | length) and
+  ($attestations | length) == ($images | length) and
+  all($images[];
+    .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+    (.digest | test("^sha256:[0-9a-f]{64}$")) and
+    (.size | type == "number" and . > 0)) and
+  all($attestations[];
+    .mediaType == "application/vnd.oci.image.manifest.v1+json" and
+    (.digest | test("^sha256:[0-9a-f]{64}$")) and
+    (.size | type == "number" and . > 0) and
+    .annotations["vnd.docker.reference.type"] == "attestation-manifest" and
+    (.annotations["vnd.docker.reference.digest"] as $subject |
+      any($images[]; .digest == $subject))) and
+  all($images[];
+    .digest as $subject |
+    any($attestations[]; .annotations["vnd.docker.reference.digest"] == $subject))
+' "$manifest" >/dev/null

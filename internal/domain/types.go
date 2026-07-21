@@ -83,6 +83,7 @@ type ScannerHealth struct {
 	Status          string `json:"status"`
 	Network         string `json:"network,omitempty"`
 	UAHRP           string `json:"ua_hrp,omitempty"`
+	Confirmations   *int64 `json:"confirmations,omitempty"`
 	EventEpoch      string `json:"event_epoch,omitempty"`
 	Ready           *bool  `json:"ready,omitempty"`
 	NodeHeight      *int64 `json:"node_height,omitempty"`

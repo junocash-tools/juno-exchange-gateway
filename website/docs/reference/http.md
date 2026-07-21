@@ -9,7 +9,7 @@ Authorization: Bearer <token>
 Accept: application/json
 ```
 
-JSON requests also require `Content-Type: application/json`.
+JSON requests require media type `application/json`; parameters such as `charset=utf-8` are allowed, but JSON-like types such as `application/jsonp` are rejected. Wrong methods on known routes require authentication and return the normal JSON error envelope with `405 method_not_allowed`.
 
 ## Routes
 

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "gateway": {
+    "repository": "https://github.com/junocash-tools/juno-exchange-gateway",
+    "revision_source": "release-tag-target"
+  },
+  "api": {
+    "http_version": "v1",
+    "openapi_version": "3.1.0",
+    "contract_version": "1.0.0",
+    "installation_manifest_version": 1,
+    "release_provenance_version": 1
+  },
+  "state_schemas": {
+    "gateway_sqlite": 3,
+    "scanner_migrations_through": "0016"
+  },
+  "supported_networks": [
+    "mainnet",
+    "testnet",
+    "regtest"
+  ],
+  "supported_platforms": {
+    "appliance_native": [
+      "linux/amd64"
+    ],
+    "gateway": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "scanner": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "txbuild": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "txsign": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "node": [
+      "linux/amd64"
+    ]
+  },
+  "components": {
+    "scanner": {
+      "repository": "https://github.com/junocash-tools/juno-scan.git",
+      "repository_slug": "junocash-tools/juno-scan",
+      "revision": "b4a4801ae8c98cdcdb4e51e1abc84311ffa1bd3a"
+    },
+    "addrgen": {
+      "repository": "https://github.com/junocash-tools/juno-addrgen.git",
+      "revision": "4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834"
+    },
+    "txbuild": {
+      "repository": "https://github.com/junocash-tools/juno-txbuild.git",
+      "revision": "e7b1d5c01aaf705be1d76da7966e36437fdbc75f"
+    },
+    "txsign": {
+      "repository": "https://github.com/junocash-tools/juno-txsign.git",
+      "revision": "29a58cc0a840a8e58b05981c0674475841ae6890"
+    }
+  },
+  "node_artifact": {
+    "version": "0.9.12",
+    "url": "https://github.com/juno-cash/junocash/releases/download/v0.9.12/junocash-0.9.12-linux64.tar.gz",
+    "sha256": "41f74d61feb9a4284a4200b1fc163ecd072da3314a25db7222522f2e548ec386",
+    "platform": "linux/amd64"
+  },
+  "toolchain_images": {
+    "rust": "rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081",
+    "golang": "golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac"
+  },
+  "runtime_base_images": {
+    "debian": "debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
+    "ubuntu": "ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982"
+  },
+  "service_images": {
+    "postgres": "public.ecr.aws/docker/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"
+  },
+  "release_tooling": {
+    "buildx_version": "v0.35.0",
+    "buildkit_image": "moby/buildkit:v0.31.2@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec",
+    "qemu_image": "docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
+    "sbom_generator_image": "docker.io/docker/buildkit-syft-scanner:1.11.0@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68"
+  }
+}

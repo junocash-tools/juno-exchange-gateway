@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
 )
 
 type Client struct {
@@ -24,7 +24,24 @@ type Client struct {
 }
 
 func New(baseURL, token string, timeout, backfillTimeout time.Duration) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: strings.TrimSpace(token), http: &http.Client{Timeout: timeout}, backfillHTTP: &http.Client{Timeout: backfillTimeout}}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: strings.TrimSpace(token), http: directHTTPClient(timeout), backfillHTTP: directHTTPClient(backfillTimeout)}
+}
+
+func directHTTPClient(timeout time.Duration) *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if ok {
+		transport = transport.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	transport.Proxy = nil
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 type httpError struct{ status int }

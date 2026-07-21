@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -62,6 +62,17 @@ func TestEventsCarriesScannerEpoch(t *testing.T) {
 	}
 }
 
+func TestHealthParsesConfirmationPolicy(t *testing.T) {
+	client := New("http://scanner.invalid", "", time.Second, time.Minute)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"ok","confirmations":100}`))}, nil
+	})
+	health, err := client.Health(context.Background())
+	if err != nil || health.Confirmations == nil || *health.Confirmations != 100 {
+		t.Fatalf("health=%+v err=%v", health, err)
+	}
+}
+
 func TestBalanceNotFoundIsTyped(t *testing.T) {
 	client := New("http://scanner.invalid", "", time.Second, time.Minute)
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -96,5 +107,35 @@ func TestBackfillStatusIsTyped(t *testing.T) {
 	status, found, err := client.BackfillStatus(context.Background(), "hot")
 	if err != nil || !found || status.UFVKFingerprint != fingerprint || status.NextHeight != 75 || status.State != "running" {
 		t.Fatalf("status=%+v found=%v err=%v", status, found, err)
+	}
+}
+
+func TestPrivateScannerClientsIgnoreProxyAndRejectRedirects(t *testing.T) {
+	client := New("http://scanner.invalid", "", time.Second, time.Minute)
+	for name, httpClient := range map[string]*http.Client{"foreground": client.http, "backfill": client.backfillHTTP} {
+		transport, ok := httpClient.Transport.(*http.Transport)
+		if !ok || transport.Proxy != nil {
+			t.Fatalf("%s transport=%T", name, httpClient.Transport)
+		}
+	}
+
+	redirectTargetHit := false
+	client = New("http://scanner.invalid", "", time.Second, time.Minute)
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "redirect.invalid" {
+			redirectTargetHit = true
+		}
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{"http://redirect.invalid/"}},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    r,
+		}, nil
+	})
+	if _, err := client.Health(context.Background()); err == nil {
+		t.Fatal("expected redirect rejection")
+	}
+	if redirectTargetHit {
+		t.Fatal("scanner client followed redirect")
 	}
 }

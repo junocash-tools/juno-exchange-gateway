@@ -2,40 +2,71 @@
 title: Backups and recovery
 ---
 
-## What to back up
+## Back up
 
-| Data | Required | Reason |
-| --- | --- | --- |
-| Offline seed or signer material | Yes | Only authority that can spend |
-| `wallets.json` with UFVK and birthday | Yes | Scanner rebuild input |
-| Exchange address-to-account mapping | Yes | Customer attribution |
-| Gateway state volume | Yes | Address indices, cursor key, idempotency receipts |
-| `auth.json` and secret-manager records | Yes | API recovery and rotation |
-| Scanner database | Recommended | Fast recovery; derivable from chain |
-| Node data | Optional | Avoids a full node resync |
+| Data | Requirement |
+| --- | --- |
+| Offline seed or signer material | Required to spend; encrypted and offline |
+| Installation-state directory | Required to preserve installation identity and address high-water marks |
+| `wallets.json` and birthday heights | Required to derive addresses and rescan |
+| Exchange address-to-account mapping | Required for customer attribution |
+| Gateway database | Preferred for labels, cursor key, and idempotency receipts |
+| Scanner database | Recommended for faster recovery; otherwise rebuild from chain |
+| Node data | Optional; otherwise resync the node |
 
-Encrypt backups and test restoration. For SQLite, take a consistent snapshot that includes WAL state; stopping the gateway first is the simplest safe method. Use native consistent Postgres backups in the Postgres mode.
+Stop the gateway for a simple consistent SQLite snapshot, including WAL state. Use native consistent Postgres backups. Keep backup directories at mode `0700` and files at `0600`, encrypt copies, and test restores. The gateway process uses umask `0077`; backup tooling must preserve or reapply these permissions.
 
-## Scanner rebuild
+The installation manifest contains UFVK fingerprints, not raw UFVKs. It changes before each address index is issued. Keep it on write-through durable storage outside Compose volumes, or reconcile every allocation against an independent append-only exchange address record.
 
-Scanner data can be rebuilt from scratch with the same UFVK, birthday height, and canonical chain:
+The gateway detects a missing manifest, a mismatched installation identity, and a database that is behind the current manifest. It cannot detect a jointly restored, internally consistent old manifest and old database. That pair could reuse indices allocated after the snapshot, so never serve when both copies may be stale.
 
-1. Stop gateway financial traffic.
-2. Restore `wallets.json` and start a fully synced, indexed node.
-3. Start the scanner with an empty database on the correct network.
-4. Start the gateway so it re-registers each wallet with the same UFVK and birthday.
-5. Let the gateway mirror scanner-authoritative progress and drive bounded backfill until `next_height` is beyond the scanned tip.
-6. Wait for scanner and gateway readiness.
-7. Reconcile deposits against the exchange ledger before resuming.
+## Scanner-only rebuild
 
-After scanner database loss, the gateway detects missing or rewound scanner progress and safely resumes from the configured birthday. Scanner event IDs may change after a full rebuild. Reset consumer cursors only through a controlled reconciliation; never silently reuse a cursor against rebuilt scanner state.
+Scanner data is reproducible from the same UFVK, birthday, network, and canonical chain:
 
-## Gateway-state loss
+1. Stop financial traffic and the gateway.
+2. Start a fully synced indexed node and an empty scanner on the same network.
+3. Start the gateway with its original installation manifest and gateway database.
+4. Wait for backfill and readiness.
+5. Reconcile deposits. Scanner startup rotates the event epoch, so restart polling without the old cursor and replay idempotently when the API returns `cursor_reset_required`.
 
-The same UFVK can derive the same address for a known diversifier index, but it cannot reconstruct customer ownership or labels. Restore both gateway state and the exchange's address mapping. Losing the gateway cursor key also invalidates saved cursor tokens.
+Run only one active gateway allocator for an installation. A cold or warm standby must restore the database, manifest, and exchange-held address high-water marks consistently, then reconcile allocations and deposits before receiving traffic.
 
-If a verified gateway backup is unavailable, keep financial APIs offline and reconcile every allocated index and customer mapping before creating new addresses.
+## Gateway database recovery
+
+Normal serve never rebuilds an empty or incomplete gateway database. Prefer a verified database backup. If none is usable, keep the original installation manifest and the same `wallets.json`.
+
+First calculate the deterministic registry checksum. The default target is each manifest high-water. Supply a larger known next index only when an independently retained exchange mapping proves it:
+
+```bash
+docker compose run --no-deps --rm gateway recovery-checksum \
+  --next-index hot=125000
+```
+
+Compare `mapping_sha256`, `installation_id`, network, wallet IDs, and next indices with the recovery record. Then run recovery with the exact checksum:
+
+```bash
+docker compose run --no-deps --rm gateway recover \
+  --acknowledge I_UNDERSTAND_RECOVERY_REBUILDS_JUNO_ADDRESS_STATE \
+  --mapping-sha256 '<64-lowercase-hex>' \
+  --next-index hot=125000
+```
+
+Omit `--next-index` to use manifest values. Overrides can only increase a high-water mark. Recovery derives and verifies every address, rebuilds the registry with empty labels, and binds the database to the original installation ID. Restore customer labels and ownership from the exchange mapping.
+
+If a restore may contain a stale manifest and database:
+
+1. Keep allocation and financial APIs offline.
+2. Restore the newest durable manifest, or find the greatest index ever issued for each wallet in the append-only exchange allocation record.
+3. Discard the stale gateway database and run the audited checksum and recovery flow with a conservative `--next-index` above every index that may have been issued.
+4. Reconcile the rebuilt registry and customer ownership before serving.
+
+If neither source proves a safe high-water mark, remain offline. Do not guess and do not run `init`.
+
+After scanner loss too, start the empty scanner and recovered gateway, wait for full rescan and readiness, then reconcile balances and deposits before reopening traffic.
+
+Never use `init` to replace a lost database or manifest. If the original manifest and its backups are lost, keep address allocation and financial APIs offline; the installation ID and safe high-water cannot be inferred from an empty database.
 
 ## Signer recovery
 
-Recover signing material only inside the isolated signing environment. Prove key recovery with a non-production plan or regtest before restoring withdrawal service. Never copy recovered keys into the appliance.
+Recover signing material only inside the isolated signing environment. Prove it with a non-production plan or regtest before restoring withdrawals. Never copy recovered keys into the online appliance.

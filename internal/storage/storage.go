@@ -27,6 +27,7 @@ type Receipt struct {
 	Key           string
 	PayloadDigest string
 	ExpectedTxID  string
+	Generation    int64
 	State         string
 	ResponseJSON  []byte
 	HTTPStatus    int
@@ -55,7 +56,9 @@ type Store interface {
 	AllocateAddress(context.Context, string, string, DeriveFunc) (Address, error)
 	Address(context.Context, string, string) (Address, bool, error)
 	ClaimReceipt(context.Context, string, string, string, time.Time, time.Duration) (ClaimResult, error)
-	CompleteReceipt(context.Context, string, string, int, []byte, time.Time) error
+	RenewReceipt(context.Context, string, string, int64, time.Time) error
+	CompleteReceipt(context.Context, string, string, int64, int, []byte, time.Time) error
+	AbandonReceipt(context.Context, string, string, int64, time.Time) error
 	CursorKey(context.Context) ([]byte, error)
 	Ping(context.Context) error
 	Close() error

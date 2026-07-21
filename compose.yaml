@@ -1,0 +1,224 @@
+name: juno-exchange-gateway
+
+services:
+  junocashd:
+    image: ${JUNO_NODE_IMAGE:-ghcr.io/junocash-tools/juno-exchange-gateway-node:main}
+    platform: linux/amd64
+    restart: unless-stopped
+    stop_grace_period: 2m
+    environment:
+      JUNO_NETWORK: ${JUNO_NETWORK:-regtest}
+      JUNO_DATADIR: /data
+      JUNO_RPC_USER: ${JUNO_RPC_USER:-juno-rpc}
+      JUNO_RPC_PASSWORD: ${JUNO_RPC_PASSWORD:-replace-this-regtest-rpc-password}
+      JUNO_RPC_PORT: 8232
+    command:
+      - -server=1
+      - -txindex=1
+      - -daemon=0
+      - -printtoconsole=1
+      - -datadir=/data
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -rpcport=8232
+      - -rpcuser=${JUNO_RPC_USER:-juno-rpc}
+      - -rpcpassword=${JUNO_RPC_PASSWORD:-replace-this-regtest-rpc-password}
+      - -persistmempool=${JUNO_NODE_PERSIST_MEMPOOL:-1}
+      - -zmqpubhashblock=tcp://0.0.0.0:28332
+    expose:
+      - "8232"
+      - "28332"
+    volumes:
+      - junocashd-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    networks:
+      - backend
+      - chain
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "juno-cli", "getblockchaininfo"]
+      interval: 5s
+      timeout: 10s
+      retries: 120
+      start_period: 10s
+
+  juno-scan:
+    image: ${JUNO_SCAN_IMAGE:-ghcr.io/junocash-tools/juno-exchange-gateway-scanner:main}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      junocashd:
+        condition: service_healthy
+    environment:
+      JUNO_SCAN_LISTEN: 0.0.0.0:8080
+      JUNO_SCAN_NETWORK: ${JUNO_NETWORK:-regtest}
+      JUNO_SCAN_RPC_URL: http://junocashd:8232
+      JUNO_SCAN_RPC_USER: ${JUNO_RPC_USER:-juno-rpc}
+      JUNO_SCAN_RPC_PASS: ${JUNO_RPC_PASSWORD:-replace-this-regtest-rpc-password}
+      JUNO_SCAN_ZMQ_HASHBLOCK: tcp://junocashd:28332
+      JUNO_SCAN_POLL_INTERVAL: ${JUNO_SCAN_POLL_INTERVAL:-2s}
+      JUNO_SCAN_CONFIRMATIONS: ${JUNO_SCAN_CONFIRMATIONS:-100}
+      JUNO_SCAN_API_BEARER_TOKEN: ${JUNO_SCAN_API_BEARER_TOKEN:-replace-this-internal-scanner-token}
+      JUNO_SCAN_DB_DRIVER: ${JUNO_SCAN_DB_DRIVER:-rocksdb}
+      JUNO_SCAN_DB_PATH: /var/lib/juno-scan/db
+      JUNO_SCAN_DB_DSN: ${JUNO_SCAN_DB_DSN:-}
+      JUNO_SCAN_MAX_READY_LAG: ${JUNO_SCAN_MAX_READY_LAG:-2}
+      JUNO_SCAN_SHARD_CACHE_ENABLED: ${JUNO_SCAN_SHARD_CACHE_ENABLED:-true}
+      JUNO_SCAN_SHARD_CACHE_BATCH: ${JUNO_SCAN_SHARD_CACHE_BATCH:-4}
+      JUNO_SCAN_SHARD_CACHE_POLL: ${JUNO_SCAN_SHARD_CACHE_POLL:-5s}
+      JUNO_SCAN_SHARD_CACHE_YIELD: ${JUNO_SCAN_SHARD_CACHE_YIELD:-25ms}
+      JUNO_SCAN_WITNESS_MODE: ${JUNO_SCAN_WITNESS_MODE:-auto}
+    expose:
+      - "8080"
+    volumes:
+      - juno-scan-data:/var/lib/juno-scan
+    networks:
+      - backend
+      - storage
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -H "Authorization: Bearer $${JUNO_SCAN_API_BEARER_TOKEN}" http://127.0.0.1:8080/v1/health >/dev/null'
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 10s
+
+  gateway:
+    image: ${JUNO_GATEWAY_IMAGE:-ghcr.io/junocash-tools/juno-exchange-gateway-gateway:main}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      junocashd:
+        condition: service_healthy
+      juno-scan:
+        condition: service_healthy
+    environment:
+      JUNO_GATEWAY_NETWORK: ${JUNO_NETWORK:-regtest}
+      JUNO_GATEWAY_LISTEN: 0.0.0.0:8080
+      JUNO_GATEWAY_STATE_DSN: file:/var/lib/juno-gateway/gateway.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)
+      JUNO_GATEWAY_INSTALLATION_STATE: ${JUNO_GATEWAY_INSTALLATION_STATE:-/var/lib/juno-installation/manifest.json}
+      JUNO_GATEWAY_NODE_RPC_URL: http://junocashd:8232
+      JUNO_GATEWAY_NODE_RPC_USER: ${JUNO_RPC_USER:-juno-rpc}
+      JUNO_GATEWAY_NODE_RPC_PASSWORD: ${JUNO_RPC_PASSWORD:-replace-this-regtest-rpc-password}
+      JUNO_GATEWAY_SCANNER_URL: http://juno-scan:8080
+      JUNO_GATEWAY_SCANNER_TOKEN: ${JUNO_SCAN_API_BEARER_TOKEN:-replace-this-internal-scanner-token}
+      JUNO_GATEWAY_ADDRGEN_PATH: /usr/local/bin/juno-addrgen
+      JUNO_GATEWAY_WALLETS_FILE: /run/juno/wallets.json
+      JUNO_GATEWAY_AUTH_FILE: /run/juno/auth.json
+      JUNO_GATEWAY_DEFAULT_CONFIRMATIONS: ${JUNO_GATEWAY_DEFAULT_CONFIRMATIONS:-100}
+      JUNO_GATEWAY_MAX_CONFIRMATIONS: ${JUNO_GATEWAY_MAX_CONFIRMATIONS:-10000}
+      JUNO_GATEWAY_MAX_SCANNER_LAG: ${JUNO_GATEWAY_MAX_SCANNER_LAG:-2}
+      JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY: ${JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY:-true}
+      JUNO_GATEWAY_MAX_JSON_BODY_BYTES: ${JUNO_GATEWAY_MAX_JSON_BODY_BYTES:-1048576}
+      JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES: ${JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES:-4194304}
+      JUNO_GATEWAY_READ_TIMEOUT: ${JUNO_GATEWAY_READ_TIMEOUT:-15s}
+      JUNO_GATEWAY_BROADCAST_TIMEOUT: ${JUNO_GATEWAY_BROADCAST_TIMEOUT:-30s}
+      JUNO_GATEWAY_UPSTREAM_TIMEOUT: ${JUNO_GATEWAY_UPSTREAM_TIMEOUT:-10s}
+      JUNO_GATEWAY_SHUTDOWN_TIMEOUT: ${JUNO_GATEWAY_SHUTDOWN_TIMEOUT:-15s}
+      JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT: ${JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT:-5s}
+      JUNO_GATEWAY_HTTP_READ_TIMEOUT: ${JUNO_GATEWAY_HTTP_READ_TIMEOUT:-30s}
+      JUNO_GATEWAY_HTTP_WRITE_TIMEOUT: ${JUNO_GATEWAY_HTTP_WRITE_TIMEOUT:-45s}
+      JUNO_GATEWAY_HTTP_IDLE_TIMEOUT: ${JUNO_GATEWAY_HTTP_IDLE_TIMEOUT:-60s}
+      JUNO_GATEWAY_READ_RATE_RPS: ${JUNO_GATEWAY_READ_RATE_RPS:-50}
+      JUNO_GATEWAY_READ_RATE_BURST: ${JUNO_GATEWAY_READ_RATE_BURST:-100}
+      JUNO_GATEWAY_BROADCAST_RATE_RPS: ${JUNO_GATEWAY_BROADCAST_RATE_RPS:-2}
+      JUNO_GATEWAY_BROADCAST_RATE_BURST: ${JUNO_GATEWAY_BROADCAST_RATE_BURST:-5}
+      JUNO_GATEWAY_TRUST_PROXY_HEADERS: ${JUNO_GATEWAY_TRUST_PROXY_HEADERS:-false}
+      JUNO_GATEWAY_IDEMPOTENCY_LEASE: ${JUNO_GATEWAY_IDEMPOTENCY_LEASE:-30s}
+      JUNO_GATEWAY_BACKFILL_BATCH_SIZE: ${JUNO_GATEWAY_BACKFILL_BATCH_SIZE:-10000}
+      JUNO_GATEWAY_BACKFILL_YIELD: ${JUNO_GATEWAY_BACKFILL_YIELD:-250ms}
+      JUNO_GATEWAY_BACKFILL_TIMEOUT: ${JUNO_GATEWAY_BACKFILL_TIMEOUT:-10m}
+      JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS: ${JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS:-10000}
+    ports:
+      - "${JUNO_GATEWAY_BIND:-127.0.0.1}:${JUNO_GATEWAY_PORT:-8080}:8080"
+    volumes:
+      - gateway-data:/var/lib/juno-gateway
+      - type: bind
+        source: ${JUNO_INSTALLATION_STATE_DIR:-./installation-state}
+        target: /var/lib/juno-installation
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${JUNO_GATEWAY_WALLETS_FILE:-./config/wallets.json}
+        target: /run/juno/wallets.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${JUNO_GATEWAY_AUTH_FILE:-./config/auth.json}
+        target: /run/juno/auth.json
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
+
+  txbuild:
+    image: ${JUNO_TXBUILD_IMAGE:-ghcr.io/junocash-tools/juno-exchange-gateway-txbuild:main}
+    profiles: ["operator"]
+    depends_on:
+      junocashd:
+        condition: service_healthy
+      juno-scan:
+        condition: service_healthy
+    environment:
+      JUNO_RPC_URL: http://junocashd:8232
+      JUNO_RPC_USER: ${JUNO_RPC_USER:-juno-rpc}
+      JUNO_RPC_PASS: ${JUNO_RPC_PASSWORD:-replace-this-regtest-rpc-password}
+      JUNO_SCAN_URL: http://juno-scan:8080
+      JUNO_SCAN_BEARER_TOKEN: ${JUNO_SCAN_API_BEARER_TOKEN:-replace-this-internal-scanner-token}
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    init: true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  backend:
+    internal: true
+  storage:
+    internal: true
+  chain: {}
+
+volumes:
+  gateway-data: {}
+  juno-scan-data: {}
+  junocashd-data: {}

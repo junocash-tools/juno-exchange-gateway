@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+mkdir -p tmp
+
+./scripts/check-bundle-lock
+
+# Never persist caller credentials in rendered validation artifacts.
+export JUNO_RPC_USER=compose-validation-user
+export JUNO_RPC_PASSWORD=compose-validation-password
+export JUNO_SCAN_API_BEARER_TOKEN=compose-validation-scanner-token
+export JUNO_POSTGRES_PASSWORD=compose-validation-postgres-password
+
+for network in regtest testnet mainnet; do
+  JUNO_NETWORK="$network" docker compose \
+    -f compose.yaml \
+    -f compose.dev.yaml \
+    config >"tmp/compose-${network}.yaml"
+done
+
+JUNO_NETWORK=mainnet docker compose \
+  -f compose.yaml \
+  -f compose.postgres.yaml \
+  config >tmp/compose-mainnet-postgres.yaml
+
+JUNO_NETWORK=regtest docker compose \
+  --profile operator \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  config >tmp/compose-regtest-operator.yaml
+
+echo "compose config: regtest, testnet, mainnet, Postgres, and operator profile passed"

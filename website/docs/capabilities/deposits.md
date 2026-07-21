@@ -18,7 +18,9 @@ curl --fail-with-body \
   "$GATEWAY_URL/v1/wallets/hot/deposits?limit=100&cursor=$CURSOR"
 ```
 
-Optional filters are `status`, `txid`, and an owned `address`. `limit` is `1` to `1000`.
+The production ledger consumer must poll without filters. Optional `status`, `txid`, and owned `address` filters are for diagnostics. If automation uses a filter, it needs a separate complete cursor and cannot replace the unfiltered stream. `limit` is `1` to `1000`.
+
+A cursor is bound to the wallet and the exact filter set. Keep `status`, `txid`, and `address` unchanged while advancing it.
 
 ## Lifecycle
 
@@ -29,6 +31,6 @@ Optional filters are `status`, `txid`, and an owned `address`. `limit` is `1` to
 | `unconfirmed` | Reorg moved a confirmed note below threshold | Reverse or hold the credit |
 | `orphaned` | The containing block left the active chain | Reverse the deposit |
 
-Delivery is at least once. Use `event_id` to deduplicate deliveries and `deposit_id` to apply lifecycle changes to the same note. Commit the ledger change and cursor checkpoint atomically. Do not advance the cursor before the ledger write is durable.
+Delivery is at least once. Within one event epoch, use `(deposit_id,event_id)` only to deduplicate transport delivery. Use stable `deposit_id` as the ledger idempotency key for credit, unconfirm, and orphan actions across epoch resets and scanner rebuilds. Commit the ledger change and unfiltered cursor checkpoint atomically. Do not advance the cursor before the ledger write is durable.
 
-The cursor is wallet-specific and must be treated as opaque. A cursor copied to another wallet is rejected.
+Treat the cursor as opaque. Every scanner process start rotates the event epoch, so an old cursor returns `409 cursor_reset_required`. Restart once without a cursor, replay idempotently by stable `deposit_id`, and then persist the new cursor. Reconcile the ledger after a database rebuild.

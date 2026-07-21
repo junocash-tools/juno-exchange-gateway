@@ -9,17 +9,21 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/Abdullah1738/juno-exchange-gateway/internal/domain"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
 )
 
 const (
 	defaultJSONBodyBytes      = int64(1 << 20)
 	defaultBroadcastBodyBytes = int64(4 << 20)
+	minInternalSecretLength   = 24
+	maxUFVKBytes              = 4096
 )
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -58,17 +62,18 @@ type RateLimit struct {
 }
 
 type Config struct {
-	Network         domain.Network
-	ListenAddress   string
-	StateDSN        string
-	NodeRPCURL      string
-	NodeRPCUser     string
-	NodeRPCPassword string
-	ScannerURL      string
-	ScannerToken    string
-	AddrgenPath     string
-	Wallets         []Wallet
-	Credentials     []Credential
+	Network               domain.Network
+	ListenAddress         string
+	StateDSN              string
+	InstallationStatePath string
+	NodeRPCURL            string
+	NodeRPCUser           string
+	NodeRPCPassword       string
+	ScannerURL            string
+	ScannerToken          string
+	AddrgenPath           string
+	Wallets               []Wallet
+	Credentials           []Credential
 
 	DefaultConfirmations   int64
 	MaxConfirmations       int64
@@ -80,6 +85,10 @@ type Config struct {
 	BroadcastTimeout       time.Duration
 	UpstreamTimeout        time.Duration
 	ShutdownTimeout        time.Duration
+	HTTPReadHeaderTimeout  time.Duration
+	HTTPReadTimeout        time.Duration
+	HTTPWriteTimeout       time.Duration
+	HTTPIdleTimeout        time.Duration
 	ReadRate               RateLimit
 	BroadcastRate          RateLimit
 	TrustProxyHeaders      bool
@@ -102,6 +111,7 @@ func Load() (Config, error) {
 		Network:                network,
 		ListenAddress:          env("JUNO_GATEWAY_LISTEN", ":8080"),
 		StateDSN:               env("JUNO_GATEWAY_STATE_DSN", "file:/var/lib/juno-gateway/gateway.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"),
+		InstallationStatePath:  env("JUNO_GATEWAY_INSTALLATION_STATE", "/var/lib/juno-installation/manifest.json"),
 		NodeRPCURL:             env("JUNO_GATEWAY_NODE_RPC_URL", "http://junocashd:8232"),
 		NodeRPCUser:            os.Getenv("JUNO_GATEWAY_NODE_RPC_USER"),
 		NodeRPCPassword:        os.Getenv("JUNO_GATEWAY_NODE_RPC_PASSWORD"),
@@ -118,6 +128,10 @@ func Load() (Config, error) {
 		BroadcastTimeout:       envDuration("JUNO_GATEWAY_BROADCAST_TIMEOUT", 30*time.Second),
 		UpstreamTimeout:        envDuration("JUNO_GATEWAY_UPSTREAM_TIMEOUT", 10*time.Second),
 		ShutdownTimeout:        envDuration("JUNO_GATEWAY_SHUTDOWN_TIMEOUT", 15*time.Second),
+		HTTPReadHeaderTimeout:  envDuration("JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
+		HTTPReadTimeout:        envDuration("JUNO_GATEWAY_HTTP_READ_TIMEOUT", 30*time.Second),
+		HTTPWriteTimeout:       envDuration("JUNO_GATEWAY_HTTP_WRITE_TIMEOUT", 45*time.Second),
+		HTTPIdleTimeout:        envDuration("JUNO_GATEWAY_HTTP_IDLE_TIMEOUT", 60*time.Second),
 		ReadRate:               RateLimit{RPS: envFloat("JUNO_GATEWAY_READ_RATE_RPS", 50), Burst: envInt("JUNO_GATEWAY_READ_RATE_BURST", 100)},
 		BroadcastRate:          RateLimit{RPS: envFloat("JUNO_GATEWAY_BROADCAST_RATE_RPS", 2), Burst: envInt("JUNO_GATEWAY_BROADCAST_RATE_BURST", 5)},
 		TrustProxyHeaders:      envBool("JUNO_GATEWAY_TRUST_PROXY_HEADERS", false),
@@ -155,20 +169,35 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.ListenAddress) == "" || strings.TrimSpace(c.StateDSN) == "" {
 		return errors.New("listen address and state DSN are required")
 	}
+	if strings.TrimSpace(c.InstallationStatePath) == "" || !filepath.IsAbs(c.InstallationStatePath) {
+		return errors.New("installation state path must be an absolute file path")
+	}
 	for name, raw := range map[string]string{"node RPC URL": c.NodeRPCURL, "scanner URL": c.ScannerURL} {
 		u, err := url.Parse(raw)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("%s must be an http(s) URL", name)
 		}
 	}
-	if c.DefaultConfirmations < 0 || c.MaxConfirmations < 1 || c.DefaultConfirmations > c.MaxConfirmations {
+	if c.DefaultConfirmations < 1 || c.MaxConfirmations < 1 || c.DefaultConfirmations > c.MaxConfirmations {
 		return errors.New("confirmation bounds are invalid")
 	}
 	if c.MaxScannerLag < 0 || c.JSONBodyBytes < 1024 || c.BroadcastBodyBytes < 1024 {
 		return errors.New("lag and body limits must be positive")
 	}
-	if c.ReadTimeout <= 0 || c.BroadcastTimeout <= 0 || c.UpstreamTimeout <= 0 || c.ShutdownTimeout <= 0 || c.IdempotencyLease <= 0 {
-		return errors.New("timeouts and idempotency lease must be positive")
+	if c.ReadTimeout <= 0 || c.BroadcastTimeout <= 0 || c.UpstreamTimeout <= 0 || c.ShutdownTimeout <= 0 {
+		return errors.New("timeouts must be positive")
+	}
+	if c.IdempotencyLease < time.Second {
+		return errors.New("idempotency lease must be at least 1s")
+	}
+	if c.HTTPReadHeaderTimeout <= 0 || c.HTTPReadTimeout <= 0 || c.HTTPWriteTimeout <= 0 || c.HTTPIdleTimeout <= 0 {
+		return errors.New("HTTP server timeouts must be positive")
+	}
+	if c.HTTPReadTimeout < c.HTTPReadHeaderTimeout {
+		return errors.New("HTTP read timeout must not be shorter than the read-header timeout")
+	}
+	if c.HTTPWriteTimeout <= c.BroadcastTimeout {
+		return errors.New("HTTP write timeout must be longer than the broadcast request timeout")
 	}
 	if c.BackfillBatchSize < 1 || c.BackfillBatchSize > 100000 || c.BackfillYield <= 0 || c.BackfillTimeout <= 0 {
 		return errors.New("backfill batch size, yield, and timeout are invalid")
@@ -196,6 +225,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("duplicate wallet_id %q", w.WalletID)
 		}
 		seenWallets[w.WalletID] = struct{}{}
+		if len(w.UFVK) > maxUFVKBytes {
+			return fmt.Errorf("wallet %q UFVK exceeds %d bytes", w.WalletID, maxUFVKBytes)
+		}
 		if !strings.HasPrefix(w.UFVK, ufvkPrefix) {
 			return fmt.Errorf("wallet %q UFVK does not match %s", w.WalletID, c.Network)
 		}
@@ -217,8 +249,24 @@ func (c *Config) Validate() error {
 	if c.Network != domain.Regtest && strings.TrimSpace(c.ScannerToken) == "" {
 		return errors.New("scanner authentication is required outside regtest")
 	}
-	if c.Network != domain.Regtest && (strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.NodeRPCPassword)), "replace-this-") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.ScannerToken)), "replace-this-")) {
-		return errors.New("example RPC and scanner credentials are forbidden outside regtest")
+	if c.Network != domain.Regtest {
+		rpcSecret := strings.TrimSpace(c.NodeRPCPassword)
+		scannerSecret := strings.TrimSpace(c.ScannerToken)
+		if strings.HasPrefix(strings.ToLower(rpcSecret), "replace-this-") || strings.HasPrefix(strings.ToLower(scannerSecret), "replace-this-") {
+			return errors.New("example RPC and scanner credentials are forbidden outside regtest")
+		}
+		if len(rpcSecret) < minInternalSecretLength || len(scannerSecret) < minInternalSecretLength {
+			return fmt.Errorf("RPC and scanner credentials must each be at least %d characters outside regtest", minInternalSecretLength)
+		}
+		if rpcSecret == scannerSecret {
+			return errors.New("RPC and scanner credentials must be distinct outside regtest")
+		}
+		if isEphemeralStateDSN(c.StateDSN) {
+			return errors.New("gateway state must use persistent storage outside regtest")
+		}
+		if isEphemeralStateDSN(c.InstallationStatePath) {
+			return errors.New("installation state must use persistent storage outside regtest")
+		}
 	}
 	seenNames := make(map[string]struct{}, len(c.Credentials))
 	for i := range c.Credentials {
@@ -284,11 +332,25 @@ func (c *Config) Validate() error {
 }
 
 func readJSONFile(path string, out any) error {
-	b, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
-	dec := json.NewDecoder(strings.NewReader(string(b)))
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("file must be a regular file, not a symlink")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("file permissions %04o are too broad; require 0600", info.Mode().Perm())
+	}
+	if info.Size() > 1<<20 {
+		return errors.New("file exceeds the 1 MiB limit")
+	}
+	dec := json.NewDecoder(io.LimitReader(f, 1<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
 		return err
@@ -322,7 +384,7 @@ func validateEnvironment() error {
 			}
 		}
 	}
-	for _, key := range []string{"JUNO_GATEWAY_READ_TIMEOUT", "JUNO_GATEWAY_BROADCAST_TIMEOUT", "JUNO_GATEWAY_UPSTREAM_TIMEOUT", "JUNO_GATEWAY_SHUTDOWN_TIMEOUT", "JUNO_GATEWAY_IDEMPOTENCY_LEASE", "JUNO_GATEWAY_BACKFILL_YIELD", "JUNO_GATEWAY_BACKFILL_TIMEOUT"} {
+	for _, key := range []string{"JUNO_GATEWAY_READ_TIMEOUT", "JUNO_GATEWAY_BROADCAST_TIMEOUT", "JUNO_GATEWAY_UPSTREAM_TIMEOUT", "JUNO_GATEWAY_SHUTDOWN_TIMEOUT", "JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT", "JUNO_GATEWAY_HTTP_READ_TIMEOUT", "JUNO_GATEWAY_HTTP_WRITE_TIMEOUT", "JUNO_GATEWAY_HTTP_IDLE_TIMEOUT", "JUNO_GATEWAY_IDEMPOTENCY_LEASE", "JUNO_GATEWAY_BACKFILL_YIELD", "JUNO_GATEWAY_BACKFILL_TIMEOUT"} {
 		if value := os.Getenv(key); value != "" {
 			if _, err := time.ParseDuration(value); err != nil {
 				return fmt.Errorf("%s must be a duration", key)
@@ -330,6 +392,45 @@ func validateEnvironment() error {
 		}
 	}
 	return nil
+}
+
+func isEphemeralStateDSN(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, ":memory:") || strings.Contains(lower, "mode=memory") || strings.Contains(lower, "vfs=memdb") {
+		return true
+	}
+
+	path := trimmed
+	if parsed, err := url.Parse(trimmed); err == nil && strings.EqualFold(parsed.Scheme, "file") {
+		path = parsed.Path
+		if parsed.Opaque != "" {
+			path = parsed.Opaque
+		}
+	}
+	if query := strings.IndexAny(path, "?#"); query >= 0 {
+		path = path[:query]
+	}
+	if decoded, err := url.PathUnescape(path); err == nil {
+		path = decoded
+	}
+	path = strings.TrimSpace(path)
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
+		path = path[len("file:"):]
+	}
+	for strings.HasPrefix(path, "//") {
+		path = path[1:]
+	}
+	if path == "" || strings.EqualFold(path, ":memory:") {
+		return true
+	}
+	path = strings.TrimRight(path, "/")
+	for _, root := range []string{"/tmp", "/var/tmp", "/dev/shm", "/private/tmp", "/var/folders"} {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func env(k, d string) string {
