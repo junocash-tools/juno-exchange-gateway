@@ -295,6 +295,26 @@ wait_operation() {
   fail "asynchronous node operation timed out"
 }
 
+wait_orchard_balance() {
+  local viewing_key=$1
+  local min_confirmations=$2
+  local minimum_zat=$3
+  local output=$4
+  local scratch="$run_dir/.funding-balance.json"
+  local deadline=$((SECONDS + 180))
+  while (( SECONDS < deadline )); do
+    if node_cli z_getbalanceforviewingkey "$viewing_key" "$min_confirmations" \
+      >"$scratch" 2>/dev/null && jq -e --argjson minimum_zat "$minimum_zat" \
+      '.pools.orchard.valueZat >= $minimum_zat' "$scratch" >/dev/null 2>&1; then
+      cp "$scratch" "$output"
+      return 0
+    fi
+    sleep 0.2
+  done
+  cp "$scratch" "$output" 2>/dev/null || true
+  fail "node wallet Orchard balance did not reach $minimum_zat zat at $min_confirmations confirmations"
+}
+
 operation_id_from_file() {
   local file=$1
   local opid
@@ -327,9 +347,17 @@ shield_coinbase_from() {
 
 send_from() {
   local source_address=$1
-  local destination_address=$2
-  local amount=$3
-  local prefix=$4
+  local viewing_key=$2
+  local destination_address=$3
+  local amount=$4
+  local minimum_zat=$5
+  local min_confirmations=$6
+  local prefix=$7
+  wait_orchard_balance \
+    "$viewing_key" \
+    "$min_confirmations" \
+    "$minimum_zat" \
+    "$run_dir/${prefix}-funding-balance.json"
   jq -cn \
     --arg address "$destination_address" \
     --argjson amount "$amount" \
@@ -578,6 +606,8 @@ assert_jq "$run_dir/balance-zero.json" \
 
 account="$(node_cli z_getnewaccount | jq -er '.account | select(type == "number" and . >= 0 and floor == .)')"
 destination_address="$(node_cli z_getaddressforaccount "$account" | jq -er '.address | select(type == "string" and length > 0)')"
+funding_viewing_key="$(node_cli z_exportviewingkey "$destination_address" | tr -d '\r\n')"
+[[ -n "$funding_viewing_key" ]] || fail "node funding account did not export a viewing key"
 code="$(api_status GET "/v1/wallets/$wallet_id/addresses/$destination_address/balance" "$run_dir/balance-unowned.json")"
 [[ "$code" == "404" ]] || fail "unallocated address balance must return 404, got HTTP $code"
 
@@ -591,13 +621,13 @@ funding_source_address="$(jq -er \
 funding_txid="$(shield_coinbase_from "$funding_source_address" "$destination_address" funding)"
 node_cli generate 2 >"$run_dir/funding-confirmation-blocks.json"
 wait_ready "$run_dir/ready-after-funding.json"
-deposit_txid="$(send_from "$destination_address" "$deposit_address" 0.05 deposit-1)"
+deposit_txid="$(send_from "$destination_address" "$funding_viewing_key" "$deposit_address" 0.05 5200000 2 deposit-1)"
 node_cli generate 1 >"$run_dir/deposit-1-block.json"
 wait_ready "$run_dir/ready-deposit-detected.json"
 wait_deposit_status "$deposit_txid" detected "$run_dir/deposit-detected.json"
 
 log "Second wallet: observe a real deposit and wallet-scoped transaction effect"
-cold_deposit_txid="$(send_from "$destination_address" "$cold_deposit_address" 0.01 cold-wallet-deposit)"
+cold_deposit_txid="$(send_from "$destination_address" "$funding_viewing_key" "$cold_deposit_address" 0.01 1200000 1 cold-wallet-deposit)"
 node_cli generate 1 >"$run_dir/cold-wallet-deposit-block.json"
 wait_ready "$run_dir/ready-cold-wallet-deposit.json"
 wait_wallet_deposit_status "$cold_wallet_id" "$cold_wallet_token" "$cold_deposit_txid" detected \
@@ -666,7 +696,7 @@ log "Integration: exclude a real deposit sent to an unallocated UFVK address"
   --index 100 \
   --json >"$run_dir/unallocated-address.json"
 unallocated_address="$(jq -er '.address' "$run_dir/unallocated-address.json")"
-unallocated_txid="$(send_from "$destination_address" "$unallocated_address" 0.01 deposit-unallocated)"
+unallocated_txid="$(send_from "$destination_address" "$funding_viewing_key" "$unallocated_address" 0.01 1200000 1 deposit-unallocated)"
 node_cli generate 1 >"$run_dir/unallocated-deposit-block.json"
 wait_ready "$run_dir/ready-unallocated-detected.json"
 assert_no_deposit "$unallocated_txid" "$run_dir/unallocated-deposit-detected.json"
@@ -903,7 +933,7 @@ jq -S '.data.balance' "$run_dir/balance-after-recovery.json" >"$run_dir/balance-
 cmp -s "$run_dir/balance-before.normalized.json" "$run_dir/balance-after.normalized.json" || \
   fail "scanner rebuild changed the recovered address balance"
 
-post_recovery_txid="$(send_from "$destination_address" "$deposit_address" 0.01 deposit-after-recovery)"
+post_recovery_txid="$(send_from "$destination_address" "$funding_viewing_key" "$deposit_address" 0.01 1200000 1 deposit-after-recovery)"
 node_cli generate 1 >"$run_dir/post-recovery-deposit-block.json"
 post_recovery_block_hash="$(jq -er '.[0]' "$run_dir/post-recovery-deposit-block.json")"
 wait_ready "$run_dir/ready-post-recovery-deposit.json"
