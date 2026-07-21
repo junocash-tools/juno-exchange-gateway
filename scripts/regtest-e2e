@@ -11,7 +11,7 @@ mkdir -p "$run_dir/config"
 chmod 0700 "$run_dir"
 umask 077
 
-for command in cargo curl docker go jq make npm openssl; do
+for command in cargo curl docker go jq make npm openssl python3; do
   command -v "$command" >/dev/null || {
     echo "missing required command: $command" >&2
     exit 1
@@ -21,7 +21,6 @@ done
 "$repo_root/scripts/check-clean-sources"
 
 export JUNO_NETWORK=regtest
-export JUNO_GATEWAY_PORT=0
 export JUNO_GATEWAY_WALLETS_FILE="$run_dir/config/wallets.json"
 export JUNO_GATEWAY_AUTH_FILE="$run_dir/config/auth.json"
 export JUNO_INSTALLATION_STATE_DIR="$run_dir/installation-state"
@@ -392,6 +391,7 @@ fi
 grep -F 'one-time only' "$run_dir/init-repeat.log" >/dev/null || \
   fail "repeated init did not report the one-time guard"
 
+export JUNO_GATEWAY_PORT="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 "${compose[@]}" up -d junocashd juno-scan gateway
 
 for _ in $(seq 1 120); do
