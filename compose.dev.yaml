@@ -25,7 +25,7 @@ services:
         REVISION: ${JUNO_GATEWAY_REVISION:-local}
         BUILD_TIME: ${JUNO_GATEWAY_BUILD_TIME:-}
         COMPONENTS_JSON: >-
-          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-3f6009fe16d15faa0da5a8962e0f5dad30307135}","juno-txbuild":"${JUNO_TXBUILD_REF:-40a185c38d8e0767fa5d98bf1967c7e64e544984}","juno-txsign":"${JUNO_TXSIGN_REF:-1a32836f77f2d8a01ef0ef20842538cbc506f0c3}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
+          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-3f6009fe16d15faa0da5a8962e0f5dad30307135}","juno-txbuild":"${JUNO_TXBUILD_REF:-40a185c38d8e0767fa5d98bf1967c7e64e544984}","juno-txsign":"${JUNO_TXSIGN_REF:-4459cd827062c8d317970e48e7ed5e2e4d0f5c6b}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
 
   txbuild:
     image: juno-exchange-gateway/txbuild:dev

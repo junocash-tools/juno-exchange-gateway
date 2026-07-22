@@ -64,7 +64,7 @@
     },
     "txsign": {
       "repository": "https://github.com/junocash-tools/juno-txsign.git",
-      "revision": "1a32836f77f2d8a01ef0ef20842538cbc506f0c3"
+      "revision": "4459cd827062c8d317970e48e7ed5e2e4d0f5c6b"
     }
   },
   "node_artifact": {
