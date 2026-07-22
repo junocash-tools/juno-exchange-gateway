@@ -120,12 +120,24 @@ docker compose --profile operator run --rm txbuild --help
 The signer is a separate image, never a long-running Compose service. Invoke it only in the offline environment with networking disabled, a read-only root, and narrow read-only input mounts:
 
 ```bash
+SIGN_OUTPUT_DIR="$PWD/tmp/withdrawal-1842/direct"
+test "$(id -u)" -ne 0
+mkdir -m 0700 "$SIGN_OUTPUT_DIR"
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
+  --user "$(id -u):$(id -g)" \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   -v "$PWD/plan.json:/work/plan.json:ro" \
   -v "$PWD/seed:/work/seed:ro" \
-  "$JUNO_TXSIGN_IMAGE" sign --txplan /work/plan.json --seed-file /work/seed --json
+  -v "$SIGN_OUTPUT_DIR:/work/output:rw" \
+  "$JUNO_TXSIGN_IMAGE" sign \
+  --txplan /work/plan.json --seed-file /work/seed \
+  --out /work/output/rawtx.hex \
+  --out-result /work/output/signed.json \
+  --action-indices --json > /dev/null
 ```
+
+Run this from a dedicated non-root signer OS account that owns the mode-`0600` inputs and mode-`0700` output directory; `--user` maps the container to it. Never use UID `0`. Every attempt and signer output path is one-shot. The signer refuses overwrite and leaves a fail-closed pending marker after an uncertain output commit. Follow [Build, sign, and broadcast](../transactions/build-sign-broadcast.md) for validation and recovery rules.
 
 The gateway joins the internal backend and a dedicated ingress bridge. The ingress bridge exists only for the single published port; it disables Docker's default outbound masquerading and inter-container communication. This is hardening, not an egress firewall. Enforce outbound policy at the host or infrastructure layer. Scanner joins backend and the separate internal storage network; Postgres joins storage only. Node, scanner, and databases have no host ports.
 

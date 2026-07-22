@@ -15,7 +15,7 @@ The online gateway never accepts seeds, spending keys, recipients, amounts, sign
 Create `config/wallets.json` and `config/auth.json` from the examples, then set their absolute host paths in `.env`. Create a separate installation-state bind and initialize it once:
 
 ```sh
-cp .env.example .env
+install -m 0600 .env.example .env
 sudo chown 10001:10001 config/wallets.json config/auth.json
 sudo chmod 0600 config/wallets.json config/auth.json
 sudo install -d -o 10001 -g 10001 -m 0700 installation-state

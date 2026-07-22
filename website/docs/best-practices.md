@@ -12,8 +12,10 @@ title: Best practices
 - Allow only one complete plan-to-outcome lifecycle per wallet, or atomically reserve every selected `notes[].note_id`.
 - For a never-mined attempt, release after canonical height is strictly greater than `expiry_height` only when lookup/effects reconcile and the complete selected-ID batch is `unspent`. If it was ever mined or orphaned, also wait through `orphaned_at_height + configured_confirmations`, or require manual chain evidence when that height is unavailable.
 - Bind withdrawal, attempt, plan digest, txid, raw-transaction hash, and idempotency key before broadcast.
+- Use a fresh owner-only signer attempt directory and durable file outputs for every signing attempt. Never overwrite a result or clear an uncertain pending marker to force a retry.
 - Retry uncertain broadcasts with the same wallet ID, principal, key, expected txid, and bytes. Never rebuild first.
 - After a completed broadcast later becomes orphaned or absent while height is strictly below expiry, keep reservations and use a fresh operation key only to rebroadcast the identical signed bytes.
+- There is no RBF or CPFP path for the pinned Orchard transaction flow. Set the fee before approval; do not sign a competing fee-bump while prior bytes remain valid.
 - Use registered internal change under the spending UFVK; never credit change as a customer deposit.
 - Keep planner defaults at `--minconf 100` and `--fee-multiplier 20` unless a reviewed policy says otherwise.
 - Consolidate only when note count, signing time, or input limits justify its fee and privacy cost.

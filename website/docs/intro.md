@@ -81,6 +81,7 @@ JUNO_GATEWAY_PORT=8080
 Create the installation-state directory once, then initialize it. The acknowledgement must match exactly.
 
 ```bash
+chmod 0600 .env
 sudo chown 10001:10001 /absolute/path/wallets.json /absolute/path/auth.json
 sudo chmod 0600 /absolute/path/wallets.json /absolute/path/auth.json
 sudo install -d -o 10001 -g 10001 -m 0700 /absolute/path/installation-state

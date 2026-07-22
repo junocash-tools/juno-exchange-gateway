@@ -71,6 +71,10 @@ docker compose --profile operator run --rm -T \
 
 The signer proves ownership only for a nonzero change output. It validates the network but does not prove that explicit `--to` or `--outputs-file` destinations belong to the exchange. Before approval, require every explicit sweep, consolidation, or rebalance destination to match the exchange treasury registry exactly. A mistyped external destination is otherwise a valid irreversible payment.
 
+For `consolidate` and `sweep`, use a gateway-allocated destination under the same UFVK that owns the inputs. A `rebalance` may send to a different hot, warm, or cold UFVK only when that wallet was registered in this installation before `init` and its exact destination was allocated and recorded as an operator tier address. Keep any change under the source UFVK. Record the source debit and each target credit as one internal transfer keyed by txid and the signer-provided action mapping; never route them through customer deposit credit.
+
+The scanner classifies transaction origin once across all wallets registered in the installation. For a registered source-to-registered-target rebalance, it stores the target note as internal and emits no external deposit lifecycle. This suppression depends on both wallet registrations, not on the address label. If a target is outside the installation, the gateway cannot monitor or reconcile its receipt; use a separate documented custody flow instead of this rebalance procedure.
+
 After any `consolidate`, `sweep`, or `rebalance` plan, use the same offline direct-signing or external-signing flow, note-ID reservation policy, signed-raw broadcast API, and txid reconciliation described in [build, sign, and broadcast](./build-sign-broadcast.md).
 
 ## Economics
@@ -114,7 +118,7 @@ Without a durable exchange reservation ledger, run only one plan lifecycle per w
 
 A consolidation transaction shows that many nullifiers were authorized together and creates a conspicuous timing pattern, even though Orchard values and recipient details remain shielded from public observers. Large regular sweeps can also concentrate wallet activity into fewer notes.
 
-- send the output only to an operator-controlled address under the same spending UFVK
+- for `consolidate` and `sweep`, send the output only to an operator-controlled address under the same spending UFVK; for `rebalance`, use only the pre-approved registered tier addresses described above and keep change under the source UFVK
 - use a dedicated registered `purpose=treasury` or `purpose=internal_change` address, never a customer deposit address; see [address allocation](../capabilities/address-allocation.md#change-and-treasury-addresses)
 - do not credit the output as an external deposit
 - avoid a predictable public schedule when operations permit

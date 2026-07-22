@@ -9,13 +9,16 @@ title: Backups and recovery
 | Offline seed or signer material | Required to spend; encrypted and offline |
 | Installation-state directory | Required to preserve installation identity and address high-water marks |
 | `wallets.json` and birthday heights | Required to derive addresses and rescan |
+| Credential-name registry and bearer-token recovery | Required to recreate authentication; preserve each broadcaster `name` exactly, while its token and hash may rotate |
 | Exchange address-to-account mapping | Required for customer attribution |
-| Exchange withdrawal ledger | Required for outstanding attempts: approvals, plan digests, selected note-ID reservations, txids, expiries, and idempotency keys |
+| Exchange withdrawal ledger | Required for outstanding attempts: approvals, plan digests, selected note-ID reservations, txids, expiries, broadcast principal names, and idempotency keys |
 | Gateway database | Preferred for labels, cursor key, and idempotency receipts |
 | Scanner database | Recommended for faster recovery; otherwise rebuild from chain |
 | Node data | Optional; otherwise resync the node |
 
 Stop the gateway for a simple consistent SQLite snapshot, including WAL state. Use native consistent Postgres backups. Keep backup directories at mode `0700` and files at `0600`, encrypt copies, and test restores. The gateway process uses umask `0077`; backup tooling must preserve or reapply these permissions.
+
+Keep bearer secrets in the exchange secret manager and back up `auth.json` only as encrypted configuration. During recovery, recreate every broadcaster credential with the exact prior `name`; its token may rotate under that name. A different name creates a different durable idempotency namespace.
 
 The installation manifest contains UFVK fingerprints, not raw UFVKs. It changes before each address index is issued. Keep it on write-through durable storage outside Compose volumes, or reconcile every allocation against an independent append-only exchange address record.
 
@@ -44,7 +47,7 @@ Do not infer outstanding attempts from scanner data alone.
 1. Stop new planning and signing.
 2. Restore the exchange withdrawal ledger and gateway idempotency database.
 3. Look up every signed txid with its authorized `wallet_id`.
-4. For a broadcast timeout or retryable error, submit the identical wallet ID, raw bytes, expected txid, principal, and idempotency key.
+4. For a broadcast timeout or retryable error, submit the identical wallet ID, raw bytes, expected txid, credential principal name, and idempotency key.
 5. If the tx is absent while `chain_height <= expiry_height`, keep its selected note IDs reserved.
 6. If the original broadcast operation is known complete and the same txid is later orphaned or absent while canonical height is strictly below expiry, persist a fresh rebroadcast-operation key and resubmit the identical signed bytes only when policy leaves enough blocks to mine. A completed old key only replays its stored receipt. Never use a fresh key to resolve an uncertain call.
 7. Release only after `chain_height > expiry_height`, node lookup is absent, expired, or orphaned, wallet effects are reconciled, and [selected-note status](../capabilities/selected-note-status.md) returns the complete recorded ID set as `unspent`. If the attempt was ever mined/orphaned, also require `chain_height >= orphaned_at_height + configured_confirmations` with no later remine event, so the replacement branch is final under exchange policy (default `100`). If the fork height is unavailable, do not release automatically. An `unknown`, `pending`, or `spent` item stays locked; attach a note spent by another transaction to that txid instead of returning it to available inventory. Node lookup can remain `orphaned` rather than transition to `expired`.

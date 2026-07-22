@@ -61,12 +61,14 @@ An exchange-recorded expiry does not override an API item whose expiry is absent
 
 Apply the same conservative rule to the exchange reservation. An unsigned canceled plan can be released under a controlled approval policy. Once raw signed bytes may exist, keep the reservation until the transaction is final. A never-mined attempt can be released only after canonical node height is greater than its expiry, lookup and wallet effects confirm it was never mined, and [selected-note status](../capabilities/selected-note-status.md) reconciles the complete recorded ID set as unspent. If the attempt was ever mined or orphaned, also retain it through `orphaned_at_height + configured_confirmations` with no later remine event; when that height is unavailable, require manual chain evidence.
 
+The pinned Orchard transaction flow has no RBF or CPFP fee bump. Do not create a higher-fee transaction that competes for the same notes. Keep the original notes reserved, rebroadcast only the identical signed bytes under the rules below, or wait through strict expiry and complete reconciliation before creating a replacement plan.
+
 ## Retry, expiry, and reorg lifecycle
 
 | State | Required action |
 | --- | --- |
 | Planned/reserved | Verify policy and plan digest; do not create a competing plan |
-| Signed | Protect raw bytes and keep notes reserved |
+| Signed | Protect every raw-byte variant and keep notes reserved. Use one-shot signer output paths; an uncertain output commit is not permission to sign again |
 | Broadcast uncertain | Retry the same wallet ID, raw bytes, expected txid, principal, and idempotency key |
 | Mempool | Keep reserved; monitor txid and expiry height |
 | Mined below finality | Keep reserved and apply the exchange's provisional policy |

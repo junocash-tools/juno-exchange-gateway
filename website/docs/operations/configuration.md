@@ -2,7 +2,7 @@
 title: Configuration reference
 ---
 
-Copy `.env.example` to `.env`. Testnet and mainnet reject the shipped RPC and scanner placeholders. Durations use values such as `500ms`, `15s`, and `2m`.
+Create an owner-only environment file with `install -m 0600 .env.example .env`. Testnet and mainnet reject the shipped RPC and scanner placeholders. Durations use values such as `500ms`, `15s`, and `2m`.
 
 ## Appliance
 
@@ -44,10 +44,10 @@ These settings identify local source builds and the documentation site. They are
 | `JUNOCASH_LINUX64_SHA256` | `41f74d…ec386` | Verify the downloaded node archive |
 | `JUNO_ADDRGEN_REF` | `4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834` | Address-deriver source and version manifest |
 | `JUNO_ADDRGEN_REPO` | `junocash-tools/juno-addrgen` | Direct gateway-image build argument |
-| `JUNO_SCAN_REF` | `56bd7edd9b8b93fd73a97110c8ef01326f4f136f` | Scanner commit recorded in the version manifest |
+| `JUNO_SCAN_REF` | `3f6009fe16d15faa0da5a8962e0f5dad30307135` | Scanner commit recorded in the version manifest |
 | `JUNO_TXBUILD_REF` | `40a185c38d8e0767fa5d98bf1967c7e64e544984` | Planner source and version manifest |
 | `JUNO_TXBUILD_REPO` | `junocash-tools/juno-txbuild` | Direct planner-image build argument |
-| `JUNO_TXSIGN_REF` | `1a32836f77f2d8a01ef0ef20842538cbc506f0c3` | Offline signer source and published image |
+| `JUNO_TXSIGN_REF` | `4459cd827062c8d317970e48e7ed5e2e4d0f5c6b` | Offline signer source and published image |
 | `JUNO_TXSIGN_REPO` | `junocash-tools/juno-txsign` | Offline signer-image build argument |
 | `JUNO_GATEWAY_VERSION` | `dev` | Gateway version recorded in the binary |
 | `JUNO_GATEWAY_REVISION` | `local` | Gateway commit recorded in the binary |

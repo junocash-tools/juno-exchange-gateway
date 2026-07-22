@@ -29,7 +29,7 @@ An empty credential list grants anonymous access to every operation only on regt
 
 The online stack must never receive a seed, mnemonic, spending key, or signer share. Derive the UFVK in an isolated environment, transfer only that UFVK, and keep offline seed and signer backups encrypted and geographically separated. A UFVK is watch-only but privacy-sensitive: it reveals wallet activity and address derivation.
 
-Do not put tokens, UFVKs, customer labels, raw transaction bodies, or plans in access logs. Redact `Authorization` and query parameters at the proxy. Mount wallet and auth files read-only with mode `0600` on the host. The gateway sets process umask `0077` before opening state.
+Do not put tokens, UFVKs, customer labels, raw transaction bodies, or plans in access logs. Redact `Authorization` and query parameters at the proxy. Keep `.env`, wallet, and auth files at mode `0600`; the deployment account owns `.env`, while the container identity must be able to read the two bind-mounted JSON files. Mount wallet and auth files read-only. The gateway sets process umask `0077` before opening state.
 
 Keep the installation-state directory mode `0700` and its manifest mode `0600`. It stores installation identity, UFVK fingerprints, and address high-water marks, never raw UFVKs or keys. Treat it as integrity-critical and back it up privately, separately from gateway and scanner databases.
 

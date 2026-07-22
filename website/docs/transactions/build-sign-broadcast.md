@@ -22,8 +22,10 @@ The Compose operator profile can reach the private node and scanner. It has no p
 
 ```bash
 umask 077
+set -o noclobber
+install -d -m 0700 "$PWD/tmp"
 ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
-install -d -m 0700 "$ATTEMPT_DIR"
+mkdir -m 0700 "$ATTEMPT_DIR"
 
 docker compose --profile operator run --rm -T txbuild send \
   --wallet-id hot \
@@ -36,6 +38,8 @@ docker compose --profile operator run --rm -T txbuild send \
   --minconf 100 \
   > "$ATTEMPT_DIR/txplan.json"
 ```
+
+The attempt directory and every file name are one-shot. `mkdir` and `noclobber` must fail when the attempt or a redirected artifact already exists; choose a new attempt ID instead of overwriting evidence.
 
 Use coin type `8133` on mainnet, `8134` on testnet, and `8135` on regtest. `0` asks the planner to infer it from the node.
 
@@ -112,18 +116,27 @@ Do not parse and reserialize the plan between approval and signing. A non-zero p
 - `--fee-multiplier` defaults to `20`. With the planner's 5,000-zat base, this matches the bundled `junocashd` 0.9.12 policy of `100,000 × max(2, logical actions)` zat on every network. Recheck the default when either component changes.
 - Outputs include change when calculating logical actions. `--fee-add-zat` adds to the multiplied fee. `--min-change-zat` adds smaller change to the fee instead of creating a note.
 - The default expiry is `tip + 1 + 40`; the minimum offset is `4`. A pending spend clears for expiry only after node height is strictly greater than `expiry_height`.
+- The pinned transaction stack has no RBF or CPFP fee-bump path for these Orchard spends. Choose the fee before approval and signing. For a stuck accepted transaction, keep its notes reserved and either rebroadcast the identical bytes under the rules below or wait for strict expiry and reconciliation before building a new plan. Never sign a competing fee-bump while earlier raw bytes remain valid.
 - Use a dedicated gateway-registered change address under the spending UFVK. An `internal_change:*` label records exchange purpose; the allocated address itself uses Orchard external scope, and the pinned scanner therefore reports `recipient_scope: "external"` and `ovk_scope: "external"`. Same-wallet transaction-origin suppression keeps this change out of the external deposit feed. The planner accepts the address supplied by the exchange; the signer independently rejects a change address outside the signing seed or external-signing UFVK and rejects address/network mismatches.
 - Inspect destination, amount, memo, change, selected notes, fee, anchor, branch ID, network, and expiry before approval.
 
 Planning does not reserve notes. Follow [note selection and reservations](./note-selection-and-reservations.md) before creating more than one outstanding plan.
 
+Direct signing and external spend-authority signing are alternatives. Bind the chosen mode to the approved attempt and use only that mode. Once signed bytes or external signing requests may have escaped, do not switch modes or run either command again for the same plan.
+
 ## 2. Sign directly offline
 
 On the isolated signer host, put the verified plan at `tmp/withdrawal-1842/txplan.json` and the protected seed at `hot.seed`. Pin the signer image by the digest recorded in the release manifest, disable networking, and mount both inputs read-only:
 
+Run every offline command from a dedicated non-root signer OS account that owns the owner-only inputs and output directories. The `--user` override maps the container to that account; never invoke this flow from UID `0`.
+
 ```bash
 TXSIGN_IMAGE=ghcr.io/junocash-tools/juno-exchange-gateway-txsign@sha256:<verified-digest>
 ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
+SIGN_DIR="$ATTEMPT_DIR/direct"
+test "$(id -u)" -ne 0
+mkdir -m 0700 "$SIGN_DIR"
+chmod 0600 "$ATTEMPT_DIR/txplan.json" "$PWD/hot.seed"
 
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
@@ -131,11 +144,23 @@ docker run --rm --network none --read-only --cap-drop ALL \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   -v "$ATTEMPT_DIR/txplan.json:/work/txplan.json:ro" \
   -v "$PWD/hot.seed:/run/secrets/juno-seed:ro" \
+  -v "$SIGN_DIR:/work/output:rw" \
   "$TXSIGN_IMAGE" sign \
   --txplan /work/txplan.json \
   --seed-file /run/secrets/juno-seed \
+  --out /work/output/rawtx.hex \
+  --out-result /work/output/signed.json \
   --action-indices \
-  --json > "$ATTEMPT_DIR/signed.json"
+  --json > /dev/null
+
+jq -e '
+  .version == "v1" and .status == "ok" and
+  (.data.txid | test("^[0-9a-f]{64}$")) and
+  (.data.raw_tx_hex | test("^[0-9a-f]+$")) and
+  (.data.orchard_output_action_indices | type == "array")
+' "$SIGN_DIR/signed.json" > /dev/null
+test "$(tr -d '\r\n' < "$SIGN_DIR/rawtx.hex")" = \
+  "$(jq -er '.data.raw_tx_hex' "$SIGN_DIR/signed.json")"
 ```
 
 Success is machine-readable:
@@ -179,8 +204,9 @@ umask 077
 TXSIGN_IMAGE=ghcr.io/junocash-tools/juno-exchange-gateway-txsign@sha256:<verified-digest>
 ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
 EXT_DIR="$ATTEMPT_DIR/external"
-install -d -m 0700 "$EXT_DIR"
-chmod 0600 "$PWD/wallet.ufvk"
+test "$(id -u)" -ne 0
+mkdir -m 0700 "$EXT_DIR"
+chmod 0600 "$ATTEMPT_DIR/txplan.json" "$PWD/wallet.ufvk"
 
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
@@ -194,14 +220,19 @@ docker run --rm --network none --read-only --cap-drop ALL \
   --ufvk-file /run/secrets/wallet.ufvk \
   --out-prepared /work/output/prepared.json \
   --out-requests /work/output/requests.json \
-  > "$ATTEMPT_DIR/prepare-result.json"
+  --out-result /work/output/prepare-result.json \
+  > /dev/null
 
+jq -e '.version == "v0" and (.requests | type == "array" and length > 0)' \
+  "$EXT_DIR/requests.json" > /dev/null
+jq -e '.version == "v1" and .status == "ok"' \
+  "$EXT_DIR/prepare-result.json" > /dev/null
 sha256sum "$EXT_DIR/prepared.json" "$EXT_DIR/requests.json"
 ```
 
-Use the same digest-pinned signer image recorded in the release provenance. `ext-prepare` needs the UFVK but no spending key and needs no network; the command above gives it read-only inputs and one owner-only output directory. Transfer only `requests.json` and the approval metadata required by the external signer. Keep `prepared.json` with the coordinator and never send the UFVK to a signer that does not require it.
+Use the same digest-pinned signer image recorded in the release provenance. `ext-prepare` needs the UFVK but no spending key and needs no network; the command above gives it read-only inputs and one owner-only output directory. Transfer only the exact `requests.json` bytes and an authenticated approval record to the external signer. Keep `prepared.json` with the coordinator and never send the UFVK to a signer that does not require it.
 
-`ext-prepare` always returns JSON. Treat `prepared.json` as opaque, retain its exact bytes through finalization, and bind both file digests to the approved withdrawal attempt. The prepared artifact also contains three coordination mappings:
+`ext-prepare` always returns JSON. Treat `prepared.json` as opaque and retain its exact bytes through finalization. In one protected approval record, bind the withdrawal attempt ID, exact plan digest, exact prepared-file digest, exact requests-file digest, network, coin type, account, and required action-index set. The external signer must receive that record through an independently authenticated approval channel, such as a signed approval manifest delivered by the approval system or an authenticated read from that system. Do not trust a sidecar supplied only by the online coordinator. The prepared artifact also contains three coordination mappings:
 
 - `orchard_output_action_indices`, aligned to `txplan.outputs`
 - `orchard_change_action_index`, or `null`
@@ -220,7 +251,7 @@ These semantic output/change roles are not authenticated by Orchard spend-author
 }
 ```
 
-`prepare-result.json` is a separate command-result envelope written to stdout. It includes both artifacts for inspection, but it is not the file supplied to the external signer:
+`prepare-result.json` is the separately persisted command-result envelope, also emitted to stdout for compatibility. It includes both artifacts for inspection, but it is not the file supplied to the external signer:
 
 ```jsonc
 {
@@ -249,9 +280,9 @@ The external signer must return one signature for every requested action:
 }
 ```
 
-Store the exact returned submission as `$EXT_DIR/sigs.json` with mode `0600`. Do not merge, reorder, or reconstruct signature entries between the external signer and finalization.
+Store the exact returned submission once as `$EXT_DIR/sigs.json` with mode `0600`. The external signer must refuse an existing output path. Do not merge, reorder, reconstruct, or overwrite signature entries between the external signer and finalization.
 
-Before signing, the external system must verify the approved plan/prepared digest, network, action count, and unique `action_index` set. Never sign a request batch reconstructed or edited outside `ext-prepare`.
+Before producing any signature share, the external system must hash the exact received `requests.json` bytes and require equality with the requests digest in the authenticated approval record. It must also require that record to bind the expected attempt, plan and prepared digests, network, coin type, account, action count, and unique `action_index` set. Reject any missing or mismatched field. Never sign a request batch reconstructed or edited outside `ext-prepare`.
 
 ### External signer contract
 
@@ -272,19 +303,22 @@ cargo build --locked --release \
   --manifest-path ../juno-txsign/rust/juno-tx/Cargo.toml \
   --bin juno_orchard_spendauth_sign
 
+test ! -e "$EXT_DIR/sigs.json"
 ../juno-txsign/rust/juno-tx/target/release/juno_orchard_spendauth_sign \
   --requests "$EXT_DIR/requests.json" \
   --coin-type 8135 \
   --account 0 \
   --seed-file "$PWD/hot.seed" \
   --out "$EXT_DIR/sigs.json"
+chmod 0600 "$EXT_DIR/sigs.json"
 ```
 
 This helper is a test oracle, not a production HSM or TSS service.
 
 ```bash
 FINAL_DIR="$ATTEMPT_DIR/final"
-install -d -m 0700 "$FINAL_DIR"
+test "$(id -u)" -ne 0
+mkdir -m 0700 "$FINAL_DIR"
 
 docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
@@ -297,10 +331,19 @@ docker run --rm --network none --read-only --cap-drop ALL \
   --prepared-tx /work/prepared.json \
   --sigs /work/sigs.json \
   --out /work/output/rawtx.hex \
-  --json > "$ATTEMPT_DIR/signed.json"
+  --out-result /work/output/signed.json \
+  --json > /dev/null
+
+jq -e '
+  .version == "v1" and .status == "ok" and
+  (.data.txid | test("^[0-9a-f]{64}$")) and
+  (.data.raw_tx_hex | test("^[0-9a-f]+$"))
+' "$FINAL_DIR/signed.json" > /dev/null
+test "$(tr -d '\r\n' < "$FINAL_DIR/rawtx.hex")" = \
+  "$(jq -er '.data.raw_tx_hex' "$FINAL_DIR/signed.json")"
 ```
 
-Finalization also needs no network or spending key. Rehash `prepared.json` and require it to match the approval record before this command; verify the returned txid and fee before moving only the approved signed result back online.
+Finalization also needs no network or spending key. Rehash `prepared.json` and require it to match the approval record before this command; validate `$FINAL_DIR/signed.json`, require its `raw_tx_hex` to equal `$FINAL_DIR/rawtx.hex`, and verify the returned txid and fee before moving only the approved signed result back online.
 
 With `--json`, success uses the same envelope as direct signing:
 
@@ -328,15 +371,24 @@ The actual spend-authority signer and its key shares stay isolated. Do not confu
 | `sign_failed` | Invalid plan, wrong seed/account, `address_network_mismatch`, `change_address_not_owned`, `note_decrypt_failed`, fee or witness failure | Stop and reconcile the approved plan with the signing wallet |
 | `prepare_failed` | External UFVK/network/change mismatch or invalid plan/proof input | Stop; create no signing shares |
 | `finalize_failed` | Missing, duplicate, malformed, or invalid spend-authority signature | Reject the signature set; do not reuse a changed prepared transaction |
-| `io_error` | Protected artifact could not be read or written | Repair local storage and retry the same approved artifact |
+| `io_error` | Output collision, storage failure, or stdout failure | Stop. Do not overwrite or rerun signing until the outcome is classified by the rules below |
+
+Signer-managed output paths are reserved before cryptographic work, owner-only, synced, and published without replacement. A post-result failure deliberately leaves a `.juno-txsign-pending` marker. Never delete that marker merely to make a retry pass. Stdout remains available for compatibility but is not crash-durable; production workflows should use every applicable file-output flag and validate the complete `--out-result` before export.
+
+- A reservation error before `sign`, `ext-prepare`, or `ext-finalize` starts creates no new transaction. Investigate the existing target or pending marker before assigning a new attempt.
+- If a complete `--out-result` exists and matches the other committed outputs, treat it as the authoritative result even if stdout failed. Do not sign again.
+- If the error says output state is uncertain, a pending marker remains, or stdout failed without a complete result, quarantine every partial artifact and keep all selected notes reserved. Do not sign again unless an audited review proves no valid bytes escaped; otherwise reconcile every known signed variant through finality or strict expiry.
 
 ## 3. Broadcast and reconcile
 
-Return the approved raw hex and txid to the online side. Submit them with a stable idempotency key, then reconcile the txid through [transaction lookup](../capabilities/transaction-lookup.md).
+Return the approved raw hex and txid to the online side. Set `SIGNED_RESULT` to the transferred durable result: direct signing writes `$ATTEMPT_DIR/direct/signed.json`, while external finalization writes `$ATTEMPT_DIR/final/signed.json`. Submit the exact result with a stable idempotency key, then reconcile the txid through [transaction lookup](../capabilities/transaction-lookup.md).
 
 ```bash
-RAW_TX_HEX="$(jq -er '.data.raw_tx_hex' "$ATTEMPT_DIR/signed.json")"
-EXPECTED_TXID="$(jq -er '.data.txid' "$ATTEMPT_DIR/signed.json")"
+set -o noclobber
+SIGNED_RESULT="$ATTEMPT_DIR/direct/signed.json"
+# For external signing, use: SIGNED_RESULT="$ATTEMPT_DIR/final/signed.json"
+RAW_TX_HEX="$(jq -er '.data.raw_tx_hex' "$SIGNED_RESULT")"
+EXPECTED_TXID="$(jq -er '.data.txid' "$SIGNED_RESULT")"
 
 jq -n --arg wallet hot --arg raw "$RAW_TX_HEX" --arg txid "$EXPECTED_TXID" \
   '{wallet_id:$wallet,raw_tx_hex:$raw,expected_txid:$txid}' \
