@@ -19,3 +19,22 @@ condition = "AND"
 regexTarget = "secret"
 regexes = ['''^[w]ithdrawal-[1]842-attempt-[1]$''']
 paths = ['''^website/docs/capabilities/broadcast\.md$''']
+
+[[allowlists]]
+description = "Non-secret idempotency key used in the transaction signing documentation"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^[w]ithdrawal-[1]842-attempt-[1]$''']
+paths = ['''^website/docs/transactions/build-sign-broadcast\.md$''']
+
+[[allowlists]]
+description = "Non-secret idempotency keys used only by broadcast tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+regexes = [
+  '''^[w]ithdrawal-orphan-attempt-[1]$''',
+  '''^[w]ithdrawal-orphan-attempt-[1]-rebroadcast-[1]$''',
+]
+paths = ['''^internal/api/api_test\.go$''']
