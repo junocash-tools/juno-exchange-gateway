@@ -272,6 +272,24 @@ wait_note_summary() {
   fail "$message"
 }
 
+wait_note_status() {
+  local request=$1
+  local output=$2
+  local filter=$3
+  local message=$4
+  shift 4
+  local deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
+    local code
+    code="$(api_status POST "/v1/wallets/$wallet_id/notes/status" "$output" "$request" "" "$treasury_token")"
+    if [[ "$code" == "200" ]] && jq -e "$@" "$filter" "$output" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "$message"
+}
+
 wait_node() {
   local deadline=$((SECONDS + 180))
   while (( SECONDS < deadline )); do
@@ -807,6 +825,35 @@ assert_jq "$run_dir/withdrawal.txplan.json" \
     and .fee_zat == "200000"' \
   "txbuild returned an invalid withdrawal plan"
 
+jq '{note_ids:[.notes[].note_id]}' "$run_dir/withdrawal.txplan.json" >"$run_dir/withdrawal-note-status-request.json"
+code="$(api_status POST "/v1/wallets/$wallet_id/notes/status" "$run_dir/withdrawal-notes-unspent.json" "$run_dir/withdrawal-note-status-request.json" "" "$treasury_token")"
+[[ "$code" == "200" ]] || fail "pre-broadcast selected-note status returned HTTP $code"
+assert_jq "$run_dir/withdrawal-notes-unspent.json" \
+  --slurpfile request "$run_dir/withdrawal-note-status-request.json" \
+  --slurpfile replay "$run_dir/deposits-replayed-after-ordinary-restart.json" \
+  '(.data.statuses | map(.note_id)) == $request[0].note_ids
+    and (.data.statuses | all(.state == "unspent" and (.source_height | type == "number") and (.value_zat | type == "number")))
+    and (.data.event_epoch | test("^[0-9a-f]{64}$"))
+    and .data.event_epoch == $replay[0].data.event_epoch
+    and .data.as_of_scanner_height <= .data.as_of_node_height' \
+  "selected notes were not all unspent before broadcast"
+
+jq -n --arg note_id "$(printf 'f%.0s' {1..64}):4294967295" '{note_ids:[$note_id]}' >"$run_dir/unknown-note-status-request.json"
+code="$(api_status POST "/v1/wallets/$wallet_id/notes/status" "$run_dir/unknown-note-status.json" "$run_dir/unknown-note-status-request.json" "" "$treasury_token")"
+[[ "$code" == "200" ]] || fail "unknown selected-note status returned HTTP $code"
+assert_jq "$run_dir/unknown-note-status.json" \
+  '.data.statuses[0] as $item
+    | (.data.statuses | length) == 1
+      and $item.state == "unknown"
+      and ($item | keys | sort) == ["note_id","state"]' \
+  "unknown selected note did not fail closed without extra state fields"
+code="$(api_status POST "/v1/wallets/$cold_wallet_id/notes/status" "$run_dir/note-status-cross-wallet.json" "$run_dir/withdrawal-note-status-request.json" "" "$treasury_token")"
+[[ "$code" == "403" ]] || fail "treasury credential crossed its wallet grant for selected-note status"
+
+dd if=/dev/zero of="$run_dir/note-status-oversize.bin" bs=1048577 count=1 status=none
+code="$(api_status POST "/v1/wallets/$wallet_id/notes/status" "$run_dir/note-status-oversize.json" "$run_dir/note-status-oversize.bin" "" "$treasury_token")"
+[[ "$code" == "413" ]] || fail "oversized selected-note status body returned HTTP $code instead of 413"
+
 assert_regtest_nu62 "$run_dir/nu62-before-withdrawal-signing.json"
 docker create \
   --name "$signer_container" \
@@ -873,6 +920,14 @@ wait_note_summary "$run_dir/note-summary-pending-spend.json" \
   "note summary did not classify scanner-observed pending inputs"
 withdrawal_pending_count="$(jq -er '.data.pending_spend.note_count' "$run_dir/note-summary-pending-spend.json")"
 withdrawal_pending_value="$(jq -er '.data.pending_spend.value_zat' "$run_dir/note-summary-pending-spend.json")"
+withdrawal_expiry_height="$(jq -er '.expiry_height' "$run_dir/withdrawal.txplan.json")"
+wait_note_status "$run_dir/withdrawal-note-status-request.json" "$run_dir/withdrawal-notes-pending.json" \
+  '.data.statuses | all(.state == "pending"
+    and .pending_spent_txid == $txid
+    and .pending_spent_expiry_height == $expiry
+    and (.pending_spent_at | type == "string"))' \
+  "selected notes did not become pending under the broadcast withdrawal" \
+  --arg txid "$withdrawal_txid" --argjson expiry "$withdrawal_expiry_height"
 
 node_cli generate 1 >"$run_dir/withdrawal-block.json"
 withdrawal_block_hash="$(jq -er '.[0]' "$run_dir/withdrawal-block.json")"
@@ -897,6 +952,10 @@ wait_note_summary "$run_dir/note-summary-withdrawal-mined.json" \
   --argjson height "$withdrawal_block_height"
 [[ "$withdrawal_pending_count" -gt 0 && "$withdrawal_pending_value" -gt 0 ]] || \
   fail "withdrawal pending-spend baseline was not positive"
+wait_note_status "$run_dir/withdrawal-note-status-request.json" "$run_dir/withdrawal-notes-spent.json" \
+  '.data.statuses | all(.state == "spent" and .spent_txid == $txid and .spent_height == $height)' \
+  "selected notes did not bind to the mined withdrawal" \
+  --arg txid "$withdrawal_txid" --argjson height "$withdrawal_block_height"
 assert_jq "$run_dir/withdrawal-wallet-effects.json" \
   --arg txid "$withdrawal_txid" \
   --arg change "$change_address" \
@@ -942,6 +1001,14 @@ assert_jq "$run_dir/balance-after-withdrawal.json" --argjson before "$funded_tot
 node_cli generate 99 >"$run_dir/withdrawal-confirmation-blocks.json"
 wait_ready "$run_dir/ready-withdrawal-final.json"
 assert_no_deposit "$withdrawal_txid" "$run_dir/withdrawal-change-still-not-deposit.json"
+wait_note_status "$run_dir/withdrawal-note-status-request.json" "$run_dir/withdrawal-notes-spend-confirmed.json" \
+  '.data.statuses | all(.state == "spent"
+    and .spent_txid == $txid
+    and .spent_height == $height
+    and (.spent_confirmed_height | type == "number")
+    and .spent_confirmed_height >= .spent_height)' \
+  "selected-note spend finality evidence was not recorded" \
+  --arg txid "$withdrawal_txid" --argjson height "$withdrawal_block_height"
 
 log "Withdrawal expiry: payload conflict, dropped mempool transaction, and scanner expiry"
 "${compose[@]}" run --rm -T txbuild send \
@@ -955,6 +1022,10 @@ log "Withdrawal expiry: payload conflict, dropped mempool transaction, and scann
   --minconf 100 \
   --expiry-offset 4 >"$run_dir/expiry.txplan.json"
 expiry_height="$(jq -er '.expiry_height' "$run_dir/expiry.txplan.json")"
+jq '{note_ids:[.notes[].note_id]}' "$run_dir/expiry.txplan.json" >"$run_dir/expiry-note-status-request.json"
+wait_note_status "$run_dir/expiry-note-status-request.json" "$run_dir/expiry-notes-unspent-before-broadcast.json" \
+  '.data.statuses | all(.state == "unspent")' \
+  "expiry-plan selected notes were not unspent before broadcast"
 
 assert_jq "$run_dir/expiry.txplan.json" \
   --argjson branch "$nu62_branch_id" \
@@ -1010,6 +1081,10 @@ wait_note_summary "$run_dir/note-summary-expiry-pending.json" \
   --argjson expiry "$expiry_height"
 expiry_pending_count="$(jq -er '.data.pending_spend.note_count' "$run_dir/note-summary-expiry-pending.json")"
 expiry_pending_value="$(jq -er '.data.pending_spend.value_zat' "$run_dir/note-summary-expiry-pending.json")"
+wait_note_status "$run_dir/expiry-note-status-request.json" "$run_dir/expiry-notes-pending.json" \
+  '.data.statuses | all(.state == "pending" and .pending_spent_txid == $txid and .pending_spent_expiry_height == $expiry)' \
+  "expiry-plan selected notes did not become pending" \
+  --arg txid "$expiry_txid" --argjson expiry "$expiry_height"
 assert_no_deposit "$expiry_txid" "$run_dir/expiry-change-not-deposit.json"
 node_cli getrawmempool >"$run_dir/expiry-mempool-before-node-restart.json"
 assert_jq "$run_dir/expiry-mempool-before-node-restart.json" --arg txid "$expiry_txid" \
@@ -1042,6 +1117,10 @@ wait_note_summary "$run_dir/note-summary-at-expiry.json" \
   --argjson expiry "$expiry_height" \
   --argjson count "$expiry_pending_count" \
   --argjson value "$expiry_pending_value"
+wait_note_status "$run_dir/expiry-note-status-request.json" "$run_dir/expiry-notes-at-boundary.json" \
+  '.data.statuses | all(.state == "pending" and .pending_spent_txid == $txid and .pending_spent_expiry_height == $expiry)' \
+  "selected notes cleared at, rather than after, the expiry height" \
+  --arg txid "$expiry_txid" --argjson expiry "$expiry_height"
 
 node_cli generate 1 >"$run_dir/post-expiry-block.json"
 post_expiry_height="$(node_cli getblockcount | jq -er '.')"
@@ -1074,6 +1153,9 @@ wait_note_summary "$run_dir/note-summary-after-expiry.json" \
     and .data.pending_spend.last_expiry_height == null' \
   "pending inputs did not clear after the node passed the transaction expiry" \
   --argjson height "$post_expiry_height"
+wait_note_status "$run_dir/expiry-note-status-request.json" "$run_dir/expiry-notes-unspent-after-expiry.json" \
+  '.data.statuses | all(.state == "unspent")' \
+  "selected notes did not return to unspent after strict expiry"
 assert_no_deposit "$expiry_txid" "$run_dir/expiry-change-still-not-deposit.json"
 
 log "Integration: exclude a real deposit sent to an unallocated UFVK address"
@@ -1267,7 +1349,7 @@ jq -n \
   --arg scanner_ref "$JUNO_SCAN_REF" \
   --arg txbuild_ref "$JUNO_TXBUILD_REF" \
   --arg txsign_ref "$JUNO_TXSIGN_REF" \
-  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref},checks:["clean source provenance","one-time installation init","single loopback public port","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege authentication","wallet isolation","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","online build","network-disabled offline sign","prevalidated raw broadcast","idempotent replay","same-key payload conflict","outgoing wallet effects","registered change scope","mined pending-spend release","withdrawal expiry and drop","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
+  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref},checks:["clean source provenance","one-time installation init","single loopback public port","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege authentication","wallet isolation","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","online build","selected-note unspent reconciliation","selected-note unknown and wallet isolation","network-disabled offline sign","prevalidated raw broadcast","idempotent replay","same-key payload conflict","outgoing wallet effects","registered change scope","selected-note pending and spent lifecycle","mined pending-spend release","withdrawal expiry and drop","selected-note strict expiry boundary","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
   >"$run_dir/summary.json"
 
 log "PASS"

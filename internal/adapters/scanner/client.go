@@ -191,6 +191,44 @@ func (v *requiredNullableInt64) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+type requiredNullableString struct {
+	set   bool
+	value *string
+}
+
+func (v *requiredNullableString) UnmarshalJSON(raw []byte) error {
+	v.set = true
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		v.value = nil
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	v.value = &value
+	return nil
+}
+
+type requiredNullableTime struct {
+	set   bool
+	value *time.Time
+}
+
+func (v *requiredNullableTime) UnmarshalJSON(raw []byte) error {
+	v.set = true
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		v.value = nil
+		return nil
+	}
+	var value time.Time
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	v.value = &value
+	return nil
+}
+
 type rawNoteValueSummary struct {
 	NoteCount *int64 `json:"note_count"`
 	ValueZat  *int64 `json:"value_zat"`
@@ -287,6 +325,130 @@ func noteValueSummary(value *rawNoteValueSummary) domain.NoteValueSummary {
 
 func invalidNoteSummaryResponse() error {
 	return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned invalid note summary")}
+}
+
+type rawNoteStatus struct {
+	NoteID                   *string                `json:"note_id"`
+	State                    *string                `json:"state"`
+	SourceHeight             requiredNullableInt64  `json:"source_height"`
+	ValueZat                 requiredNullableInt64  `json:"value_zat"`
+	PendingSpentTxID         requiredNullableString `json:"pending_spent_txid"`
+	PendingSpentAt           requiredNullableTime   `json:"pending_spent_at"`
+	PendingSpentExpiryHeight requiredNullableInt64  `json:"pending_spent_expiry_height"`
+	SpentTxID                requiredNullableString `json:"spent_txid"`
+	SpentHeight              requiredNullableInt64  `json:"spent_height"`
+	SpentConfirmedHeight     requiredNullableInt64  `json:"spent_confirmed_height"`
+}
+
+type rawWalletNoteStatuses struct {
+	WalletID          *string          `json:"wallet_id"`
+	EventEpoch        *string          `json:"event_epoch"`
+	AsOfScannerHeight *int64           `json:"as_of_scanner_height"`
+	AsOfScannerHash   *string          `json:"as_of_scanner_hash"`
+	Statuses          *[]rawNoteStatus `json:"statuses"`
+}
+
+func (c *Client) NoteStatuses(ctx context.Context, walletID string, noteIDs []string) (domain.WalletNoteStatuses, bool, error) {
+	request := struct {
+		NoteIDs []string `json:"note_ids"`
+	}{NoteIDs: noteIDs}
+	path := "/v1/wallets/" + url.PathEscape(walletID) + "/notes/status"
+	var payload json.RawMessage
+	if err := c.do(ctx, http.MethodPost, path, request, &payload); err != nil {
+		var he *httpError
+		if errors.As(err, &he) && he.status == http.StatusNotFound {
+			return domain.WalletNoteStatuses{}, false, nil
+		}
+		if errors.As(err, &he) && he.status == http.StatusConflict {
+			return domain.WalletNoteStatuses{}, false, domain.ErrScannerSnapshotChanged
+		}
+		if errors.As(err, &he) && he.status >= 400 && he.status < 500 {
+			return domain.WalletNoteStatuses{}, false, invalidNoteStatusesResponse()
+		}
+		if domain.IsUpstreamKind(err, "invalid_response") {
+			return domain.WalletNoteStatuses{}, false, err
+		}
+		return domain.WalletNoteStatuses{}, false, &domain.UpstreamError{Kind: "unavailable", Err: err}
+	}
+	var raw *rawWalletNoteStatuses
+	if err := decodeStrictScannerJSON(payload, &raw); err != nil || raw == nil || raw.WalletID == nil || raw.EventEpoch == nil ||
+		raw.AsOfScannerHeight == nil || raw.AsOfScannerHash == nil || raw.Statuses == nil {
+		return domain.WalletNoteStatuses{}, false, invalidNoteStatusesResponse()
+	}
+	statuses := make([]domain.NoteStatus, len(*raw.Statuses))
+	for i := range *raw.Statuses {
+		status, ok := noteStatus((*raw.Statuses)[i])
+		if !ok {
+			return domain.WalletNoteStatuses{}, false, invalidNoteStatusesResponse()
+		}
+		statuses[i] = status
+	}
+	out := domain.WalletNoteStatuses{
+		WalletID: *raw.WalletID, EventEpoch: *raw.EventEpoch, AsOfScannerHeight: *raw.AsOfScannerHeight,
+		AsOfScannerHash: *raw.AsOfScannerHash, Statuses: statuses,
+	}
+	if !out.ValidFor(walletID, noteIDs) {
+		return domain.WalletNoteStatuses{}, false, invalidNoteStatusesResponse()
+	}
+	return out, true, nil
+}
+
+func noteStatus(raw rawNoteStatus) (domain.NoteStatus, bool) {
+	if raw.NoteID == nil || raw.State == nil {
+		return domain.NoteStatus{}, false
+	}
+	known := raw.SourceHeight.set && raw.SourceHeight.value != nil && raw.ValueZat.set && raw.ValueZat.value != nil
+	noSource := !raw.SourceHeight.set && !raw.ValueZat.set
+	noPending := !raw.PendingSpentTxID.set && !raw.PendingSpentAt.set && !raw.PendingSpentExpiryHeight.set
+	noSpent := !raw.SpentTxID.set && !raw.SpentHeight.set && !raw.SpentConfirmedHeight.set
+	switch *raw.State {
+	case "unknown":
+		if !noSource || !noPending || !noSpent {
+			return domain.NoteStatus{}, false
+		}
+	case "unspent":
+		if !known || !noPending || !noSpent {
+			return domain.NoteStatus{}, false
+		}
+	case "pending":
+		if !known || !noSpent || !raw.PendingSpentTxID.set || raw.PendingSpentTxID.value == nil || !raw.PendingSpentAt.set || raw.PendingSpentAt.value == nil {
+			return domain.NoteStatus{}, false
+		}
+		if raw.PendingSpentExpiryHeight.set && raw.PendingSpentExpiryHeight.value == nil {
+			return domain.NoteStatus{}, false
+		}
+	case "spent":
+		if !known || !noPending || !raw.SpentTxID.set || raw.SpentTxID.value == nil || !raw.SpentHeight.set || raw.SpentHeight.value == nil {
+			return domain.NoteStatus{}, false
+		}
+		if raw.SpentConfirmedHeight.set && raw.SpentConfirmedHeight.value == nil {
+			return domain.NoteStatus{}, false
+		}
+	default:
+		return domain.NoteStatus{}, false
+	}
+	return domain.NoteStatus{
+		NoteID: *raw.NoteID, State: *raw.State, SourceHeight: raw.SourceHeight.value, ValueZat: raw.ValueZat.value,
+		PendingSpentTxID: raw.PendingSpentTxID.value, PendingSpentAt: raw.PendingSpentAt.value, PendingSpentExpiryHeight: raw.PendingSpentExpiryHeight.value,
+		SpentTxID: raw.SpentTxID.value, SpentHeight: raw.SpentHeight.value, SpentConfirmedHeight: raw.SpentConfirmedHeight.value,
+	}, true
+}
+
+func decodeStrictScannerJSON(payload []byte, out any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err == nil || !errors.Is(err, io.EOF) {
+		return errors.New("scanner response must contain one JSON object")
+	}
+	return nil
+}
+
+func invalidNoteStatusesResponse() error {
+	return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned invalid note statuses")}
 }
 
 func (c *Client) Events(ctx context.Context, walletID string, cursor int64, limit int, filter domain.EventFilter) (domain.EventsPage, error) {

@@ -140,6 +140,7 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
               example: { status: error, error: { code: forbidden, message: credential lacks the required scope, retryable: false, details: {} }, request_id: req_018f }
         "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/NotReady" }
@@ -247,6 +248,75 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
         "502":
           description: Scanner returned a malformed or internally inconsistent aggregate; no partial result is returned.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+        "503": { $ref: "#/components/responses/NotReady" }
+  /v1/wallets/{wallet_id}/notes/status:
+    post:
+      operationId: getWalletSelectedNoteStatuses
+      tags: [Wallets]
+      summary: Reconcile selected source notes
+      x-required-scope: treasury
+      description: |
+        Returns one point-in-time scanner status for each requested canonical source note ID,
+        in request order. This is a reconciliation primitive for notes already recorded in an
+        exchange withdrawal or consolidation attempt; it is not a wallet inventory, selection,
+        reservation, or release-decision endpoint. `unknown`, `pending`, and `spent` are all
+        fail-closed for note release. Even when every item is `unspent`, the exchange must first
+        satisfy transaction expiry, reorg-finality, and known-signed-attempt rules and must commit
+        its reservation transition atomically. No note nullifier, memo, or recipient address is returned.
+      parameters:
+        - $ref: "#/components/parameters/WalletID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SelectedNoteStatusRequest" }
+            example:
+              note_ids:
+                - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0
+                - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:3
+      responses:
+        "200":
+          description: A complete ordered result from one stable scanner snapshot. Unknown IDs remain explicit and must not be released.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SelectedNoteStatusResponse" }
+              example:
+                status: ok
+                data:
+                  wallet_id: hot
+                  event_epoch: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+                  as_of_node_height: 920109
+                  as_of_scanner_height: 920109
+                  as_of_scanner_hash: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+                  scanner_lag: 0
+                  statuses:
+                    - note_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0
+                      state: unspent
+                      source_height: 919800
+                      value_zat: 500000000
+                    - note_id: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:3
+                      state: spent
+                      source_height: 919850
+                      value_zat: 250000000
+                      spent_txid: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+                      spent_height: 920010
+                      spent_confirmed_height: 920109
+                request_id: req_018f
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential lacks `treasury`/`admin` scope or wallet authorization.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Scanner height, hash, or event epoch changed around the batch snapshot; discard the response and retry the complete request.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "502":
+          description: Scanner returned a malformed, reordered, incomplete, or internally inconsistent status batch; no partial result is returned.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/wallets/{wallet_id}/deposits:
@@ -465,6 +535,9 @@ components:
       description: Credential/IP bucket is exhausted.
       headers: { Retry-After: { schema: { type: integer }, example: 1 } }
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: rate_limited, message: request rate limit exceeded, retryable: true, details: {} }, request_id: req_018f } } }
+    PayloadTooLarge:
+      description: The JSON body exceeds the applicable configured request-body limit.
+      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: invalid_request, message: request body exceeds the configured limit, retryable: false, details: {} }, request_id: req_018f } } }
     NodeRPCError:
       description: Node call failed or produced an uncertain result.
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: node_rpc_error, message: node request failed, retryable: true, details: {} }, request_id: req_018f } } }
@@ -663,6 +736,93 @@ components:
       properties:
         status: { const: ok }
         data: { $ref: "#/components/schemas/NoteSummary" }
+        request_id: { type: string }
+    NoteID:
+      type: string
+      pattern: "^[0-9a-f]{64}:(0|[1-9][0-9]*)$"
+      description: Canonical Orchard source outpoint `lowercase_txid:action_index`; action index must fit uint32 and decimal zero is written exactly as `0`.
+    SelectedNoteStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [note_ids]
+      properties:
+        note_ids:
+          type: array
+          minItems: 1
+          maxItems: 200
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/NoteID" }
+    SelectedNoteUnknown:
+      type: object
+      additionalProperties: false
+      required: [note_id, state]
+      properties:
+        note_id: { $ref: "#/components/schemas/NoteID" }
+        state: { const: unknown }
+    SelectedNoteUnspent:
+      type: object
+      additionalProperties: false
+      required: [note_id, state, source_height, value_zat]
+      properties:
+        note_id: { $ref: "#/components/schemas/NoteID" }
+        state: { const: unspent }
+        source_height: { type: integer, format: int64, minimum: 0 }
+        value_zat: { type: integer, format: int64, minimum: 0 }
+    SelectedNotePending:
+      type: object
+      additionalProperties: false
+      required: [note_id, state, source_height, value_zat, pending_spent_txid, pending_spent_at]
+      properties:
+        note_id: { $ref: "#/components/schemas/NoteID" }
+        state: { const: pending }
+        source_height: { type: integer, format: int64, minimum: 0 }
+        value_zat: { type: integer, format: int64, minimum: 0 }
+        pending_spent_txid: { $ref: "#/components/schemas/TxID" }
+        pending_spent_at: { type: string, format: date-time }
+        pending_spent_expiry_height: { type: integer, format: int64, minimum: 0 }
+    SelectedNoteSpent:
+      type: object
+      additionalProperties: false
+      required: [note_id, state, source_height, value_zat, spent_txid, spent_height]
+      properties:
+        note_id: { $ref: "#/components/schemas/NoteID" }
+        state: { const: spent }
+        source_height: { type: integer, format: int64, minimum: 0 }
+        value_zat: { type: integer, format: int64, minimum: 0 }
+        spent_txid: { $ref: "#/components/schemas/TxID" }
+        spent_height: { type: integer, format: int64, minimum: 0 }
+        spent_confirmed_height: { type: integer, format: int64, minimum: 0 }
+    SelectedNoteStatus:
+      oneOf:
+        - $ref: "#/components/schemas/SelectedNoteUnknown"
+        - $ref: "#/components/schemas/SelectedNoteUnspent"
+        - $ref: "#/components/schemas/SelectedNotePending"
+        - $ref: "#/components/schemas/SelectedNoteSpent"
+      discriminator:
+        propertyName: state
+    SelectedNoteStatusData:
+      type: object
+      additionalProperties: false
+      required: [wallet_id, event_epoch, as_of_node_height, as_of_scanner_height, as_of_scanner_hash, scanner_lag, statuses]
+      properties:
+        wallet_id: { $ref: "#/components/schemas/WalletID" }
+        event_epoch: { type: string, pattern: "^[0-9a-f]{64}$" }
+        as_of_node_height: { type: integer, format: int64, minimum: 0 }
+        as_of_scanner_height: { type: integer, format: int64, minimum: 0 }
+        as_of_scanner_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        scanner_lag: { type: integer, format: int64, minimum: 0 }
+        statuses:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: "#/components/schemas/SelectedNoteStatus" }
+    SelectedNoteStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [status, data, request_id]
+      properties:
+        status: { const: ok }
+        data: { $ref: "#/components/schemas/SelectedNoteStatusData" }
         request_id: { type: string }
     Deposit:
       type: object

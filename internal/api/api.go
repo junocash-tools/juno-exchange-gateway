@@ -134,6 +134,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/wallets/{wallet_id}/addresses", a.protected("address", true, false, a.handleAllocateAddress))
 	mux.HandleFunc("GET /v1/wallets/{wallet_id}/addresses/{address}/balance", a.protected("read", true, false, a.handleBalance))
 	mux.HandleFunc("GET /v1/wallets/{wallet_id}/notes/summary", a.protected("treasury", true, false, a.handleNoteSummary))
+	mux.HandleFunc("POST /v1/wallets/{wallet_id}/notes/status", a.protected("treasury", true, false, a.handleNoteStatuses))
 	mux.HandleFunc("GET /v1/wallets/{wallet_id}/deposits", a.protected("read", true, false, a.handleDeposits))
 	mux.HandleFunc("GET /v1/transactions/{txid}", a.protected("read", false, false, a.handleTransaction))
 	mux.HandleFunc("POST /v1/transactions/broadcast", a.protected("broadcast", false, true, a.handleBroadcast))
@@ -174,6 +175,8 @@ func knownRouteMethod(path string) (string, bool) {
 			return http.MethodGet, true
 		case len(segments) == 5 && segments[3] == "notes" && segments[4] == "summary":
 			return http.MethodGet, true
+		case len(segments) == 5 && segments[3] == "notes" && segments[4] == "status":
+			return http.MethodPost, true
 		case len(segments) == 6 && segments[3] == "addresses" && segments[4] != "" && segments[5] == "balance":
 			return http.MethodGet, true
 		}
@@ -632,6 +635,95 @@ func (a *API) handleNoteSummary(w http.ResponseWriter, r *http.Request) {
 		PendingSpend: atomicSummary.PendingSpend, BelowMinNote: atomicSummary.BelowMinNote, WitnessUnavailable: atomicSummary.WitnessUnavailable,
 	}
 	a.writeData(w, r, http.StatusOK, summary)
+}
+
+type noteStatusesRequest struct {
+	NoteIDs []string `json:"note_ids"`
+}
+
+type noteStatusesResponse struct {
+	WalletID          string              `json:"wallet_id"`
+	AsOfNodeHeight    int64               `json:"as_of_node_height"`
+	AsOfScannerHeight int64               `json:"as_of_scanner_height"`
+	AsOfScannerHash   string              `json:"as_of_scanner_hash"`
+	ScannerLag        int64               `json:"scanner_lag"`
+	EventEpoch        string              `json:"event_epoch"`
+	Statuses          []domain.NoteStatus `json:"statuses"`
+}
+
+func (a *API) handleNoteStatuses(w http.ResponseWriter, r *http.Request) {
+	walletID := r.PathValue("wallet_id")
+	if _, ok := a.registry.known(walletID); !ok {
+		a.writeError(w, r, http.StatusNotFound, "not_found", "wallet not found", false, nil)
+		return
+	}
+	var req noteStatusesRequest
+	if err := decodeJSON(w, r, a.cfg.JSONBodyBytes, &req); err != nil {
+		a.writeDecodeError(w, r, err)
+		return
+	}
+	if len(req.NoteIDs) < 1 || len(req.NoteIDs) > 200 {
+		a.writeError(w, r, http.StatusBadRequest, "invalid_request", "note_ids must contain between 1 and 200 entries", false, nil)
+		return
+	}
+	seen := make(map[string]struct{}, len(req.NoteIDs))
+	for _, noteID := range req.NoteIDs {
+		if !domain.ValidNoteID(noteID) {
+			a.writeError(w, r, http.StatusBadRequest, "invalid_request", "note_ids must use canonical txid:action_index form", false, nil)
+			return
+		}
+		if _, duplicate := seen[noteID]; duplicate {
+			a.writeError(w, r, http.StatusBadRequest, "invalid_request", "note_ids must be unique", false, nil)
+			return
+		}
+		seen[noteID] = struct{}{}
+	}
+	before, code, err := a.checkReady(r.Context())
+	if err != nil {
+		a.writeError(w, r, http.StatusServiceUnavailable, code, "financial reads are not ready", true, nil)
+		return
+	}
+	if before.Scanner.ScannedHeight == nil {
+		a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "scanner height is unavailable", true, nil)
+		return
+	}
+	snapshot, found, err := a.scanner.NoteStatuses(r.Context(), walletID, req.NoteIDs)
+	if err != nil {
+		if errors.Is(err, domain.ErrScannerSnapshotChanged) {
+			a.writeError(w, r, http.StatusConflict, "scanner_snapshot_changed", "scanner snapshot changed while reading note statuses; retry", true, nil)
+			return
+		}
+		if domain.IsUpstreamKind(err, "invalid_response") {
+			a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned invalid note statuses", true, nil)
+			return
+		}
+		a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "scanner note status request failed", true, nil)
+		return
+	}
+	if !found {
+		a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner wallet is missing", true, nil)
+		return
+	}
+	if !snapshot.ValidFor(walletID, req.NoteIDs) {
+		a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned invalid note statuses", true, nil)
+		return
+	}
+	after, code, err := a.checkReady(r.Context())
+	if err != nil {
+		a.writeError(w, r, http.StatusConflict, "scanner_snapshot_changed", "readiness changed while reading note statuses; retry", true, map[string]any{"readiness_code": code})
+		return
+	}
+	if after.Scanner.ScannedHeight == nil || snapshot.AsOfScannerHeight != *before.Scanner.ScannedHeight ||
+		snapshot.AsOfScannerHash != before.Scanner.ScannedHash || snapshot.EventEpoch != before.Scanner.EventEpoch ||
+		*after.Scanner.ScannedHeight != *before.Scanner.ScannedHeight || after.Scanner.ScannedHash != before.Scanner.ScannedHash ||
+		after.Scanner.EventEpoch != before.Scanner.EventEpoch {
+		a.writeError(w, r, http.StatusConflict, "scanner_snapshot_changed", "scanner snapshot changed while reading note statuses; retry", true, nil)
+		return
+	}
+	a.writeData(w, r, http.StatusOK, noteStatusesResponse{
+		WalletID: walletID, AsOfNodeHeight: before.Node.Height, AsOfScannerHeight: snapshot.AsOfScannerHeight,
+		AsOfScannerHash: snapshot.AsOfScannerHash, ScannerLag: before.ScannerLag, EventEpoch: snapshot.EventEpoch, Statuses: snapshot.Statuses,
+	})
 }
 
 type deposit struct {

@@ -163,6 +163,170 @@ func TestNoteSummaryLimitIsTyped(t *testing.T) {
 	}
 }
 
+func TestNoteStatusesUsesBatchRouteAndPreservesOrder(t *testing.T) {
+	noteIDs := []string{strings.Repeat("a", 64) + ":0", strings.Repeat("b", 64) + ":4294967295"}
+	epoch, snapshotHash := strings.Repeat("c", 64), strings.Repeat("d", 64)
+	client := New("http://scanner.invalid", "scanner-secret", time.Second, time.Minute)
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/wallets/hot/notes/status" || r.Header.Get("Authorization") != "Bearer scanner-secret" || r.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("request=%s %s headers=%v", r.Method, r.URL.Path, r.Header)
+		}
+		var request struct {
+			NoteIDs []string `json:"note_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.NoteIDs) != 2 || request.NoteIDs[0] != noteIDs[0] || request.NoteIDs[1] != noteIDs[1] {
+			t.Fatalf("request=%+v err=%v", request, err)
+		}
+		response := `{"wallet_id":"hot","event_epoch":"` + epoch + `","as_of_scanner_height":100,"as_of_scanner_hash":"` + snapshotHash + `","statuses":[` +
+			`{"note_id":"` + noteIDs[0] + `","state":"unknown"},` +
+			`{"note_id":"` + noteIDs[1] + `","state":"pending","source_height":10,"value_zat":25,"pending_spent_txid":"` + strings.Repeat("e", 64) + `","pending_spent_at":"2026-07-22T12:00:00Z","pending_spent_expiry_height":140}]}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})
+	statuses, found, err := client.NoteStatuses(context.Background(), "hot", noteIDs)
+	if err != nil || !found || statuses.EventEpoch != epoch || statuses.AsOfScannerHash != snapshotHash || len(statuses.Statuses) != 2 || statuses.Statuses[0].State != "unknown" || statuses.Statuses[1].PendingSpentExpiryHeight == nil || *statuses.Statuses[1].PendingSpentExpiryHeight != 140 {
+		t.Fatalf("statuses=%+v found=%v err=%v", statuses, found, err)
+	}
+}
+
+func TestNoteStatusesAcceptsUnspentAndSpentFields(t *testing.T) {
+	noteIDs := []string{strings.Repeat("a", 64) + ":0", strings.Repeat("b", 64) + ":1"}
+	client := New("http://scanner.invalid", "", time.Second, time.Minute)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		response := `{"wallet_id":"hot","event_epoch":"` + strings.Repeat("c", 64) + `","as_of_scanner_height":100,"as_of_scanner_hash":"` + strings.Repeat("d", 64) + `","statuses":[` +
+			`{"note_id":"` + noteIDs[0] + `","state":"unspent","source_height":10,"value_zat":25},` +
+			`{"note_id":"` + noteIDs[1] + `","state":"spent","source_height":20,"value_zat":30,"spent_txid":"` + strings.Repeat("e", 64) + `","spent_height":50,"spent_confirmed_height":100}]}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})
+	statuses, found, err := client.NoteStatuses(context.Background(), "hot", noteIDs)
+	if err != nil || !found || len(statuses.Statuses) != 2 || statuses.Statuses[0].ValueZat == nil || *statuses.Statuses[0].ValueZat != 25 || statuses.Statuses[1].SpentTxID == nil || statuses.Statuses[1].SpentConfirmedHeight == nil || *statuses.Statuses[1].SpentConfirmedHeight != 100 {
+		t.Fatalf("statuses=%+v found=%v err=%v", statuses, found, err)
+	}
+}
+
+func TestNoteStatusesRejectsMalformedScannerResponses(t *testing.T) {
+	noteID := strings.Repeat("a", 64) + ":0"
+	valid := func() map[string]any {
+		return map[string]any{
+			"wallet_id": "hot", "event_epoch": strings.Repeat("b", 64), "as_of_scanner_height": 100,
+			"as_of_scanner_hash": strings.Repeat("c", 64),
+			"statuses":           []any{map[string]any{"note_id": noteID, "state": "unspent", "source_height": 10, "value_zat": 25}},
+		}
+	}
+	tests := map[string]func() string{
+		"empty": func() string { return "" },
+		"missing snapshot": func() string {
+			payload := valid()
+			delete(payload, "event_epoch")
+			return mustJSON(payload)
+		},
+		"extra top-level field": func() string {
+			payload := valid()
+			payload["safe_to_release"] = true
+			return mustJSON(payload)
+		},
+		"wrong wallet": func() string {
+			payload := valid()
+			payload["wallet_id"] = "cold"
+			return mustJSON(payload)
+		},
+		"wrong order identity": func() string {
+			payload := valid()
+			payload["statuses"].([]any)[0].(map[string]any)["note_id"] = strings.Repeat("d", 64) + ":0"
+			return mustJSON(payload)
+		},
+		"unknown with source": func() string {
+			payload := valid()
+			status := payload["statuses"].([]any)[0].(map[string]any)
+			status["state"] = "unknown"
+			return mustJSON(payload)
+		},
+		"unspent missing value": func() string {
+			payload := valid()
+			delete(payload["statuses"].([]any)[0].(map[string]any), "value_zat")
+			return mustJSON(payload)
+		},
+		"pending missing observed time": func() string {
+			payload := valid()
+			status := payload["statuses"].([]any)[0].(map[string]any)
+			status["state"] = "pending"
+			status["pending_spent_txid"] = strings.Repeat("e", 64)
+			return mustJSON(payload)
+		},
+		"pending after expiry": func() string {
+			payload := valid()
+			status := payload["statuses"].([]any)[0].(map[string]any)
+			status["state"] = "pending"
+			status["pending_spent_txid"] = strings.Repeat("e", 64)
+			status["pending_spent_at"] = "2026-07-22T12:00:00Z"
+			status["pending_spent_expiry_height"] = 99
+			return mustJSON(payload)
+		},
+		"pending null optional expiry": func() string {
+			payload := valid()
+			status := payload["statuses"].([]any)[0].(map[string]any)
+			status["state"] = "pending"
+			status["pending_spent_txid"] = strings.Repeat("e", 64)
+			status["pending_spent_at"] = "2026-07-22T12:00:00Z"
+			status["pending_spent_expiry_height"] = nil
+			return mustJSON(payload)
+		},
+		"spent confirmation before spend": func() string {
+			payload := valid()
+			status := payload["statuses"].([]any)[0].(map[string]any)
+			status["state"] = "spent"
+			status["spent_txid"] = strings.Repeat("f", 64)
+			status["spent_height"] = 50
+			status["spent_confirmed_height"] = 49
+			return mustJSON(payload)
+		},
+		"extra item field": func() string {
+			payload := valid()
+			payload["statuses"].([]any)[0].(map[string]any)["note_nullifier"] = strings.Repeat("f", 64)
+			return mustJSON(payload)
+		},
+	}
+	for name, response := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := New("http://scanner.invalid", "", time.Second, time.Minute)
+			client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response()))}, nil
+			})
+			if _, _, err := client.NoteStatuses(context.Background(), "hot", []string{noteID}); err == nil || !domain.IsUpstreamKind(err, "invalid_response") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestNoteStatusesMapsMissingAndUnavailableScanner(t *testing.T) {
+	noteID := strings.Repeat("a", 64) + ":0"
+	for _, test := range []struct {
+		name        string
+		status      int
+		found       bool
+		kind        string
+		snapshotErr bool
+	}{
+		{name: "missing", status: http.StatusNotFound, found: false},
+		{name: "snapshot changed", status: http.StatusConflict, snapshotErr: true},
+		{name: "invalid request response", status: http.StatusBadRequest, kind: "invalid_response"},
+		{name: "unexpected body rejection", status: http.StatusRequestEntityTooLarge, kind: "invalid_response"},
+		{name: "unavailable", status: http.StatusServiceUnavailable, kind: "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := New("http://scanner.invalid", "", time.Second, time.Minute)
+			client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: test.status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("error"))}, nil
+			})
+			_, found, err := client.NoteStatuses(context.Background(), "hot", []string{noteID})
+			if found != test.found || (test.snapshotErr && !errors.Is(err, domain.ErrScannerSnapshotChanged)) ||
+				(!test.snapshotErr && test.kind == "" && err != nil) || (test.kind != "" && !domain.IsUpstreamKind(err, test.kind)) {
+				t.Fatalf("found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
 func TestHealthParsesConfirmationPolicy(t *testing.T) {
 	client := New("http://scanner.invalid", "", time.Second, time.Minute)
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -104,6 +105,11 @@ type fakeScanner struct {
 	noteSummaryMinConf int64
 	noteSummaryMinZat  int64
 	noteSummaryMax     int
+	noteStatuses       domain.WalletNoteStatuses
+	noteStatusesFound  bool
+	noteStatusesErr    error
+	noteStatusesCalls  int
+	noteStatusIDs      []string
 	lastCursor         int64
 	lastEventLimit     int
 	backfillFrom       int64
@@ -176,6 +182,14 @@ func (f *fakeScanner) NoteSummary(_ context.Context, walletID string, minConf, m
 	}
 	return out, f.noteSummaryFound, nil
 }
+func (f *fakeScanner) NoteStatuses(_ context.Context, _ string, noteIDs []string) (domain.WalletNoteStatuses, bool, error) {
+	f.noteStatusesCalls++
+	f.noteStatusIDs = append([]string(nil), noteIDs...)
+	if f.noteStatusesErr != nil {
+		return domain.WalletNoteStatuses{}, false, f.noteStatusesErr
+	}
+	return f.noteStatuses, f.noteStatusesFound, nil
+}
 func (f *fakeScanner) Events(_ context.Context, _ string, cursor int64, limit int, _ domain.EventFilter) (domain.EventsPage, error) {
 	f.lastCursor = cursor
 	f.lastEventLimit = limit
@@ -239,7 +253,7 @@ func newTestAPI(t *testing.T, cfg config.Config) (*API, *fakeNode, *fakeScanner)
 	scanned := int64(100)
 	lag := int64(0)
 	confirmations := cfg.DefaultConfirmations
-	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), Confirmations: &confirmations, EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag, HistoryComplete: &historyComplete}, balanceFound: true, noteSummaryFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
+	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), Confirmations: &confirmations, EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag, HistoryComplete: &historyComplete}, balanceFound: true, noteSummaryFound: true, noteStatusesFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
 	service, err := New(cfg, store, node, scanner, fakeDeriver{network: cfg.Network}, slog.New(slog.NewTextHandler(io.Discard, nil)), BuildInfo{Version: "test", Revision: "abc", APIVersion: "v1"})
 	if err != nil {
 		t.Fatal(err)
@@ -280,6 +294,14 @@ func request(t *testing.T, handler http.Handler, method, path, body string, head
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
+}
+
+func mustJSON(value any) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
 }
 
 func allocate(t *testing.T, handler http.Handler) string {
@@ -507,6 +529,202 @@ func TestNoteSummaryRejectsSnapshotMutationDuringRequest(t *testing.T) {
 			scanner.healthSequence = []domain.ScannerHealth{before, after}
 			rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/summary", ``, nil)
 			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "scanner_snapshot_changed") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestNoteStatusesReturnsOrderedAtomicScannerSnapshot(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, scanner := newTestAPI(t, cfg)
+	noteIDs := []string{strings.Repeat("a", 64) + ":0", strings.Repeat("b", 64) + ":4294967295"}
+	sourceHeight, value := int64(10), int64(25)
+	pendingAt := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	pendingTxID := strings.Repeat("c", 64)
+	scanner.noteStatuses = domain.WalletNoteStatuses{
+		WalletID: "hot", EventEpoch: scanner.health.EventEpoch, AsOfScannerHeight: *scanner.health.ScannedHeight, AsOfScannerHash: scanner.health.ScannedHash,
+		Statuses: []domain.NoteStatus{
+			{NoteID: noteIDs[0], State: "unknown"},
+			{NoteID: noteIDs[1], State: "pending", SourceHeight: &sourceHeight, ValueZat: &value, PendingSpentTxID: &pendingTxID, PendingSpentAt: &pendingAt},
+		},
+	}
+	body := mustJSON(map[string]any{"note_ids": noteIDs})
+	rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/notes/status", body, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if scanner.noteStatusesCalls != 1 || len(scanner.noteStatusIDs) != 2 || scanner.noteStatusIDs[0] != noteIDs[0] || scanner.noteStatusIDs[1] != noteIDs[1] {
+		t.Fatalf("calls=%d ids=%v", scanner.noteStatusesCalls, scanner.noteStatusIDs)
+	}
+	var out struct {
+		Data noteStatusesResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Data.WalletID != "hot" || out.Data.AsOfNodeHeight != 100 || out.Data.AsOfScannerHeight != 100 || out.Data.AsOfScannerHash != scanner.health.ScannedHash || out.Data.ScannerLag != 0 || out.Data.EventEpoch != scanner.health.EventEpoch || len(out.Data.Statuses) != 2 || out.Data.Statuses[0].NoteID != noteIDs[0] || out.Data.Statuses[0].State != "unknown" || out.Data.Statuses[1].NoteID != noteIDs[1] || out.Data.Statuses[1].State != "pending" {
+		t.Fatalf("data=%+v", out.Data)
+	}
+	if strings.Contains(rec.Body.String(), "safe_to_release") || strings.Contains(rec.Body.String(), "nullifier") || strings.Contains(rec.Body.String(), `"note_id":"`+noteIDs[0]+`","state":"unknown","`) {
+		t.Fatalf("response exposed a release verdict or extra unknown-state data: %s", rec.Body.String())
+	}
+}
+
+func TestNoteStatusesRejectsInvalidRequestsBeforeScanner(t *testing.T) {
+	noteID := strings.Repeat("a", 64) + ":0"
+	tests := map[string]string{
+		"missing list":    `{}`,
+		"null list":       `{"note_ids":null}`,
+		"duplicate":       mustJSON(map[string]any{"note_ids": []string{noteID, noteID}}),
+		"uppercase":       mustJSON(map[string]any{"note_ids": []string{strings.Repeat("A", 64) + ":0"}}),
+		"leading zero":    mustJSON(map[string]any{"note_ids": []string{strings.Repeat("a", 64) + ":01"}}),
+		"uint32 overflow": mustJSON(map[string]any{"note_ids": []string{strings.Repeat("a", 64) + ":4294967296"}}),
+		"extra field":     `{"note_ids":["` + noteID + `"],"safe_to_release":true}`,
+		"multiple values": `{"note_ids":["` + noteID + `"]}{}`,
+	}
+	many := make([]string, 201)
+	for i := range many {
+		many[i] = strings.Repeat("a", 64) + ":" + strconv.Itoa(i)
+	}
+	tests["over batch limit"] = mustJSON(map[string]any{"note_ids": many})
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/notes/status", body, nil)
+			if rec.Code != http.StatusBadRequest || scanner.noteStatusesCalls != 0 || !strings.Contains(rec.Body.String(), "invalid_request") {
+				t.Fatalf("status=%d calls=%d body=%s", rec.Code, scanner.noteStatusesCalls, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestNoteStatusesUsesOrdinaryBodyLimit(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	cfg.JSONBodyBytes = 16
+	service, _, scanner := newTestAPI(t, cfg)
+	rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/notes/status", `{"note_ids":["`+strings.Repeat("a", 64)+`:0"]}`, nil)
+	if rec.Code != http.StatusRequestEntityTooLarge || scanner.noteStatusesCalls != 0 || !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, scanner.noteStatusesCalls, rec.Body.String())
+	}
+}
+
+func TestAddressAllocationUsesOrdinaryBodyLimit(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	cfg.JSONBodyBytes = 16
+	service, _, _ := newTestAPI(t, cfg)
+	rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/addresses", `{"label":"this-is-too-long"}`, nil)
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNoteStatusesRequiresTreasuryScopeWalletGrantAndPOST(t *testing.T) {
+	cfg := testConfig(domain.Mainnet)
+	cfg.Wallets = append(cfg.Wallets, config.Wallet{WalletID: "cold", UFVK: "jview1cold"})
+	readToken := "read-token-at-least-24-bytes"
+	treasuryToken := "treasury-token-at-least-24"
+	allTreasuryToken := "all-treasury-token-at-least-24"
+	cfg.Credentials = []config.Credential{
+		{Name: "reader", TokenHash: sha256.Sum256([]byte(readToken)), Scopes: []string{"read"}, Wallets: []string{"hot"}},
+		{Name: "treasury", TokenHash: sha256.Sum256([]byte(treasuryToken)), Scopes: []string{"treasury"}, Wallets: []string{"hot"}},
+		{Name: "treasury-all", TokenHash: sha256.Sum256([]byte(allTreasuryToken)), Scopes: []string{"treasury"}, Wallets: []string{"*"}},
+	}
+	service, _, scanner := newTestAPI(t, cfg)
+	noteID := strings.Repeat("a", 64) + ":0"
+	scanner.noteStatuses = domain.WalletNoteStatuses{
+		WalletID: "hot", EventEpoch: scanner.health.EventEpoch, AsOfScannerHeight: *scanner.health.ScannedHeight, AsOfScannerHash: scanner.health.ScannedHash,
+		Statuses: []domain.NoteStatus{{NoteID: noteID, State: "unknown"}},
+	}
+	body := mustJSON(map[string]any{"note_ids": []string{noteID}})
+	if rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/notes/status", body, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/notes/status", body, map[string]string{"Authorization": "Bearer " + readToken}); rec.Code != http.StatusForbidden {
+		t.Fatalf("read status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	treasuryHeaders := map[string]string{"Authorization": "Bearer " + treasuryToken}
+	if rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/notes/status", body, treasuryHeaders); rec.Code != http.StatusOK {
+		t.Fatalf("treasury status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/cold/notes/status", body, treasuryHeaders); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-wallet status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	allTreasuryHeaders := map[string]string{"Authorization": "Bearer " + allTreasuryToken}
+	if rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/missing/notes/status", body, allTreasuryHeaders); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown wallet status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/status", ``, treasuryHeaders)
+	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != http.MethodPost || !strings.Contains(rec.Body.String(), "method_not_allowed") {
+		t.Fatalf("wrong method status=%d allow=%q body=%s", rec.Code, rec.Header().Get("Allow"), rec.Body.String())
+	}
+}
+
+func TestNoteStatusesMapsScannerFailuresAndSnapshotChanges(t *testing.T) {
+	noteID := strings.Repeat("a", 64) + ":0"
+	body := mustJSON(map[string]any{"note_ids": []string{noteID}})
+	for _, test := range []struct {
+		name       string
+		configure  func(*fakeScanner)
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name: "readiness unavailable", wantStatus: http.StatusServiceUnavailable, wantCode: "scanner_not_ready",
+			configure: func(scanner *fakeScanner) {
+				ready := false
+				scanner.health.Ready = &ready
+			},
+		},
+		{
+			name: "malformed", wantStatus: http.StatusBadGateway, wantCode: "scanner_not_ready",
+			configure: func(scanner *fakeScanner) {
+				scanner.noteStatuses = domain.WalletNoteStatuses{WalletID: "other", EventEpoch: scanner.health.EventEpoch, AsOfScannerHeight: *scanner.health.ScannedHeight, AsOfScannerHash: scanner.health.ScannedHash, Statuses: []domain.NoteStatus{{NoteID: noteID, State: "unknown"}}}
+			},
+		},
+		{
+			name: "invalid adapter response", wantStatus: http.StatusBadGateway, wantCode: "scanner_not_ready",
+			configure: func(scanner *fakeScanner) {
+				scanner.noteStatusesErr = &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("bad scanner data")}
+			},
+		},
+		{
+			name: "unavailable", wantStatus: http.StatusServiceUnavailable, wantCode: "scanner_not_ready",
+			configure: func(scanner *fakeScanner) {
+				scanner.noteStatusesErr = &domain.UpstreamError{Kind: "unavailable", Err: errors.New("scanner down")}
+			},
+		},
+		{
+			name: "scanner reports snapshot change", wantStatus: http.StatusConflict, wantCode: "scanner_snapshot_changed",
+			configure: func(scanner *fakeScanner) { scanner.noteStatusesErr = domain.ErrScannerSnapshotChanged },
+		},
+		{
+			name: "scanner wallet missing", wantStatus: http.StatusBadGateway, wantCode: "scanner_not_ready",
+			configure: func(scanner *fakeScanner) { scanner.noteStatusesFound = false },
+		},
+		{
+			name: "response snapshot mismatch", wantStatus: http.StatusConflict, wantCode: "scanner_snapshot_changed",
+			configure: func(scanner *fakeScanner) {
+				scanner.noteStatuses = domain.WalletNoteStatuses{WalletID: "hot", EventEpoch: strings.Repeat("f", 64), AsOfScannerHeight: *scanner.health.ScannedHeight, AsOfScannerHash: scanner.health.ScannedHash, Statuses: []domain.NoteStatus{{NoteID: noteID, State: "unknown"}}}
+			},
+		},
+		{
+			name: "snapshot changes after response", wantStatus: http.StatusConflict, wantCode: "scanner_snapshot_changed",
+			configure: func(scanner *fakeScanner) {
+				before, after := scanner.health, scanner.health
+				after.EventEpoch = strings.Repeat("f", 64)
+				scanner.healthSequence = []domain.ScannerHealth{before, after}
+				scanner.noteStatuses = domain.WalletNoteStatuses{WalletID: "hot", EventEpoch: before.EventEpoch, AsOfScannerHeight: *before.ScannedHeight, AsOfScannerHash: before.ScannedHash, Statuses: []domain.NoteStatus{{NoteID: noteID, State: "unknown"}}}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			test.configure(scanner)
+			rec := request(t, service.Handler(), http.MethodPost, "/v1/wallets/hot/notes/status", body, nil)
+			if rec.Code != test.wantStatus || !strings.Contains(rec.Body.String(), `"code":"`+test.wantCode+`"`) {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 			}
 		})

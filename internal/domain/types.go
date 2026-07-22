@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -168,7 +169,10 @@ type WalletNoteSummary struct {
 	WitnessUnavailable NoteValueSummary
 }
 
-var ErrNoteSummaryLimitExceeded = errors.New("note summary limit exceeded")
+var (
+	ErrNoteSummaryLimitExceeded = errors.New("note summary limit exceeded")
+	ErrScannerSnapshotChanged   = errors.New("scanner snapshot changed")
+)
 
 func (s WalletNoteSummary) ValidFor(walletID string, minConfirmations, minNoteZat int64, maxNotes int) bool {
 	if s.WalletID != walletID || s.MinConfirmations != minConfirmations || s.MinNoteZat != minNoteZat ||
@@ -239,6 +243,91 @@ func isLowerHex64(value string) bool {
 	return true
 }
 
+type NoteStatus struct {
+	NoteID                   string     `json:"note_id"`
+	State                    string     `json:"state"`
+	SourceHeight             *int64     `json:"source_height,omitempty"`
+	ValueZat                 *int64     `json:"value_zat,omitempty"`
+	PendingSpentTxID         *string    `json:"pending_spent_txid,omitempty"`
+	PendingSpentAt           *time.Time `json:"pending_spent_at,omitempty"`
+	PendingSpentExpiryHeight *int64     `json:"pending_spent_expiry_height,omitempty"`
+	SpentTxID                *string    `json:"spent_txid,omitempty"`
+	SpentHeight              *int64     `json:"spent_height,omitempty"`
+	SpentConfirmedHeight     *int64     `json:"spent_confirmed_height,omitempty"`
+}
+
+type WalletNoteStatuses struct {
+	WalletID          string
+	EventEpoch        string
+	AsOfScannerHeight int64
+	AsOfScannerHash   string
+	Statuses          []NoteStatus
+}
+
+func ValidNoteID(value string) bool {
+	txid, action, found := strings.Cut(value, ":")
+	if !found || strings.Contains(action, ":") || !isLowerHex64(txid) || action == "" || (len(action) > 1 && action[0] == '0') {
+		return false
+	}
+	if action[0] < '0' || action[0] > '9' {
+		return false
+	}
+	for i := 1; i < len(action); i++ {
+		if action[i] < '0' || action[i] > '9' {
+			return false
+		}
+	}
+	_, err := strconv.ParseUint(action, 10, 32)
+	return err == nil
+}
+
+func (s WalletNoteStatuses) ValidFor(walletID string, noteIDs []string) bool {
+	if s.WalletID != walletID || !isLowerHex64(s.EventEpoch) || s.AsOfScannerHeight < 0 || !isLowerHex64(s.AsOfScannerHash) ||
+		len(s.Statuses) != len(noteIDs) || len(noteIDs) < 1 || len(noteIDs) > 200 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(noteIDs))
+	for i, requested := range noteIDs {
+		if !ValidNoteID(requested) {
+			return false
+		}
+		if _, duplicate := seen[requested]; duplicate {
+			return false
+		}
+		seen[requested] = struct{}{}
+		status := s.Statuses[i]
+		if status.NoteID != requested || !status.validAt(s.AsOfScannerHeight) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s NoteStatus) validAt(scannerHeight int64) bool {
+	known := s.SourceHeight != nil && s.ValueZat != nil && *s.SourceHeight >= 0 && *s.SourceHeight <= scannerHeight && *s.ValueZat >= 0
+	noSource := s.SourceHeight == nil && s.ValueZat == nil
+	noPending := s.PendingSpentTxID == nil && s.PendingSpentAt == nil && s.PendingSpentExpiryHeight == nil
+	noSpent := s.SpentTxID == nil && s.SpentHeight == nil && s.SpentConfirmedHeight == nil
+	switch s.State {
+	case "unknown":
+		return noSource && noPending && noSpent
+	case "unspent":
+		return known && noPending && noSpent
+	case "pending":
+		if !known || !noSpent || s.PendingSpentTxID == nil || !isLowerHex64(*s.PendingSpentTxID) || s.PendingSpentAt == nil || s.PendingSpentAt.IsZero() {
+			return false
+		}
+		return s.PendingSpentExpiryHeight == nil || *s.PendingSpentExpiryHeight >= scannerHeight
+	case "spent":
+		if !known || !noPending || s.SpentTxID == nil || !isLowerHex64(*s.SpentTxID) || s.SpentHeight == nil || *s.SpentHeight < *s.SourceHeight || *s.SpentHeight > scannerHeight {
+			return false
+		}
+		return s.SpentConfirmedHeight == nil || (*s.SpentConfirmedHeight >= *s.SpentHeight && *s.SpentConfirmedHeight <= scannerHeight)
+	default:
+		return false
+	}
+}
+
 type BackfillStatus struct {
 	WalletID        string    `json:"wallet_id"`
 	UFVKFingerprint string    `json:"ufvk_fingerprint"`
@@ -282,6 +371,7 @@ type Scanner interface {
 	Backfill(context.Context, string, int64, int64) (int64, error)
 	Balance(context.Context, string, string, int64, int64) (Balance, bool, error)
 	NoteSummary(context.Context, string, int64, int64, int) (WalletNoteSummary, bool, error)
+	NoteStatuses(context.Context, string, []string) (WalletNoteStatuses, bool, error)
 	Events(context.Context, string, int64, int, EventFilter) (EventsPage, error)
 }
 
