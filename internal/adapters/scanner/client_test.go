@@ -2,6 +2,8 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -59,6 +61,105 @@ func TestEventsCarriesScannerEpoch(t *testing.T) {
 	page, err := client.Events(context.Background(), "hot", 7, 100, domain.EventFilter{})
 	if err != nil || page.EventEpoch != epoch || page.NextCursor != 7 {
 		t.Fatalf("page=%+v err=%v", page, err)
+	}
+}
+
+func TestNoteSummaryUsesAtomicAggregateRoute(t *testing.T) {
+	snapshotHash := strings.Repeat("a", 64)
+	client := New("http://scanner.invalid", "scanner-secret", time.Second, time.Minute)
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/v1/wallets/hot/notes/summary" || r.URL.Query().Get("min_confirmations") != "100" || r.URL.Query().Get("min_note_zat") != "100001" || r.URL.Query().Get("max_notes") != "100000" {
+			t.Fatalf("request=%s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"wallet_id":"hot","min_confirmations":100,"min_note_zat":100001,"as_of_scanner_height":10,"as_of_scanner_hash":"` + snapshotHash + `","total_unspent":{"note_count":2,"value_zat":300000},"spendable":{"note_count":1,"value_zat":200000,"smallest_note_zat":200000,"largest_note_zat":200000},"immature":{"note_count":0,"value_zat":0},"pending_spend":{"note_count":0,"value_zat":0,"known_expiry_count":0,"next_expiry_height":null,"last_expiry_height":null},"below_min_note":{"note_count":1,"value_zat":100000},"witness_unavailable":{"note_count":0,"value_zat":0}}`))}, nil
+	})
+	summary, found, err := client.NoteSummary(context.Background(), "hot", 100, 100001, 100000)
+	if err != nil || !found || summary.AsOfScannerHash != snapshotHash || summary.TotalUnspent.NoteCount != 2 || summary.Spendable.ValueZat != 200000 || summary.BelowMinNote.NoteCount != 1 {
+		t.Fatalf("summary=%+v found=%v err=%v", summary, found, err)
+	}
+}
+
+func TestNoteSummaryRejectsMissingOrNullRequiredFields(t *testing.T) {
+	valid := func() map[string]any {
+		return map[string]any{
+			"wallet_id": "hot", "min_confirmations": 100, "min_note_zat": 100, "as_of_scanner_height": 10,
+			"as_of_scanner_hash": strings.Repeat("a", 64),
+			"total_unspent":      map[string]any{"note_count": 0, "value_zat": 0},
+			"spendable":          map[string]any{"note_count": 0, "value_zat": 0, "smallest_note_zat": nil, "largest_note_zat": nil},
+			"immature":           map[string]any{"note_count": 0, "value_zat": 0},
+			"pending_spend":      map[string]any{"note_count": 0, "value_zat": 0, "known_expiry_count": 0, "next_expiry_height": nil, "last_expiry_height": nil},
+			"below_min_note":     map[string]any{"note_count": 0, "value_zat": 0},
+			"witness_unavailable": map[string]any{
+				"note_count": 0, "value_zat": 0,
+			},
+		}
+	}
+	tests := map[string]func() string{
+		"empty body":   func() string { return "" },
+		"empty object": func() string { return `{}` },
+		"null bucket": func() string {
+			payload := valid()
+			payload["total_unspent"] = nil
+			return mustJSON(payload)
+		},
+		"missing numeric": func() string {
+			payload := valid()
+			delete(payload["total_unspent"].(map[string]any), "value_zat")
+			return mustJSON(payload)
+		},
+		"omitted nullable": func() string {
+			payload := valid()
+			delete(payload["spendable"].(map[string]any), "smallest_note_zat")
+			return mustJSON(payload)
+		},
+		"value without notes": func() string {
+			payload := valid()
+			payload["total_unspent"].(map[string]any)["value_zat"] = 1
+			return mustJSON(payload)
+		},
+		"expired pending marker": func() string {
+			payload := valid()
+			pending := payload["pending_spend"].(map[string]any)
+			pending["note_count"], pending["value_zat"], pending["known_expiry_count"] = 1, 1, 1
+			pending["next_expiry_height"], pending["last_expiry_height"] = 9, 9
+			payload["total_unspent"] = map[string]any{"note_count": 1, "value_zat": 1}
+			return mustJSON(payload)
+		},
+		"below-min aggregate above strict floor": func() string {
+			payload := valid()
+			payload["below_min_note"] = map[string]any{"note_count": 1, "value_zat": 100}
+			payload["total_unspent"] = map[string]any{"note_count": 1, "value_zat": 100}
+			return mustJSON(payload)
+		},
+	}
+	for name, response := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := New("http://scanner.invalid", "", time.Second, time.Minute)
+			client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response()))}, nil
+			})
+			if _, _, err := client.NoteSummary(context.Background(), "hot", 100, 100, 100000); err == nil || !domain.IsUpstreamKind(err, "invalid_response") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func mustJSON(value any) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+func TestNoteSummaryLimitIsTyped(t *testing.T) {
+	client := New("http://scanner.invalid", "", time.Second, time.Minute)
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusUnprocessableEntity, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("limit"))}, nil
+	})
+	if _, _, err := client.NoteSummary(context.Background(), "hot", 100, 0, 1); !errors.Is(err, domain.ErrNoteSummaryLimitExceeded) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

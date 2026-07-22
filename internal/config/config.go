@@ -22,6 +22,7 @@ import (
 const (
 	defaultJSONBodyBytes      = int64(1 << 20)
 	defaultBroadcastBodyBytes = int64(4 << 20)
+	maxConfirmationsLimit     = int64(10000)
 	minInternalSecretLength   = 24
 	maxUFVKBytes              = 4096
 )
@@ -97,6 +98,7 @@ type Config struct {
 	BackfillYield          time.Duration
 	BackfillTimeout        time.Duration
 	WalletEffectsMaxEvents int
+	NoteSummaryMaxNotes    int
 }
 
 func Load() (Config, error) {
@@ -140,6 +142,7 @@ func Load() (Config, error) {
 		BackfillYield:          envDuration("JUNO_GATEWAY_BACKFILL_YIELD", 250*time.Millisecond),
 		BackfillTimeout:        envDuration("JUNO_GATEWAY_BACKFILL_TIMEOUT", 10*time.Minute),
 		WalletEffectsMaxEvents: envInt("JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS", 10000),
+		NoteSummaryMaxNotes:    envInt("JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES", 100000),
 	}
 
 	if path := strings.TrimSpace(os.Getenv("JUNO_GATEWAY_WALLETS_FILE")); path != "" {
@@ -178,7 +181,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s must be an http(s) URL", name)
 		}
 	}
-	if c.DefaultConfirmations < 1 || c.MaxConfirmations < 1 || c.DefaultConfirmations > c.MaxConfirmations {
+	if c.DefaultConfirmations < 1 || c.MaxConfirmations < 1 || c.MaxConfirmations > maxConfirmationsLimit || c.DefaultConfirmations > c.MaxConfirmations {
 		return errors.New("confirmation bounds are invalid")
 	}
 	if c.MaxScannerLag < 0 || c.JSONBodyBytes < 1024 || c.BroadcastBodyBytes < 1024 {
@@ -204,6 +207,9 @@ func (c *Config) Validate() error {
 	}
 	if c.WalletEffectsMaxEvents < 1 || c.WalletEffectsMaxEvents > 100000 {
 		return errors.New("wallet effects event cap must be between 1 and 100000")
+	}
+	if c.NoteSummaryMaxNotes < 1 || c.NoteSummaryMaxNotes > 1000000 {
+		return errors.New("note summary cap must be between 1 and 1000000")
 	}
 	if c.ReadRate.RPS <= 0 || c.ReadRate.Burst <= 0 || c.BroadcastRate.RPS <= 0 || c.BroadcastRate.Burst <= 0 {
 		return errors.New("rate limits must be positive")
@@ -269,6 +275,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	seenNames := make(map[string]struct{}, len(c.Credentials))
+	seenTokenHashes := make(map[[sha256.Size]byte]string, len(c.Credentials))
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
 		cr.Name = strings.TrimSpace(cr.Name)
@@ -301,17 +308,21 @@ func (c *Config) Validate() error {
 			if cr.TokenSHA256 != strings.ToLower(cr.TokenSHA256) {
 				return fmt.Errorf("credential %q token_sha256 must be lowercase", cr.Name)
 			}
-			if c.Network != domain.Regtest && cr.TokenSHA256 == strings.Repeat("0", sha256.Size*2) {
+			if c.Network != domain.Regtest && isExampleTokenHash(cr.TokenSHA256) {
 				return fmt.Errorf("credential %q uses the non-authenticating example token hash", cr.Name)
 			}
 			copy(cr.TokenHash[:], b)
 		}
+		if otherName, ok := seenTokenHashes[cr.TokenHash]; ok {
+			return fmt.Errorf("credential %q reuses the bearer token configured for credential %q", cr.Name, otherName)
+		}
+		seenTokenHashes[cr.TokenHash] = cr.Name
 		if len(cr.Scopes) == 0 {
 			return fmt.Errorf("credential %q requires at least one scope", cr.Name)
 		}
 		for _, scope := range cr.Scopes {
 			switch scope {
-			case "read", "address", "broadcast", "raw", "admin":
+			case "read", "address", "broadcast", "raw", "treasury", "withdrawal", "admin":
 			default:
 				return fmt.Errorf("credential %q has invalid scope %q", cr.Name, scope)
 			}
@@ -329,6 +340,13 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func isExampleTokenHash(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	return strings.Trim(value, value[:1]) == ""
 }
 
 func readJSONFile(path string, out any) error {
@@ -363,7 +381,7 @@ func readJSONFile(path string, out any) error {
 }
 
 func validateEnvironment() error {
-	for _, key := range []string{"JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", "JUNO_GATEWAY_MAX_CONFIRMATIONS", "JUNO_GATEWAY_MAX_SCANNER_LAG", "JUNO_GATEWAY_MAX_JSON_BODY_BYTES", "JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", "JUNO_GATEWAY_READ_RATE_BURST", "JUNO_GATEWAY_BROADCAST_RATE_BURST", "JUNO_GATEWAY_BACKFILL_BATCH_SIZE", "JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS"} {
+	for _, key := range []string{"JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", "JUNO_GATEWAY_MAX_CONFIRMATIONS", "JUNO_GATEWAY_MAX_SCANNER_LAG", "JUNO_GATEWAY_MAX_JSON_BODY_BYTES", "JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", "JUNO_GATEWAY_READ_RATE_BURST", "JUNO_GATEWAY_BROADCAST_RATE_BURST", "JUNO_GATEWAY_BACKFILL_BATCH_SIZE", "JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS", "JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES"} {
 		if value := os.Getenv(key); value != "" {
 			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
 				return fmt.Errorf("%s must be an integer", key)

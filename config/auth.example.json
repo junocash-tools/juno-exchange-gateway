@@ -1,9 +1,33 @@
 {
   "credentials": [
     {
-      "name": "exchange",
-      "token_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "scopes": ["read", "address", "broadcast", "raw"],
+      "name": "deposit-reader",
+      "token_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "scopes": ["read"],
+      "wallets": ["exchange-hot"]
+    },
+    {
+      "name": "address-allocator",
+      "token_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "scopes": ["address"],
+      "wallets": ["exchange-hot"]
+    },
+    {
+      "name": "treasury-monitor",
+      "token_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "scopes": ["treasury"],
+      "wallets": ["exchange-hot"]
+    },
+    {
+      "name": "transaction-broadcaster",
+      "token_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "scopes": ["broadcast"],
+      "wallets": ["exchange-hot"]
+    },
+    {
+      "name": "withdrawal-monitor",
+      "token_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "scopes": ["read", "withdrawal"],
       "wallets": ["exchange-hot"]
     }
   ]

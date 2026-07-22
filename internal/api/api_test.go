@@ -79,24 +79,42 @@ func (f *fakeNode) Broadcast(context.Context, string) (string, error) {
 }
 
 type fakeScanner struct {
-	health            domain.ScannerHealth
-	balance           domain.Balance
-	balanceFound      bool
-	balanceCalls      int
-	lastConfirmations int64
-	events            domain.EventsPage
-	eventPages        map[int64]domain.EventsPage
-	lastCursor        int64
-	lastEventLimit    int
-	backfillFrom      int64
-	backfillTo        int64
-	backfillBatch     int64
-	backfillWallet    string
-	backfillCalls     int
-	backfillStatuses  map[string]domain.BackfillStatus
+	health             domain.ScannerHealth
+	healthSequence     []domain.ScannerHealth
+	healthCalls        int
+	balance            domain.Balance
+	balanceFound       bool
+	balanceCalls       int
+	lastConfirmations  int64
+	events             domain.EventsPage
+	eventPages         map[int64]domain.EventsPage
+	noteSummary        domain.WalletNoteSummary
+	noteSummaryFound   bool
+	noteSummaryErr     error
+	noteSummaryMinConf int64
+	noteSummaryMinZat  int64
+	noteSummaryMax     int
+	lastCursor         int64
+	lastEventLimit     int
+	backfillFrom       int64
+	backfillTo         int64
+	backfillBatch      int64
+	backfillWallet     string
+	backfillCalls      int
+	backfillStatuses   map[string]domain.BackfillStatus
 }
 
-func (f *fakeScanner) Health(context.Context) (domain.ScannerHealth, error) { return f.health, nil }
+func (f *fakeScanner) Health(context.Context) (domain.ScannerHealth, error) {
+	if len(f.healthSequence) == 0 {
+		return f.health, nil
+	}
+	index := f.healthCalls
+	if index >= len(f.healthSequence) {
+		index = len(f.healthSequence) - 1
+	}
+	f.healthCalls++
+	return f.healthSequence[index], nil
+}
 func (f *fakeScanner) UpsertWallet(_ context.Context, walletID, ufvk string, birthday int64) error {
 	if f.backfillStatuses == nil {
 		f.backfillStatuses = map[string]domain.BackfillStatus{}
@@ -128,6 +146,25 @@ func (f *fakeScanner) Balance(_ context.Context, _, _ string, confirmations, _ i
 	f.balanceCalls++
 	f.lastConfirmations = confirmations
 	return f.balance, f.balanceFound, nil
+}
+func (f *fakeScanner) NoteSummary(_ context.Context, walletID string, minConf, minNoteZat int64, maxNotes int) (domain.WalletNoteSummary, bool, error) {
+	f.noteSummaryMinConf = minConf
+	f.noteSummaryMinZat = minNoteZat
+	f.noteSummaryMax = maxNotes
+	if f.noteSummaryErr != nil {
+		return domain.WalletNoteSummary{}, false, f.noteSummaryErr
+	}
+	out := f.noteSummary
+	if out.WalletID == "" {
+		out.WalletID = walletID
+		out.MinConfirmations = minConf
+		out.MinNoteZat = minNoteZat
+		if f.health.ScannedHeight != nil {
+			out.AsOfScannerHeight = *f.health.ScannedHeight
+		}
+		out.AsOfScannerHash = f.health.ScannedHash
+	}
+	return out, f.noteSummaryFound, nil
 }
 func (f *fakeScanner) Events(_ context.Context, _ string, cursor int64, limit int, _ domain.EventFilter) (domain.EventsPage, error) {
 	f.lastCursor = cursor
@@ -176,7 +213,7 @@ func testConfig(network domain.Network) config.Config {
 	_ = scanned
 	_ = lag
 	ufvk := map[domain.Network]string{domain.Regtest: "jviewregtest1example", domain.Testnet: "jviewtest1example", domain.Mainnet: "jview1example"}[network]
-	return config.Config{Network: network, ListenAddress: ":0", StateDSN: "unused", NodeRPCURL: "http://node", ScannerURL: "http://scanner", AddrgenPath: "addrgen", Wallets: []config.Wallet{{WalletID: "hot", UFVK: ufvk}}, DefaultConfirmations: 100, MaxConfirmations: 10000, MaxScannerLag: 2, RequireCompleteHistory: true, JSONBodyBytes: 1 << 20, BroadcastBodyBytes: 4 << 20, ReadTimeout: time.Second, BroadcastTimeout: time.Second, UpstreamTimeout: time.Second, ShutdownTimeout: time.Second, IdempotencyLease: time.Minute, WalletEffectsMaxEvents: 10000, ReadRate: config.RateLimit{RPS: 1000, Burst: 1000}, BroadcastRate: config.RateLimit{RPS: 1000, Burst: 1000}}
+	return config.Config{Network: network, ListenAddress: ":0", StateDSN: "unused", NodeRPCURL: "http://node", ScannerURL: "http://scanner", AddrgenPath: "addrgen", Wallets: []config.Wallet{{WalletID: "hot", UFVK: ufvk}}, DefaultConfirmations: 100, MaxConfirmations: 10000, MaxScannerLag: 2, RequireCompleteHistory: true, JSONBodyBytes: 1 << 20, BroadcastBodyBytes: 4 << 20, ReadTimeout: time.Second, BroadcastTimeout: time.Second, UpstreamTimeout: time.Second, ShutdownTimeout: time.Second, IdempotencyLease: time.Minute, WalletEffectsMaxEvents: 10000, NoteSummaryMaxNotes: 100000, ReadRate: config.RateLimit{RPS: 1000, Burst: 1000}, BroadcastRate: config.RateLimit{RPS: 1000, Burst: 1000}}
 }
 
 func newTestAPI(t *testing.T, cfg config.Config) (*API, *fakeNode, *fakeScanner) {
@@ -188,10 +225,11 @@ func newTestAPI(t *testing.T, cfg config.Config) (*API, *fakeNode, *fakeScanner)
 	t.Cleanup(func() { _ = store.Close() })
 	node := &fakeNode{tip: domain.NodeTip{Network: cfg.Network.NodeChain(), Height: 100, Hash: strings.Repeat("b", 64), Headers: 100, VerificationProgress: 1}, blockHashes: map[int64]string{}, transactions: map[string]domain.Transaction{}}
 	ready := true
+	historyComplete := true
 	scanned := int64(100)
 	lag := int64(0)
 	confirmations := cfg.DefaultConfirmations
-	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), Confirmations: &confirmations, EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag}, balanceFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
+	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), Confirmations: &confirmations, EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag, HistoryComplete: &historyComplete}, balanceFound: true, noteSummaryFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
 	service, err := New(cfg, store, node, scanner, fakeDeriver{network: cfg.Network}, slog.New(slog.NewTextHandler(io.Discard, nil)), BuildInfo{Version: "test", Revision: "abc", APIVersion: "v1"})
 	if err != nil {
 		t.Fatal(err)
@@ -251,8 +289,79 @@ func allocate(t *testing.T, handler http.Handler) string {
 	return out.Data.Address
 }
 
-func walletEffectPayload(walletID, txid string) json.RawMessage {
-	raw, _ := json.Marshal(map[string]string{"wallet_id": walletID, "txid": txid})
+func depositEffectPayload(kind, walletID, txid, address string, eventHeight int64, actionIndex uint32, amount uint64) json.RawMessage {
+	blockHeight := eventHeight
+	confirmations := int64(1)
+	payload := map[string]any{
+		"version": "v1", "wallet_id": walletID, "txid": txid, "origin": "external",
+		"height": blockHeight, "action_index": actionIndex, "amount_zatoshis": amount,
+		"recipient_address": address, "diversifier_index": uint32(0),
+		"status": map[string]any{"state": "confirmed", "height": blockHeight, "confirmations": confirmations},
+	}
+	switch kind {
+	case "DepositConfirmed":
+		blockHeight = eventHeight - 99
+		payload["height"] = blockHeight
+		payload["confirmed_height"] = eventHeight
+		payload["required_confirmations"] = int64(100)
+		payload["status"] = map[string]any{"state": "confirmed", "height": blockHeight, "confirmations": int64(100)}
+	case "DepositUnconfirmed":
+		blockHeight = eventHeight - 98
+		payload["height"] = blockHeight
+		payload["rollback_height"] = eventHeight
+		payload["previous_confirmed_height"] = eventHeight + 1
+		payload["status"] = map[string]any{"state": "confirmed", "height": blockHeight, "confirmations": int64(99)}
+	case "DepositOrphaned":
+		blockHeight = eventHeight + 1
+		payload["height"] = blockHeight
+		payload["orphaned_at_height"] = eventHeight
+		payload["status"] = map[string]any{"state": "orphaned", "height": blockHeight, "confirmations": int64(0)}
+	}
+	raw, _ := json.Marshal(payload)
+	return raw
+}
+
+func walletEffectPayload(kind, walletID, txid string, eventHeight int64) json.RawMessage {
+	if strings.HasPrefix(kind, "Deposit") {
+		return depositEffectPayload(kind, walletID, txid, "jregtest1effect", eventHeight, 1, 10)
+	}
+	payload := map[string]any{
+		"version": "v1", "wallet_id": walletID, "txid": txid,
+		"action_index": uint32(1), "amount_zatoshis": uint64(10),
+		"recipient_address": "jregtest1recipient", "ovk_scope": "external",
+		"status": map[string]any{"state": "mempool"},
+	}
+	if strings.HasPrefix(kind, "Spend") {
+		payload = map[string]any{
+			"version": "v1", "wallet_id": walletID, "txid": txid, "height": eventHeight,
+			"note_txid": strings.Repeat("d", 64), "note_action_index": uint32(0), "note_height": int64(0),
+			"amount_zatoshis": uint64(10), "note_nullifier": strings.Repeat("f", 64),
+			"status": map[string]any{"state": "confirmed", "height": eventHeight, "confirmations": int64(1)},
+		}
+	}
+	switch kind {
+	case "SpendConfirmed", "OutgoingOutputConfirmed":
+		blockHeight := eventHeight - 99
+		payload["height"] = blockHeight
+		payload["confirmed_height"] = eventHeight
+		payload["required_confirmations"] = int64(100)
+		payload["status"] = map[string]any{"state": "confirmed", "height": blockHeight, "confirmations": int64(100)}
+	case "SpendUnconfirmed", "OutgoingOutputUnconfirmed":
+		blockHeight := eventHeight - 98
+		payload["height"] = blockHeight
+		payload["rollback_height"] = eventHeight
+		payload["previous_confirmed_height"] = eventHeight + 1
+		payload["status"] = map[string]any{"state": "confirmed", "height": blockHeight, "confirmations": int64(99)}
+	case "SpendOrphaned", "OutgoingOutputOrphaned":
+		blockHeight := eventHeight + 1
+		payload["height"] = blockHeight
+		payload["orphaned_at_height"] = eventHeight
+		payload["status"] = map[string]any{"state": "orphaned", "height": blockHeight, "confirmations": int64(0)}
+	case "OutgoingOutputExpired":
+		payload["expiry_height"] = eventHeight - 1
+		payload["status"] = map[string]any{"state": "expired"}
+	}
+	raw, _ := json.Marshal(payload)
 	return raw
 }
 
@@ -280,13 +389,127 @@ func TestBalanceRequiresAllocatedAddressAndUsesDefaultConfirmations(t *testing.T
 	}
 }
 
+func TestNoteSummaryReturnsAtomicScannerAggregate(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, scanner := newTestAPI(t, cfg)
+	expiry := int64(140)
+	smallest, largest := int64(500), int64(500)
+	scanner.noteSummary = domain.WalletNoteSummary{
+		WalletID: "hot", MinConfirmations: 10, MinNoteZat: 100, AsOfScannerHeight: 100,
+		AsOfScannerHash:    strings.Repeat("b", 64),
+		TotalUnspent:       domain.NoteValueSummary{NoteCount: 5, ValueZat: 960},
+		Spendable:          domain.SpendableNoteSummary{NoteValueSummary: domain.NoteValueSummary{NoteCount: 1, ValueZat: 500}, SmallestNoteZat: &smallest, LargestNoteZat: &largest},
+		Immature:           domain.NoteValueSummary{NoteCount: 1, ValueZat: 100},
+		PendingSpend:       domain.PendingSpendNoteSummary{NoteValueSummary: domain.NoteValueSummary{NoteCount: 1, ValueZat: 300}, KnownExpiryCount: 1, NextExpiryHeight: &expiry, LastExpiryHeight: &expiry},
+		BelowMinNote:       domain.NoteValueSummary{NoteCount: 1, ValueZat: 50},
+		WitnessUnavailable: domain.NoteValueSummary{NoteCount: 1, ValueZat: 10},
+	}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/summary?min_confirmations=10&min_note_zat=100", ``, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data noteSummary `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	got := out.Data
+	if got.TotalUnspent.NoteCount != 5 || got.TotalUnspent.ValueZat != 960 ||
+		got.Spendable.NoteCount != 1 || got.Spendable.ValueZat != 500 || got.Spendable.SmallestNoteZat == nil || *got.Spendable.SmallestNoteZat != 500 ||
+		got.BelowMinNote.NoteCount != 1 || got.Immature.NoteCount != 1 || got.PendingSpend.NoteCount != 1 || got.PendingSpend.NextExpiryHeight == nil || *got.PendingSpend.NextExpiryHeight != 140 ||
+		got.WitnessUnavailable.NoteCount != 1 || got.MinConfirmations != 10 || got.MinNoteZat != 100 || got.AsOfScannerHeight != 100 || got.AsOfScannerHash != strings.Repeat("b", 64) {
+		t.Fatalf("summary=%+v", got)
+	}
+	if scanner.noteSummaryMinConf != 10 || scanner.noteSummaryMinZat != 100 || scanner.noteSummaryMax != cfg.NoteSummaryMaxNotes {
+		t.Fatalf("summary request minconf=%d minzat=%d max=%d", scanner.noteSummaryMinConf, scanner.noteSummaryMinZat, scanner.noteSummaryMax)
+	}
+}
+
+func TestNoteSummaryRequiresTreasuryScopeAndFailsClosedAtCap(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	readToken := "read-token-that-is-at-least-24-bytes"
+	treasuryToken := "treasury-token-at-least-24-bytes"
+	cfg.Credentials = []config.Credential{
+		{Name: "reader", TokenHash: sha256.Sum256([]byte(readToken)), Scopes: []string{"read"}, Wallets: []string{"hot"}},
+		{Name: "treasury", TokenHash: sha256.Sum256([]byte(treasuryToken)), Scopes: []string{"treasury"}, Wallets: []string{"hot"}},
+	}
+	cfg.NoteSummaryMaxNotes = 1
+	service, _, scanner := newTestAPI(t, cfg)
+	scanner.noteSummaryErr = domain.ErrNoteSummaryLimitExceeded
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/summary", ``, map[string]string{"Authorization": "Bearer " + readToken})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("read-only status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/summary", ``, map[string]string{"Authorization": "Bearer " + treasuryToken})
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "note_summary_limit_exceeded") {
+		t.Fatalf("cap status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNoteSummaryRejectsDifferentScannerSnapshot(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, scanner := newTestAPI(t, cfg)
+	scanner.noteSummary = domain.WalletNoteSummary{
+		WalletID: "hot", MinConfirmations: 100, AsOfScannerHeight: 99,
+		AsOfScannerHash: strings.Repeat("b", 64),
+	}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/summary", ``, nil)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "scanner_snapshot_changed") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNoteSummaryRejectsInvalidAggregateFromScanner(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, scanner := newTestAPI(t, cfg)
+	scanner.noteSummary = domain.WalletNoteSummary{
+		WalletID: "hot", MinConfirmations: 100, AsOfScannerHeight: 100,
+		AsOfScannerHash: strings.Repeat("b", 64),
+		TotalUnspent:    domain.NoteValueSummary{NoteCount: 0, ValueZat: 1},
+	}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/summary", ``, nil)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNoteSummaryRejectsSnapshotMutationDuringRequest(t *testing.T) {
+	for _, mutation := range []string{"height", "hash", "epoch"} {
+		t.Run(mutation, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			before := scanner.health
+			after := before
+			switch mutation {
+			case "height":
+				changed := *after.ScannedHeight + 1
+				after.ScannedHeight = &changed
+			case "hash":
+				after.ScannedHash = strings.Repeat("c", 64)
+			case "epoch":
+				after.EventEpoch = strings.Repeat("f", 64)
+			}
+			scanner.noteSummary = domain.WalletNoteSummary{
+				WalletID: "hot", MinConfirmations: 100, AsOfScannerHeight: *before.ScannedHeight,
+				AsOfScannerHash: before.ScannedHash,
+			}
+			scanner.healthSequence = []domain.ScannerHealth{before, after}
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/notes/summary", ``, nil)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "scanner_snapshot_changed") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestDepositsUseOpaqueWalletBoundCursor(t *testing.T) {
 	cfg := testConfig(domain.Regtest)
 	service, _, scanner := newTestAPI(t, cfg)
 	handler := service.Handler()
 	address := allocate(t, handler)
 	txid := strings.Repeat("a", 64)
-	payload, _ := json.Marshal(depositPayload{WalletID: "hot", TxID: txid, Origin: "external", Height: 90, ActionIndex: 2, AmountZatoshis: 99, RecipientAddress: address})
+	payload := depositEffectPayload("DepositEvent", "hot", txid, address, 90, 2, 99)
 	scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 7, Kind: "DepositEvent", Height: 90, Payload: payload, CreatedAt: time.Unix(1, 0).UTC()}}, NextCursor: 7, EventEpoch: scanner.health.EventEpoch}
 	rec := request(t, handler, http.MethodGet, "/v1/wallets/hot/deposits?limit=1", ``, nil)
 	if rec.Code != http.StatusOK {
@@ -374,7 +597,7 @@ func TestDepositsOmitAddressesOutsideGatewayRegistry(t *testing.T) {
 	handler := service.Handler()
 	_ = allocate(t, handler) // A scanner-suppressed change event must never be fabricated by the gateway.
 	txid := strings.Repeat("a", 64)
-	payload, _ := json.Marshal(depositPayload{WalletID: "hot", TxID: txid, Origin: "external", Height: 90, ActionIndex: 1, AmountZatoshis: 55, RecipientAddress: "jregtest1derivedoutsidegateway"})
+	payload := depositEffectPayload("DepositEvent", "hot", txid, "jregtest1derivedoutsidegateway", 90, 1, 55)
 	scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 9, Kind: "DepositEvent", Height: 90, Payload: payload, CreatedAt: time.Unix(1, 0).UTC()}}, NextCursor: 9, EventEpoch: scanner.health.EventEpoch}
 	rec := request(t, handler, http.MethodGet, "/v1/wallets/hot/deposits", ``, nil)
 	if rec.Code != http.StatusOK {
@@ -415,13 +638,58 @@ func TestDepositsFailClosedOnMissingOrInternalOrigin(t *testing.T) {
 			handler := service.Handler()
 			address := allocate(t, handler)
 			txid := strings.Repeat("a", 64)
-			payload := map[string]any{"wallet_id": "hot", "txid": txid, "height": 90, "action_index": 1, "amount_zatoshis": 55, "recipient_address": address, "diversifier_index": 0}
+			payload := map[string]any{
+				"version": "v1", "wallet_id": "hot", "txid": txid, "height": 90, "action_index": 1,
+				"amount_zatoshis": 55, "recipient_address": address, "diversifier_index": 0,
+				"status": map[string]any{"state": "confirmed", "height": 90, "confirmations": 1},
+			}
 			if origin != "" {
 				payload["origin"] = origin
 			}
 			raw, _ := json.Marshal(payload)
 			scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Height: 90, Payload: raw, CreatedAt: time.Unix(1, 0).UTC()}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}
 			rec := request(t, handler, http.MethodGet, "/v1/wallets/hot/deposits", ``, nil)
+			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestDepositsFailClosedOnInconsistentLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		kind   string
+		mutate func(map[string]any)
+	}{
+		{name: "detected event height", kind: "DepositEvent", mutate: func(payload map[string]any) { payload["height"] = float64(89) }},
+		{name: "missing zero diversifier index", kind: "DepositEvent", mutate: func(payload map[string]any) { delete(payload, "diversifier_index") }},
+		{name: "confirmed marker", kind: "DepositConfirmed", mutate: func(payload map[string]any) { payload["confirmed_height"] = float64(99) }},
+		{name: "unconfirmed previous marker", kind: "DepositUnconfirmed", mutate: func(payload map[string]any) { delete(payload, "previous_confirmed_height") }},
+		{name: "unconfirmed without prior finality", kind: "DepositUnconfirmed", mutate: func(payload map[string]any) {
+			payload["height"] = float64(99)
+			payload["previous_confirmed_height"] = float64(101)
+			payload["status"] = map[string]any{"state": "confirmed", "height": float64(99), "confirmations": float64(2)}
+		}},
+		{name: "orphaned state", kind: "DepositOrphaned", mutate: func(payload map[string]any) { payload["status"].(map[string]any)["state"] = "confirmed" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			address := allocate(t, service.Handler())
+			txid := strings.Repeat("a", 64)
+			eventHeight := int64(100)
+			if test.kind == "DepositEvent" {
+				eventHeight = 90
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(depositEffectPayload(test.kind, "hot", txid, address, eventHeight, 1, 55), &payload); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(payload)
+			raw, _ := json.Marshal(payload)
+			scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 1, Kind: test.kind, Height: eventHeight, Payload: raw, CreatedAt: time.Unix(1, 0).UTC()}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/deposits", ``, nil)
 			if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 			}
@@ -446,10 +714,10 @@ func TestBroadcastIsSignedRawOnlyAndIdempotent(t *testing.T) {
 	txid := strings.Repeat("c", 64)
 	node.broadcastTxID = txid
 	node.decodedTxID = txid
-	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
 	headers := map[string]string{"Idempotency-Key": "withdrawal-1"}
 	rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
-	if rec.Code != http.StatusAccepted {
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"wallet_id":"hot"`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	rec = request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
@@ -459,13 +727,81 @@ func TestBroadcastIsSignedRawOnlyAndIdempotent(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"accepted":false`) || !strings.Contains(rec.Body.String(), `"already_known":true`) {
 		t.Fatalf("replay body=%s", rec.Body.String())
 	}
-	rec = request(t, handler, http.MethodPost, "/v1/transactions/broadcast", `{"raw_tx_hex":"01","expected_txid":"`+txid+`"}`, headers)
+	rec = request(t, handler, http.MethodPost, "/v1/transactions/broadcast", `{"wallet_id":"hot","raw_tx_hex":"01","expected_txid":"`+txid+`"}`, headers)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "idempotency_conflict") {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	rec = request(t, handler, http.MethodPost, "/v1/transactions/broadcast", `{"raw_tx_hex":"00","expected_txid":"`+txid+`","seed":"secret"}`, map[string]string{"Idempotency-Key": "withdrawal-2"})
+	rec = request(t, handler, http.MethodPost, "/v1/transactions/broadcast", `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"`+txid+`","seed":"secret"}`, map[string]string{"Idempotency-Key": "withdrawal-2"})
 	if rec.Code != http.StatusBadRequest || node.broadcastCalls != 1 {
 		t.Fatalf("secret field accepted status=%d", rec.Code)
+	}
+}
+
+func TestBroadcastIsBoundToAuthorizedRegisteredWallet(t *testing.T) {
+	cfg := testConfig(domain.Mainnet)
+	cfg.Wallets = append(cfg.Wallets, config.Wallet{WalletID: "cold", UFVK: "jview1cold"})
+	token := strings.Repeat("a", 24)
+	cfg.Credentials = []config.Credential{{Name: "hot-broadcaster", TokenHash: sha256.Sum256([]byte(token)), Scopes: []string{"broadcast"}, Wallets: []string{"hot"}}}
+	service, node, _ := newTestAPI(t, cfg)
+	txid := strings.Repeat("c", 64)
+	node.decodedTxID, node.broadcastTxID = txid, txid
+	headers := map[string]string{"Authorization": "Bearer " + token, "Idempotency-Key": "wallet-bound"}
+
+	for name, test := range map[string]struct {
+		body string
+		want int
+	}{
+		"missing":      {body: `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`, want: http.StatusBadRequest},
+		"unauthorized": {body: `{"wallet_id":"cold","raw_tx_hex":"00","expected_txid":"` + txid + `"}`, want: http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", test.body, headers)
+			if rec.Code != test.want || node.broadcastCalls != 0 {
+				t.Fatalf("status=%d calls=%d body=%s", rec.Code, node.broadcastCalls, rec.Body.String())
+			}
+		})
+	}
+
+	regtest, regNode, _ := newTestAPI(t, testConfig(domain.Regtest))
+	rec := request(t, regtest.Handler(), http.MethodPost, "/v1/transactions/broadcast", `{"wallet_id":"unknown","raw_tx_hex":"00","expected_txid":"`+txid+`"}`, map[string]string{"Idempotency-Key": "unknown-wallet"})
+	if rec.Code != http.StatusNotFound || regNode.broadcastCalls != 0 {
+		t.Fatalf("unknown status=%d calls=%d body=%s", rec.Code, regNode.broadcastCalls, rec.Body.String())
+	}
+}
+
+func TestBroadcastIdempotencyPayloadIncludesWallet(t *testing.T) {
+	cfg := testConfig(domain.Mainnet)
+	cfg.Wallets = append(cfg.Wallets, config.Wallet{WalletID: "cold", UFVK: "jview1cold"})
+	token := strings.Repeat("a", 24)
+	cfg.Credentials = []config.Credential{{Name: "broadcaster", TokenHash: sha256.Sum256([]byte(token)), Scopes: []string{"broadcast"}, Wallets: []string{"hot", "cold"}}}
+	service, node, _ := newTestAPI(t, cfg)
+	txid := strings.Repeat("c", 64)
+	node.decodedTxID, node.broadcastTxID = txid, txid
+	headers := map[string]string{"Authorization": "Bearer " + token, "Idempotency-Key": "same-attempt"}
+	hotBody := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	if rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", hotBody, headers); rec.Code != http.StatusAccepted {
+		t.Fatalf("hot status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	coldBody := `{"wallet_id":"cold","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	if rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", coldBody, headers); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "idempotency_conflict") || node.broadcastCalls != 1 {
+		t.Fatalf("cold status=%d calls=%d body=%s", rec.Code, node.broadcastCalls, rec.Body.String())
+	}
+}
+
+func TestBroadcastInProgressReturnsRetryHint(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, _ := newTestAPI(t, cfg)
+	txid := strings.Repeat("a", 64)
+	rawTx := "00"
+	key := "withdrawal-processing"
+	digestBytes := sha256.Sum256([]byte("hot\x00" + rawTx + "\x00" + txid))
+	digest := hex.EncodeToString(digestBytes[:])
+	if _, err := service.store.ClaimReceipt(context.Background(), scopedIdempotencyKey("regtest-anonymous", key), digest, txid, time.Now(), cfg.IdempotencyLease); err != nil {
+		t.Fatal(err)
+	}
+	rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", `{"wallet_id":"hot","raw_tx_hex":"`+rawTx+`","expected_txid":"`+txid+`"}`, map[string]string{"Idempotency-Key": key})
+	if rec.Code != http.StatusConflict || rec.Header().Get("Retry-After") == "" || !strings.Contains(rec.Body.String(), `"retry_after_seconds"`) {
+		t.Fatalf("status=%d retry-after=%q body=%s", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
 	}
 }
 
@@ -476,7 +812,7 @@ func TestCompletedBroadcastReplaysWhileNodeIsUnavailable(t *testing.T) {
 	txid := strings.Repeat("c", 64)
 	node.broadcastTxID = txid
 	node.decodedTxID = txid
-	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
 	headers := map[string]string{"Idempotency-Key": "withdrawal-replay-outage"}
 	if rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers); rec.Code != http.StatusAccepted {
 		t.Fatalf("initial status=%d body=%s", rec.Code, rec.Body.String())
@@ -519,7 +855,7 @@ func TestBroadcastRejectsJSONLikeContentTypes(t *testing.T) {
 	cfg := testConfig(domain.Regtest)
 	service, node, _ := newTestAPI(t, cfg)
 	txid := strings.Repeat("c", 64)
-	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
 	rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, map[string]string{
 		"Content-Type":    "application/jsonp",
 		"Idempotency-Key": "wrong-media-type",
@@ -537,7 +873,7 @@ func TestBroadcastRejectsExpectedTxIDMismatchBeforeStateOrBroadcast(t *testing.T
 	node.decodedTxID = strings.Repeat("d", 64)
 	node.broadcastTxID = expected
 	node.transactions[expected] = domain.Transaction{TxID: expected, State: "mempool"}
-	body := `{"raw_tx_hex":"00","expected_txid":"` + expected + `"}`
+	body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + expected + `"}`
 	headers := map[string]string{"Idempotency-Key": "withdrawal-mismatch"}
 	first := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
 	if first.Code != http.StatusUnprocessableEntity || !strings.Contains(first.Body.String(), "expected_txid_mismatch") || node.broadcastCalls != 0 {
@@ -548,6 +884,77 @@ func TestBroadcastRejectsExpectedTxIDMismatchBeforeStateOrBroadcast(t *testing.T
 	second := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
 	if second.Code != http.StatusAccepted || node.broadcastCalls != 1 || node.decodeCalls != 2 {
 		t.Fatalf("status=%d broadcasts=%d decodes=%d body=%s", second.Code, node.broadcastCalls, node.decodeCalls, second.Body.String())
+	}
+}
+
+func TestBroadcastOnlyShortCircuitsCanonicalNodeStates(t *testing.T) {
+	for _, state := range []string{"mempool", "confirmed"} {
+		t.Run(state, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, node, _ := newTestAPI(t, cfg)
+			txid := strings.Repeat("c", 64)
+			node.decodedTxID = txid
+			node.transactions[txid] = domain.Transaction{TxID: txid, State: state}
+			body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+			rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, map[string]string{"Idempotency-Key": "already-" + state})
+			if rec.Code != http.StatusOK || node.broadcastCalls != 0 || !strings.Contains(rec.Body.String(), `"state":"`+state+`"`) {
+				t.Fatalf("status=%d calls=%d body=%s", rec.Code, node.broadcastCalls, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestBroadcastRebroadcastsOrphanedTransaction(t *testing.T) {
+	t.Run("accepted", func(t *testing.T) {
+		cfg := testConfig(domain.Regtest)
+		service, node, _ := newTestAPI(t, cfg)
+		txid := strings.Repeat("d", 64)
+		node.decodedTxID, node.broadcastTxID = txid, txid
+		node.transactions[txid] = domain.Transaction{TxID: txid, State: "orphaned"}
+		body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+		rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, map[string]string{"Idempotency-Key": "rebroadcast-orphaned"})
+		if rec.Code != http.StatusAccepted || node.broadcastCalls != 1 || !strings.Contains(rec.Body.String(), `"state":"mempool"`) {
+			t.Fatalf("status=%d calls=%d body=%s", rec.Code, node.broadcastCalls, rec.Body.String())
+		}
+	})
+
+	t.Run("uncertain result remains retryable", func(t *testing.T) {
+		cfg := testConfig(domain.Regtest)
+		service, node, _ := newTestAPI(t, cfg)
+		txid := strings.Repeat("e", 64)
+		node.decodedTxID = txid
+		node.transactions[txid] = domain.Transaction{TxID: txid, State: "orphaned"}
+		node.broadcastErr = &domain.UpstreamError{Kind: "unavailable", Err: io.EOF}
+		body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+		rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, map[string]string{"Idempotency-Key": "rebroadcast-orphaned-uncertain"})
+		if rec.Code != http.StatusBadGateway || node.broadcastCalls != 1 || !strings.Contains(rec.Body.String(), `"retryable":true`) || strings.Contains(rec.Body.String(), `"state":"orphaned"`) {
+			t.Fatalf("status=%d calls=%d body=%s", rec.Code, node.broadcastCalls, rec.Body.String())
+		}
+	})
+}
+
+func TestCompletedBroadcastUsesFreshOperationKeyForReconciledOrphan(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, _ := newTestAPI(t, cfg)
+	txid := strings.Repeat("d", 64)
+	node.decodedTxID, node.broadcastTxID = txid, txid
+	body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+
+	firstKey := map[string]string{"Idempotency-Key": "withdrawal-orphan-attempt-1"}
+	first := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, firstKey)
+	if first.Code != http.StatusAccepted || node.broadcastCalls != 1 {
+		t.Fatalf("initial status=%d calls=%d body=%s", first.Code, node.broadcastCalls, first.Body.String())
+	}
+
+	node.transactions[txid] = domain.Transaction{TxID: txid, State: "orphaned"}
+	replay := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, firstKey)
+	if replay.Code != http.StatusOK || node.broadcastCalls != 1 || !strings.Contains(replay.Body.String(), `"already_known":true`) {
+		t.Fatalf("receipt replay status=%d calls=%d body=%s", replay.Code, node.broadcastCalls, replay.Body.String())
+	}
+
+	rebroadcast := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, map[string]string{"Idempotency-Key": "withdrawal-orphan-attempt-1-rebroadcast-1"})
+	if rebroadcast.Code != http.StatusAccepted || node.broadcastCalls != 2 || !strings.Contains(rebroadcast.Body.String(), `"accepted":true`) {
+		t.Fatalf("rebroadcast status=%d calls=%d body=%s", rebroadcast.Code, node.broadcastCalls, rebroadcast.Body.String())
 	}
 }
 
@@ -568,14 +975,14 @@ func TestBroadcastIdempotencyIsScopedToPrincipal(t *testing.T) {
 	txidB := strings.Repeat("b", 64)
 
 	node.decodedTxID, node.broadcastTxID = txidA, txidA
-	bodyA := `{"raw_tx_hex":"00","expected_txid":"` + txidA + `"}`
+	bodyA := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txidA + `"}`
 	headersA := map[string]string{"Authorization": "Bearer " + tokenA, "Idempotency-Key": key}
 	if rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", bodyA, headersA); rec.Code != http.StatusAccepted {
 		t.Fatalf("principal A status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	node.decodedTxID, node.broadcastTxID = txidB, txidB
-	bodyB := `{"raw_tx_hex":"01","expected_txid":"` + txidB + `"}`
+	bodyB := `{"wallet_id":"hot","raw_tx_hex":"01","expected_txid":"` + txidB + `"}`
 	headersB := map[string]string{"Authorization": "Bearer " + tokenB, "Idempotency-Key": key}
 	if rec := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", bodyB, headersB); rec.Code != http.StatusAccepted {
 		t.Fatalf("principal B status=%d body=%s", rec.Code, rec.Body.String())
@@ -596,11 +1003,11 @@ func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 		node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
 		first := make([]domain.ScannerEvent, 1000)
 		for i := range first {
-			first[i] = domain.ScannerEvent{ID: int64(i + 1), Kind: "DepositEvent", Payload: walletEffectPayload("hot", txid)}
+			first[i] = domain.ScannerEvent{ID: int64(i + 1), Kind: "DepositEvent", Payload: walletEffectPayload("DepositEvent", "hot", txid, 0)}
 		}
 		scanner.eventPages = map[int64]domain.EventsPage{
 			0:    {Events: first, NextCursor: 1000, EventEpoch: scanner.health.EventEpoch},
-			1000: {Events: []domain.ScannerEvent{{ID: 1001, Kind: "DepositConfirmed", Payload: walletEffectPayload("hot", txid)}}, NextCursor: 1001, EventEpoch: scanner.health.EventEpoch},
+			1000: {Events: []domain.ScannerEvent{{ID: 1001, Kind: "DepositConfirmed", Height: 100, Payload: walletEffectPayload("DepositConfirmed", "hot", txid, 100)}}, NextCursor: 1001, EventEpoch: scanner.health.EventEpoch},
 		}
 		rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
 		if rec.Code != http.StatusOK {
@@ -608,11 +1015,14 @@ func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 		}
 		var out struct {
 			Data struct {
-				WalletEffects []domain.ScannerEvent `json:"wallet_effects"`
+				WalletEffects []walletEffect `json:"wallet_effects"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || len(out.Data.WalletEffects) != 1001 {
 			t.Fatalf("effects=%d err=%v", len(out.Data.WalletEffects), err)
+		}
+		if strings.Contains(rec.Body.String(), `"payload"`) || strings.Contains(rec.Body.String(), "note_nullifier") || out.Data.WalletEffects[0].TxID != txid {
+			t.Fatalf("wallet effects were not sanitized: %s", rec.Body.String())
 		}
 	})
 	t.Run("configured cap", func(t *testing.T) {
@@ -620,8 +1030,8 @@ func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 		cfg.WalletEffectsMaxEvents = 2
 		service, node, scanner := newTestAPI(t, cfg)
 		node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
-		payload := walletEffectPayload("hot", txid)
-		scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1, Payload: payload}, {ID: 2, Payload: payload}, {ID: 3, Payload: payload}}, NextCursor: 3, EventEpoch: scanner.health.EventEpoch}}
+		payload := walletEffectPayload("DepositEvent", "hot", txid, 0)
+		scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Payload: payload}, {ID: 2, Kind: "DepositEvent", Payload: payload}, {ID: 3, Kind: "DepositEvent", Payload: payload}}, NextCursor: 3, EventEpoch: scanner.health.EventEpoch}}
 		rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
 		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "wallet_effects_limit_exceeded") {
 			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -629,11 +1039,120 @@ func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 	})
 }
 
+func TestWalletEffectSanitizerAcceptsEveryScannerLifecycleAndRemovesSecrets(t *testing.T) {
+	txid := strings.Repeat("a", 64)
+	for _, kind := range []string{
+		"DepositEvent", "DepositConfirmed", "DepositUnconfirmed", "DepositOrphaned",
+		"SpendEvent", "SpendConfirmed", "SpendUnconfirmed", "SpendOrphaned",
+		"OutgoingOutputEvent", "OutgoingOutputConfirmed", "OutgoingOutputUnconfirmed", "OutgoingOutputOrphaned", "OutgoingOutputExpired",
+	} {
+		t.Run(kind, func(t *testing.T) {
+			height := int64(100)
+			if kind == "DepositEvent" {
+				height = 90
+			}
+			if kind == "SpendEvent" || kind == "OutgoingOutputEvent" {
+				height = 0
+			}
+			event := domain.ScannerEvent{ID: 1, Kind: kind, Height: height, Payload: walletEffectPayload(kind, "hot", txid, height), CreatedAt: time.Unix(1, 0).UTC()}
+			effect, err := sanitizeWalletEffect(event, "hot", txid, "jregtest", 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(effect)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(raw, []byte("note_nullifier")) || bytes.Contains(raw, []byte(`"payload"`)) || effect.Kind != kind || effect.TxID != txid {
+				t.Fatalf("effect=%s", raw)
+			}
+			if strings.HasPrefix(kind, "Spend") && effect.SourceNote == nil {
+				t.Fatalf("spend source note was omitted: %s", raw)
+			}
+		})
+	}
+}
+
+func TestWalletEffectSanitizerRejectsUnconfirmedWithoutPriorFinality(t *testing.T) {
+	txid := strings.Repeat("a", 64)
+	for _, kind := range []string{"DepositUnconfirmed", "SpendUnconfirmed", "OutgoingOutputUnconfirmed"} {
+		t.Run(kind, func(t *testing.T) {
+			var payload map[string]any
+			if err := json.Unmarshal(walletEffectPayload(kind, "hot", txid, 100), &payload); err != nil {
+				t.Fatal(err)
+			}
+			payload["height"] = float64(99)
+			payload["previous_confirmed_height"] = float64(101)
+			payload["status"] = map[string]any{"state": "confirmed", "height": float64(99), "confirmations": float64(2)}
+			raw, _ := json.Marshal(payload)
+			_, err := sanitizeWalletEffect(domain.ScannerEvent{ID: 1, Kind: kind, Height: 100, Payload: raw}, "hot", txid, "jregtest", 100)
+			if err == nil || !domain.IsUpstreamKind(err, "invalid_response") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestWalletEffectSanitizerRejectsLifecycleFieldsOnOutgoingEvent(t *testing.T) {
+	txid := strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name        string
+		eventHeight int64
+		mutate      func(map[string]any)
+	}{
+		{
+			name:        "mempool event with confirmation marker",
+			eventHeight: 0,
+			mutate: func(payload map[string]any) {
+				payload["confirmed_height"] = float64(100)
+				payload["required_confirmations"] = float64(100)
+			},
+		},
+		{
+			name:        "mined event with rollback marker",
+			eventHeight: 90,
+			mutate: func(payload map[string]any) {
+				payload["height"] = float64(90)
+				payload["rollback_height"] = float64(90)
+				payload["previous_confirmed_height"] = float64(100)
+				payload["status"] = map[string]any{"state": "confirmed", "height": float64(90), "confirmations": float64(1)}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var payload map[string]any
+			if err := json.Unmarshal(walletEffectPayload("OutgoingOutputEvent", "hot", txid, 0), &payload); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(payload)
+			raw, _ := json.Marshal(payload)
+			_, err := sanitizeWalletEffect(domain.ScannerEvent{ID: 1, Kind: "OutgoingOutputEvent", Height: test.eventHeight, Payload: raw}, "hot", txid, "jregtest", 100)
+			if err == nil || !domain.IsUpstreamKind(err, "invalid_response") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestWalletEffectSanitizerRejectsUnknownPayloadFields(t *testing.T) {
+	txid := strings.Repeat("a", 64)
+	var payload map[string]any
+	if err := json.Unmarshal(walletEffectPayload("SpendEvent", "hot", txid, 0), &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["seed"] = "must-not-pass"
+	raw, _ := json.Marshal(payload)
+	_, err := sanitizeWalletEffect(domain.ScannerEvent{ID: 1, Kind: "SpendEvent", Payload: raw}, "hot", txid, "jregtest", 100)
+	if err == nil || !domain.IsUpstreamKind(err, "invalid_response") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestWalletTransactionEffectsRejectMismatchedIdentity(t *testing.T) {
 	txid := strings.Repeat("a", 64)
 	for name, payload := range map[string]json.RawMessage{
-		"wallet": walletEffectPayload("other", txid),
-		"txid":   walletEffectPayload("hot", strings.Repeat("b", 64)),
+		"wallet": walletEffectPayload("DepositEvent", "other", txid, 0),
+		"txid":   walletEffectPayload("DepositEvent", "hot", strings.Repeat("b", 64), 0),
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := testConfig(domain.Regtest)
@@ -652,27 +1171,24 @@ func TestWalletTransactionUsesLatestTerminalScannerState(t *testing.T) {
 	txid := strings.Repeat("a", 64)
 	for name, test := range map[string]struct {
 		kind       string
-		payload    string
 		state      string
 		extraCheck string
 	}{
 		"orphaned": {
-			kind:    "DepositOrphaned",
-			payload: `{"wallet_id":"hot","txid":"` + txid + `","height":90,"status":{"state":"orphaned"}}`,
-			state:   "orphaned",
+			kind:  "DepositOrphaned",
+			state: "orphaned",
 		},
 		"expired": {
 			kind:       "OutgoingOutputExpired",
-			payload:    `{"wallet_id":"hot","txid":"` + txid + `","expiry_height":90,"status":{"state":"expired"}}`,
 			state:      "expired",
-			extraCheck: `"expiry_height":90`,
+			extraCheck: `"expiry_height":99`,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := testConfig(domain.Regtest)
 			service, _, scanner := newTestAPI(t, cfg)
 			scanner.events = domain.EventsPage{
-				Events:     []domain.ScannerEvent{{ID: 1, Kind: test.kind, Payload: json.RawMessage(test.payload)}},
+				Events:     []domain.ScannerEvent{{ID: 1, Kind: test.kind, Height: 100, Payload: walletEffectPayload(test.kind, "hot", txid, 100)}},
 				NextCursor: 1,
 				EventEpoch: scanner.health.EventEpoch,
 			}
@@ -686,14 +1202,14 @@ func TestWalletTransactionUsesLatestTerminalScannerState(t *testing.T) {
 
 func TestWalletTransactionTerminalFallbackRequiresFinalValidLifecycleEvent(t *testing.T) {
 	txid := strings.Repeat("a", 64)
-	expired := json.RawMessage(`{"wallet_id":"hot","txid":"` + txid + `","expiry_height":90,"status":{"state":"expired"}}`)
+	expired := walletEffectPayload("OutgoingOutputExpired", "hot", txid, 100)
 	t.Run("later nonterminal event wins", func(t *testing.T) {
 		cfg := testConfig(domain.Regtest)
 		service, _, scanner := newTestAPI(t, cfg)
 		scanner.events = domain.EventsPage{
 			Events: []domain.ScannerEvent{
-				{ID: 1, Kind: "OutgoingOutputExpired", Payload: expired},
-				{ID: 2, Kind: "OutgoingOutputEvent", Payload: json.RawMessage(`{"wallet_id":"hot","txid":"` + txid + `","status":{"state":"mempool"}}`)},
+				{ID: 1, Kind: "OutgoingOutputExpired", Height: 100, Payload: expired},
+				{ID: 2, Kind: "OutgoingOutputEvent", Payload: walletEffectPayload("OutgoingOutputEvent", "hot", txid, 0)},
 			},
 			NextCursor: 2,
 			EventEpoch: scanner.health.EventEpoch,
@@ -707,7 +1223,7 @@ func TestWalletTransactionTerminalFallbackRequiresFinalValidLifecycleEvent(t *te
 		cfg := testConfig(domain.Regtest)
 		service, _, scanner := newTestAPI(t, cfg)
 		scanner.events = domain.EventsPage{
-			Events:     []domain.ScannerEvent{{ID: 1, Kind: "OutgoingOutputExpired", Payload: json.RawMessage(`{"wallet_id":"hot","txid":"` + txid + `","expiry_height":90,"status":{"state":"mempool"}}`)}},
+			Events:     []domain.ScannerEvent{{ID: 1, Kind: "OutgoingOutputExpired", Height: 100, Payload: json.RawMessage(`{"version":"v1","wallet_id":"hot","txid":"` + txid + `","action_index":1,"amount_zatoshis":10,"recipient_address":"jregtest1recipient","ovk_scope":"external","expiry_height":99,"status":{"state":"mempool"}}`)}},
 			NextCursor: 1,
 			EventEpoch: scanner.health.EventEpoch,
 		}
@@ -725,7 +1241,7 @@ func TestRejectedBroadcastIsPersistedForIdempotentReplay(t *testing.T) {
 	txid := strings.Repeat("d", 64)
 	node.broadcastErr = &domain.UpstreamError{Kind: "rejected", Err: io.EOF}
 	node.decodedTxID = txid
-	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
 	headers := map[string]string{"Idempotency-Key": "withdrawal-rejected"}
 	first := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
 	second := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
@@ -741,7 +1257,7 @@ func TestAlreadyKnownBroadcastIsSuccessfulAndPersisted(t *testing.T) {
 	txid := strings.Repeat("e", 64)
 	node.broadcastErr = &domain.UpstreamError{Kind: "already_known", Err: io.EOF}
 	node.decodedTxID = txid
-	body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+	body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
 	headers := map[string]string{"Idempotency-Key": "withdrawal-already-known"}
 	first := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
 	second := request(t, handler, http.MethodPost, "/v1/transactions/broadcast", body, headers)
@@ -763,7 +1279,7 @@ func TestAmbiguousBroadcastFailuresRemainRetryable(t *testing.T) {
 			node.decodedTxID = txid
 			node.transactionErr = &domain.UpstreamError{Kind: "unavailable", Err: io.EOF}
 			node.broadcastErr = &domain.UpstreamError{Kind: kind, Err: io.EOF}
-			body := `{"raw_tx_hex":"00","expected_txid":"` + txid + `"}`
+			body := `{"wallet_id":"hot","raw_tx_hex":"00","expected_txid":"` + txid + `"}`
 			headers := map[string]string{"Idempotency-Key": "withdrawal-retryable-" + kind}
 			for attempt := 0; attempt < 2; attempt++ {
 				rec := request(t, service.Handler(), http.MethodPost, "/v1/transactions/broadcast", body, headers)
@@ -792,9 +1308,15 @@ func TestProductionAuthProtectsVersionAndWalletAuthorization(t *testing.T) {
 	cfg := testConfig(domain.Mainnet)
 	cfg.Wallets = append(cfg.Wallets, config.Wallet{WalletID: "cold", UFVK: "jview1cold"})
 	token := "012345678901234567890123"
+	withdrawalToken := "withdrawal-reader-token-24"
 	hash := sha256.Sum256([]byte(token))
-	cfg.Credentials = []config.Credential{{Name: "exchange", TokenHash: hash, Scopes: []string{"read"}, Wallets: []string{"hot"}}}
-	service, _, _ := newTestAPI(t, cfg)
+	withdrawalHash := sha256.Sum256([]byte(withdrawalToken))
+	cfg.Credentials = []config.Credential{
+		{Name: "exchange", TokenHash: hash, Scopes: []string{"read"}, Wallets: []string{"hot"}},
+		{Name: "withdrawal-reader", TokenHash: withdrawalHash, Scopes: []string{"read", "withdrawal"}, Wallets: []string{"hot"}},
+	}
+	service, node, scanner := newTestAPI(t, cfg)
+	scanner.events.EventEpoch = scanner.health.EventEpoch
 	handler := service.Handler()
 	if rec := request(t, handler, http.MethodGet, "/v1/health/live", ``, nil); rec.Code != http.StatusOK {
 		t.Fatalf("liveness=%d", rec.Code)
@@ -811,6 +1333,15 @@ func TestProductionAuthProtectsVersionAndWalletAuthorization(t *testing.T) {
 	}
 	if rec := request(t, handler, http.MethodPost, "/v1/wallets/hot/addresses", `{"label":"x"}`, headers); rec.Code != http.StatusForbidden {
 		t.Fatalf("read token allocated address status=%d", rec.Code)
+	}
+	txid := strings.Repeat("a", 64)
+	node.transactions[txid] = domain.Transaction{TxID: txid, State: "mempool"}
+	if rec := request(t, handler, http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, headers); rec.Code != http.StatusForbidden {
+		t.Fatalf("read token enriched transaction status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	withdrawalHeaders := map[string]string{"Authorization": "Bearer " + withdrawalToken}
+	if rec := request(t, handler, http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, withdrawalHeaders); rec.Code != http.StatusOK {
+		t.Fatalf("withdrawal token status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -905,21 +1436,65 @@ func TestNetworkTipRejectsInvalidStructureButReportsInitialSync(t *testing.T) {
 	}
 }
 
-func TestReadinessUsesNodeLagAndMatchesScannedBlockHash(t *testing.T) {
+func TestReadinessRequiresScannerLagMatchAndScannedBlockHash(t *testing.T) {
 	cfg := testConfig(domain.Regtest)
 	service, node, scanner := newTestAPI(t, cfg)
 	handler := service.Handler()
 	bogusLag := int64(999999)
 	scanner.health.ScannerLag = &bogusLag
-	if rec := request(t, handler, http.MethodGet, "/v1/health/ready", ``, nil); rec.Code != http.StatusOK {
-		t.Fatalf("scanner-reported lag affected readiness: status=%d body=%s", rec.Code, rec.Body.String())
+	if rec := request(t, handler, http.MethodGet, "/v1/health/ready", ``, nil); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+		t.Fatalf("scanner lag mismatch status=%d body=%s", rec.Code, rec.Body.String())
 	}
+	validLag := int64(0)
+	scanner.health.ScannerLag = &validLag
 	scanner.health.ScannedHash = strings.Repeat("a", 64)
 	if rec := request(t, handler, http.MethodGet, "/v1/health/ready", ``, nil); rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
 		t.Fatalf("hash mismatch status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if node.blockHashCalls < 2 {
 		t.Fatalf("getblockhash calls=%d", node.blockHashCalls)
+	}
+}
+
+func TestReadinessRequiresScannerReadyAndLagFields(t *testing.T) {
+	for name, mutate := range map[string]func(*domain.ScannerHealth){
+		"missing ready": func(health *domain.ScannerHealth) { health.Ready = nil },
+		"false ready": func(health *domain.ScannerHealth) {
+			ready := false
+			health.Ready = &ready
+		},
+		"missing lag":  func(health *domain.ScannerHealth) { health.ScannerLag = nil },
+		"negative lag": func(health *domain.ScannerHealth) { lag := int64(-1); health.ScannerLag = &lag },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			mutate(&scanner.health)
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/health/ready", ``, nil)
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestReadinessRequiresCompleteHistoryAttestation(t *testing.T) {
+	for name, mutate := range map[string]func(*domain.ScannerHealth){
+		"missing history attestation": func(health *domain.ScannerHealth) { health.HistoryComplete = nil },
+		"incomplete history": func(health *domain.ScannerHealth) {
+			complete := false
+			health.HistoryComplete = &complete
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			mutate(&scanner.health)
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/health/ready", ``, nil)
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

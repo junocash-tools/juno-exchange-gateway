@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,7 @@ func validConfig(network domain.Network) Config {
 		HTTPReadHeaderTimeout: time.Second, HTTPReadTimeout: 2 * time.Second, HTTPWriteTimeout: 2 * time.Second, HTTPIdleTimeout: time.Second,
 		BackfillBatchSize: 10000, BackfillYield: time.Millisecond, BackfillTimeout: time.Second,
 		WalletEffectsMaxEvents: 10000,
+		NoteSummaryMaxNotes:    100000,
 		ReadRate:               RateLimit{RPS: 1, Burst: 1}, BroadcastRate: RateLimit{RPS: 1, Burst: 1},
 	}
 }
@@ -55,6 +57,29 @@ func TestValidateRejectsDuplicateUFVKs(t *testing.T) {
 	cfg.Wallets = append(cfg.Wallets, Wallet{WalletID: "cold", UFVK: cfg.Wallets[0].UFVK})
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected duplicate UFVK rejection")
+	}
+}
+
+func TestValidateRejectsDuplicateCredentialTokenHashes(t *testing.T) {
+	for _, useHash := range []bool{false, true} {
+		name := "plaintext"
+		if useHash {
+			name = "mixed plaintext and hash"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig(domain.Mainnet)
+			sharedToken := cfg.Credentials[0].Token
+			duplicate := Credential{Name: "second", Token: sharedToken, Scopes: []string{"broadcast"}, Wallets: []string{"hot"}}
+			if useHash {
+				sum := sha256.Sum256([]byte(sharedToken))
+				duplicate.Token = ""
+				duplicate.TokenSHA256 = hex.EncodeToString(sum[:])
+			}
+			cfg.Credentials = append(cfg.Credentials, duplicate)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reuses the bearer token") {
+				t.Fatalf("duplicate token error=%v", err)
+			}
+		})
 	}
 }
 
@@ -78,6 +103,27 @@ func TestValidateSupportsAllNetworks(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestValidateAcceptsWithdrawalScopeAndCapsConfirmationOverride(t *testing.T) {
+	cfg := validConfig(domain.Mainnet)
+	cfg.Credentials[0].Scopes = []string{"read", "withdrawal"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg = validConfig(domain.Mainnet)
+	cfg.MaxConfirmations = maxConfirmationsLimit + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "confirmation bounds") {
+		t.Fatalf("confirmation ceiling error=%v", err)
+	}
+}
+
+func TestValidateEnvironmentRejectsInvalidNoteSummaryCap(t *testing.T) {
+	t.Setenv("JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES", "not-an-integer")
+	if err := validateEnvironment(); err == nil || !strings.Contains(err.Error(), "JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES") {
+		t.Fatalf("note summary cap error=%v", err)
 	}
 }
 
@@ -119,6 +165,15 @@ func TestValidateRejectsExampleProductionCredentials(t *testing.T) {
 	cfg.Credentials = nil
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("isolated regtest defaults should remain usable: %v", err)
+	}
+}
+
+func TestValidateRejectsRepeatedDigitExampleTokenHashes(t *testing.T) {
+	cfg := validConfig(domain.Mainnet)
+	cfg.Credentials[0].Token = ""
+	cfg.Credentials[0].TokenSHA256 = strings.Repeat("1", sha256.Size*2)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "example token hash") {
+		t.Fatalf("example hash error=%v", err)
 	}
 }
 

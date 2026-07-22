@@ -16,7 +16,7 @@ tags:
   - name: Network
     description: Validated node and scanner chain state.
   - name: Wallets
-    description: Registered-wallet addresses, balances, and deposit events.
+    description: Registered-wallet addresses, balances, aggregate note liquidity, and deposit events.
   - name: Transactions
     description: Signed transaction broadcast and lifecycle lookup.
 paths:
@@ -41,7 +41,7 @@ paths:
       tags: [Health]
       summary: Financial-read readiness
       x-required-scope: read
-      description: Fails closed if the node is syncing or on another network, scanner history is incomplete, the scanner network/HRP differs, the scanner block hash does not match this gateway's node, node-derived scanner lag exceeds the configured maximum, or gateway state is unavailable.
+      description: Fails closed if the node is syncing or on another network, scanner `ready` is absent or false, required scanner `history_complete` attestation is absent or false, the scanner network/HRP differs, the scanner block hash does not match this gateway's node, scanner-reported lag differs from the gateway's node-derived lag, node-derived scanner lag exceeds the configured maximum, or gateway state is unavailable.
       responses:
         "200":
           description: Financial reads are safe.
@@ -53,7 +53,7 @@ paths:
                 data:
                   network: mainnet
                   node: { network: main, height: 920000, hash: "0000000000000000000000000000000000000000000000000000000000000001", block_time: 1784631000, headers: 920000, initial_sync: false, verification_progress: 1 }
-                  scanner: { status: ok, ready: true, network: mainnet, ua_hrp: j, confirmations: 100, event_epoch: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, scanned_height: 920000, scanned_hash: "0000000000000000000000000000000000000000000000000000000000000001", scanner_lag: 0 }
+                  scanner: { status: ok, ready: true, history_complete: true, network: mainnet, ua_hrp: j, confirmations: 100, event_epoch: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, scanned_height: 920000, scanned_hash: "0000000000000000000000000000000000000000000000000000000000000001", scanner_lag: 0 }
                   scanner_lag: 0
                   max_scanner_lag: 2
                 request_id: req_018f
@@ -176,6 +176,75 @@ paths:
               example: { status: error, error: { code: not_found, message: address is not registered to this wallet, retryable: false, details: {} }, request_id: req_018f }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/NotReady" }
+  /v1/wallets/{wallet_id}/notes/summary:
+    get:
+      operationId: getWalletNoteSummary
+      tags: [Wallets]
+      summary: Aggregate wallet note liquidity
+      x-required-scope: treasury
+      description: |
+        Returns counts and zatoshi totals for unspent incoming notes without exposing note IDs,
+        nullifiers, memos, or recipient addresses. The five operational buckets partition
+        `total_unspent` without overlap. Each note enters the first matching bucket in this order:
+        `pending_spend`, `immature`, `witness_unavailable`, `below_min_note`, then `spendable`.
+        `spendable` means eligible for planner consideration at this
+        confirmation and minimum-note policy; it does not account for a requested amount, fee,
+        the 200-input signer ceiling, or an exchange-side reservation. Scanner pending state begins
+        only after a transaction is observed in the node mempool. Use this endpoint for liquidity
+        and consolidation monitoring, never as a note lock or withdrawal authorization.
+      parameters:
+        - $ref: "#/components/parameters/WalletID"
+        - $ref: "#/components/parameters/MinConfirmations"
+        - name: min_note_zat
+          in: query
+          description: Mature, non-pending notes below this value are counted in `below_min_note`. Zero-value notes are always excluded from `spendable`.
+          schema: { type: integer, format: int64, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: A complete aggregate from one atomic scanner database snapshot, bounded by one stable scanner height, hash, and event epoch.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NoteSummaryResponse" }
+              example:
+                status: ok
+                data:
+                  wallet_id: hot
+                  min_confirmations: 100
+                  min_note_zat: 100001
+                  as_of_node_height: 920000
+                  as_of_scanner_height: 920000
+                  as_of_scanner_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+                  scanner_lag: 0
+                  total_unspent: { note_count: 87, value_zat: 42000000000 }
+                  spendable: { note_count: 63, value_zat: 39000000000, smallest_note_zat: 150000, largest_note_zat: 4000000000 }
+                  immature: { note_count: 8, value_zat: 1200000000 }
+                  pending_spend: { note_count: 4, value_zat: 1500000000, known_expiry_count: 4, next_expiry_height: 920035, last_expiry_height: 920039 }
+                  below_min_note: { note_count: 12, value_zat: 300000000 }
+                  witness_unavailable: { note_count: 0, value_zat: 0 }
+                request_id: req_018f
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: The credential lacks `treasury`/`admin` scope or wallet authorization.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Scanner height, hash, or event epoch changed around the atomic aggregate; retry the whole request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { status: error, error: { code: scanner_snapshot_changed, message: "scanner snapshot changed while summarizing notes; retry", retryable: true, details: {} }, request_id: req_018f }
+        "422":
+          description: The inventory exceeds `JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES`; the gateway never returns a truncated financial summary.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { status: error, error: { code: note_summary_limit_exceeded, message: wallet note inventory exceeds the configured summary cap, retryable: false, details: { max_notes: 100000 } }, request_id: req_018f }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "502":
+          description: Scanner returned a malformed or internally inconsistent aggregate; no partial result is returned.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
+        "503": { $ref: "#/components/responses/NotReady" }
   /v1/wallets/{wallet_id}/deposits:
     get:
       operationId: listWalletDeposits
@@ -230,6 +299,12 @@ paths:
                 epoch_reset: { value: { status: error, error: { code: cursor_reset_required, message: scanner event history was reset; restart without a cursor and idempotently replay deposits, retryable: false, details: { action: restart_without_cursor, event_epoch: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb } }, request_id: req_018f } }
                 filter_mismatch: { value: { status: error, error: { code: cursor_filter_mismatch, message: cursor was created for different deposit filters, retryable: false, details: { action: restart_without_cursor_or_restore_filters } }, request_id: req_018f } }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "502":
+          description: Scanner returned a malformed or internally inconsistent deposit lifecycle event; the page and cursor are not returned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { status: error, error: { code: scanner_not_ready, message: scanner returned an invalid deposit event, retryable: true, details: {} }, request_id: req_018f }
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/transactions/{txid}:
     get:
@@ -242,7 +317,7 @@ paths:
         - name: wallet_id
           in: query
           schema: { $ref: "#/components/schemas/WalletID" }
-          description: Adds all scanner effects only when the credential is authorized for this wallet. If the node no longer has the transaction, the final valid wallet lifecycle event can supply `orphaned` or `expired` state. Returns `wallet_effects_limit_exceeded` instead of truncating above the configured safety cap.
+          description: Requires the additional `withdrawal` scope and wallet grant. Adds sanitized, typed scanner effects without nullifiers or raw scanner payloads. If the node no longer has the transaction, the final valid wallet lifecycle event can supply `orphaned` or `expired` state. Returns `wallet_effects_limit_exceeded` instead of truncating above the configured safety cap.
         - name: include_raw
           in: query
           schema: { type: boolean, default: false }
@@ -253,11 +328,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TransactionResponse" }
-              example: { status: ok, data: { transaction: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, confirmations: 101, block_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, block_height: 919900, block_time: 1784630000, expiry_height: 920100, serialized_size: 2048, orchard_action_count: 2 } }, request_id: req_018f }
+              example: { status: ok, data: { transaction: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, confirmations: 101, block_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, block_height: 919900, block_time: 1784630000, expiry_height: 920100, serialized_size: 2048, orchard_action_count: 2 }, wallet_id: hot, wallet_effects: [{ event_id: 81, kind: OutgoingOutputConfirmed, observed_height: 920000, observed_at: "2026-07-21T12:00:00Z", wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, block_height: 919901, confirmations: 100, required_confirmations: 100, confirmed_height: 920000, action_index: 0, amount_zat: 100000000, address: j1recipient, ovk_scope: external, recipient_scope: external }] }, request_id: req_018f }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
-          description: Missing `read`/`raw` scope or wallet authorization.
+          description: Missing `read`, conditional `raw`, conditional `withdrawal`, or wallet authorization.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -278,7 +353,7 @@ paths:
       tags: [Transactions]
       summary: Broadcast an already signed raw transaction
       x-required-scope: broadcast
-      description: Never waits for confirmations. The gateway validates request shape and claims or replays durable idempotency state before contacting the node, so a completed receipt can replay during a node outage. A newly acquired claim must then pass node readiness, raw-transaction decoding, and `expected_txid` verification before lookup or broadcast; pre-broadcast failures abandon the claim. No planning, recipient, amount, fee, seed, key, or signing fields are accepted. Keep the idempotency key stable across uncertain retries.
+      description: Never waits for confirmations. `wallet_id` is required for credential authorization and audit binding; it does not make the gateway plan or sign. The gateway validates request shape and claims or replays durable idempotency state before contacting the node, so a completed receipt can replay during a node outage and never triggers another node submission. A newly acquired claim must then pass node readiness, raw-transaction decoding, and `expected_txid` verification before lookup or broadcast; pre-broadcast failures abandon the claim. A lookup short-circuits only when the transaction is in the mempool or active chain; a newly claimed operation resubmits orphaned raw bytes to the node. Keep the same key for every uncertain retry. Only after the original operation is known complete, lookup has reconciled the same txid as orphaned or absent, and canonical height remains strictly below its expiry may the exchange submit the identical signed bytes under a fresh rebroadcast-operation key. No planning, recipient, amount, fee, seed, key, or signing fields are accepted. Never reuse a key for another wallet or transaction.
       parameters:
         - name: Idempotency-Key
           in: header
@@ -289,34 +364,39 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/BroadcastRequest" }
-            example: { raw_tx_hex: "0400008085202f8901", expected_txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa }
+            example: { wallet_id: hot, raw_tx_hex: "0400008085202f8901", expected_txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa }
       responses:
         "202":
           description: Newly accepted by the node.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BroadcastResponse" }
-              example: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: true, already_known: false }, request_id: req_018f }
+              example: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: true, already_known: false }, request_id: req_018f }
         "200":
-          description: Idempotent replay or already-known transaction.
+          description: Idempotent replay or already-known transaction. A replay returns the stored operation result; use transaction lookup for current chain state.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BroadcastResponse" }
               examples:
-                replay: { summary: Idempotent replay of a previously accepted transaction, value: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: false, already_known: true }, request_id: req_018f } }
-                existing: { summary: Transaction found by the node, value: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, accepted: false, already_known: true }, request_id: req_018f } }
-                already_known: { summary: Node reports the transaction as known before a concrete state is available, value: { status: ok, data: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: known, accepted: false, already_known: true }, request_id: req_018f } }
+                replay: { summary: Idempotent replay of a previously accepted transaction, value: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: false, already_known: true }, request_id: req_018f } }
+                existing: { summary: Transaction found by the node, value: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, accepted: false, already_known: true }, request_id: req_018f } }
+                already_known: { summary: Node reports the transaction as known before a concrete state is available, value: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: known, accepted: false, already_known: true }, request_id: req_018f } }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: Key conflict or an identical request is currently being resolved.
+          headers:
+            Retry-After:
+              description: Seconds before retrying `idempotency_in_progress`; omitted for a payload conflict.
+              schema: { type: integer, minimum: 1 }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
               examples:
                 conflict: { value: { status: error, error: { code: idempotency_conflict, message: idempotency key was used with a different payload, retryable: false, details: {} }, request_id: req_018f } }
-                processing: { value: { status: error, error: { code: idempotency_in_progress, message: an identical broadcast is still being resolved, retryable: true, details: {} }, request_id: req_018f } }
+                processing: { value: { status: error, error: { code: idempotency_in_progress, message: an identical broadcast is still being resolved, retryable: true, details: { retry_after_seconds: 30 } }, request_id: req_018f } }
         "413":
           description: Request exceeds the configured broadcast body limit.
           content:
@@ -437,13 +517,13 @@ components:
         ua_hrp: { type: string, enum: [j, jtest, jregtest] }
         confirmations: { type: integer, format: int64, minimum: 1 }
         event_epoch: { type: string, pattern: "^[0-9a-f]{64}$" }
-        ready: { type: boolean }
+        ready: { type: boolean, const: true }
         node_height: { type: integer, format: int64 }
-        scanned_height: { type: integer, format: int64 }
+        scanned_height: { type: integer, format: int64, minimum: 0 }
         scanned_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
-        scanner_lag: { type: integer, format: int64 }
+        scanner_lag: { type: integer, format: int64, minimum: 0 }
         max_ready_lag: { type: integer, format: int64 }
-        history_complete: { type: boolean }
+        history_complete: { type: boolean, description: Required and true for readiness when `JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY` is enabled. }
     ReadyResponse:
       type: object
       required: [status, data, request_id]
@@ -456,8 +536,8 @@ components:
             network: { type: string, enum: [mainnet, testnet, regtest] }
             node: { $ref: "#/components/schemas/NodeTip" }
             scanner: { $ref: "#/components/schemas/ScannerHealth" }
-            scanner_lag: { type: integer, format: int64 }
-            max_scanner_lag: { type: integer, format: int64 }
+            scanner_lag: { type: integer, format: int64, minimum: 0 }
+            max_scanner_lag: { type: integer, format: int64, minimum: 0 }
         request_id: { type: string }
     BuildInfo:
       type: object
@@ -526,6 +606,57 @@ components:
       type: object
       required: [status, data, request_id]
       properties: { status: { const: ok }, data: { type: object, required: [wallet_id, address, balance], properties: { wallet_id: { $ref: "#/components/schemas/WalletID" }, address: { type: string }, balance: { $ref: "#/components/schemas/Balance" } } }, request_id: { type: string } }
+    NoteValueBucket:
+      type: object
+      additionalProperties: false
+      required: [note_count, value_zat]
+      properties:
+        note_count: { type: integer, format: int64, minimum: 0 }
+        value_zat: { type: integer, format: int64, minimum: 0 }
+    SpendableNoteBucket:
+      type: object
+      additionalProperties: false
+      required: [note_count, value_zat]
+      properties:
+        note_count: { type: integer, format: int64, minimum: 0 }
+        value_zat: { type: integer, format: int64, minimum: 0 }
+        smallest_note_zat: { type: integer, format: int64, minimum: 0 }
+        largest_note_zat: { type: integer, format: int64, minimum: 0 }
+    PendingSpendBucket:
+      type: object
+      additionalProperties: false
+      required: [note_count, value_zat, known_expiry_count]
+      properties:
+        note_count: { type: integer, format: int64, minimum: 0 }
+        value_zat: { type: integer, format: int64, minimum: 0 }
+        known_expiry_count: { type: integer, format: int64, minimum: 0 }
+        next_expiry_height: { type: integer, format: int64, minimum: 0 }
+        last_expiry_height: { type: integer, format: int64, minimum: 0 }
+    NoteSummary:
+      type: object
+      additionalProperties: false
+      required: [wallet_id, min_confirmations, min_note_zat, as_of_node_height, as_of_scanner_height, as_of_scanner_hash, scanner_lag, total_unspent, spendable, immature, pending_spend, below_min_note, witness_unavailable]
+      properties:
+        wallet_id: { $ref: "#/components/schemas/WalletID" }
+        min_confirmations: { type: integer, format: int64, minimum: 0 }
+        min_note_zat: { type: integer, format: int64, minimum: 0 }
+        as_of_node_height: { type: integer, format: int64, minimum: 0 }
+        as_of_scanner_height: { type: integer, format: int64, minimum: 0 }
+        as_of_scanner_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        scanner_lag: { type: integer, format: int64, minimum: 0 }
+        total_unspent: { $ref: "#/components/schemas/NoteValueBucket" }
+        spendable: { $ref: "#/components/schemas/SpendableNoteBucket" }
+        immature: { $ref: "#/components/schemas/NoteValueBucket" }
+        pending_spend: { $ref: "#/components/schemas/PendingSpendBucket" }
+        below_min_note: { $ref: "#/components/schemas/NoteValueBucket" }
+        witness_unavailable: { $ref: "#/components/schemas/NoteValueBucket" }
+    NoteSummaryResponse:
+      type: object
+      required: [status, data, request_id]
+      properties:
+        status: { const: ok }
+        data: { $ref: "#/components/schemas/NoteSummary" }
+        request_id: { type: string }
     Deposit:
       type: object
       required: [deposit_id, event_id, wallet_id, txid, action_index, address, diversifier_index, amount_zat, status, block_height, observed_at]
@@ -567,15 +698,55 @@ components:
         serialized_size: { type: integer, format: int64, minimum: 0 }
         orchard_action_count: { type: integer, format: int64, minimum: 0 }
         raw_tx_hex: { type: string, pattern: "^[0-9a-f]*$" }
+    WalletEffectSourceNote:
+      type: object
+      additionalProperties: false
+      required: [txid, action_index, block_height]
+      properties:
+        txid: { $ref: "#/components/schemas/TxID" }
+        action_index: { type: integer, minimum: 0, maximum: 4294967295 }
+        block_height: { type: integer, format: int64, minimum: 0 }
+    WalletEffect:
+      type: object
+      additionalProperties: false
+      required: [event_id, kind, observed_height, observed_at, wallet_id, txid, state]
+      description: Sanitized wallet lifecycle projection. Scanner nullifiers and the raw scanner payload are never exposed. Optional fields are present only when meaningful for the event kind.
+      properties:
+        event_id: { type: integer, format: int64, minimum: 1, description: Orders effects in the current scanner history; it is not stable across scanner event-epoch resets. }
+        kind:
+          type: string
+          enum: [DepositEvent, DepositConfirmed, DepositUnconfirmed, DepositOrphaned, SpendEvent, SpendConfirmed, SpendUnconfirmed, SpendOrphaned, OutgoingOutputEvent, OutgoingOutputConfirmed, OutgoingOutputUnconfirmed, OutgoingOutputOrphaned, OutgoingOutputExpired]
+        observed_height: { type: integer, format: int64, minimum: 0, description: Scanner height at which this lifecycle event was emitted. }
+        observed_at: { type: string, format: date-time }
+        wallet_id: { $ref: "#/components/schemas/WalletID" }
+        txid: { $ref: "#/components/schemas/TxID" }
+        state: { type: string, enum: [mempool, confirmed, orphaned, expired] }
+        block_height: { type: integer, format: int64, minimum: 0 }
+        confirmations: { type: integer, format: int64, minimum: 0 }
+        required_confirmations: { type: integer, format: int64, minimum: 1, maximum: 10000 }
+        confirmed_height: { type: integer, format: int64, minimum: 0 }
+        rollback_height: { type: integer, format: int64, minimum: 0 }
+        previous_confirmed_height: { type: integer, format: int64, minimum: 0 }
+        orphaned_at_height: { type: integer, format: int64, minimum: 0 }
+        expiry_height: { type: integer, format: int64, minimum: 0 }
+        action_index: { type: integer, minimum: 0, maximum: 4294967295 }
+        amount_zat: { type: integer, format: int64, minimum: 0 }
+        address: { type: string }
+        diversifier_index: { type: integer, minimum: 0, maximum: 4294967295 }
+        memo_hex: { type: string, pattern: "^(?:[0-9a-f]{2})*$", maxLength: 1024 }
+        ovk_scope: { type: string, enum: [external, internal] }
+        recipient_scope: { type: string, enum: [external, internal] }
+        source_note: { $ref: "#/components/schemas/WalletEffectSourceNote" }
     TransactionResponse:
       type: object
       required: [status, data, request_id]
-      properties: { status: { const: ok }, data: { type: object, required: [transaction], properties: { transaction: { $ref: "#/components/schemas/Transaction" }, wallet_id: { $ref: "#/components/schemas/WalletID" }, wallet_effects: { type: array, items: { type: object } } } }, request_id: { type: string } }
+      properties: { status: { const: ok }, data: { type: object, required: [transaction], properties: { transaction: { $ref: "#/components/schemas/Transaction" }, wallet_id: { $ref: "#/components/schemas/WalletID" }, wallet_effects: { type: array, items: { $ref: "#/components/schemas/WalletEffect" } } } }, request_id: { type: string } }
     BroadcastRequest:
       type: object
       additionalProperties: false
-      required: [raw_tx_hex, expected_txid]
+      required: [wallet_id, raw_tx_hex, expected_txid]
       properties:
+        wallet_id: { $ref: "#/components/schemas/WalletID", description: Registered wallet used for principal authorization, audit binding, and idempotency payload identity. }
         raw_tx_hex: { type: string, pattern: "^(?:[0-9a-f]{2})+$" }
         expected_txid: { $ref: "#/components/schemas/TxID" }
     BroadcastResponse:
@@ -585,8 +756,9 @@ components:
         status: { const: ok }
         data:
           type: object
-          required: [txid, state, accepted, already_known]
+          required: [wallet_id, txid, state, accepted, already_known]
           properties:
+            wallet_id: { $ref: "#/components/schemas/WalletID" }
             txid: { $ref: "#/components/schemas/TxID" }
             state: { type: string, enum: [mempool, confirmed, known], description: "`known` means the node reported the transaction as already known but a concrete mempool or confirmed state was unavailable." }
             accepted: { type: boolean, description: True only when the node newly accepted the transaction during this HTTP request. }

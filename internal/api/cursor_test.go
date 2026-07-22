@@ -43,3 +43,14 @@ func TestLegacySignedCursorRequiresExplicitReset(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestCursorFromDifferentSigningKeyIsInvalid(t *testing.T) {
+	oldCodec := cursorCodec{key: []byte("01234567890123456789012345678901")}
+	newCodec := cursorCodec{key: []byte("abcdefghijklmnopqrstuvwxyzABCDEF")}
+	epoch := strings.Repeat("a", 64)
+	filter := strings.Repeat("b", 64)
+	raw := oldCodec.encode("hot", epoch, filter, 7)
+	if _, err := newCodec.decode(raw, "hot", epoch, filter); err == nil || errors.Is(err, errCursorResetRequired) {
+		t.Fatalf("err=%v", err)
+	}
+}

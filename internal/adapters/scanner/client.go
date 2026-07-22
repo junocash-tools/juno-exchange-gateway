@@ -172,6 +172,123 @@ func (c *Client) Balance(ctx context.Context, walletID, address string, confirma
 	return out, true, nil
 }
 
+type requiredNullableInt64 struct {
+	set   bool
+	value *int64
+}
+
+func (v *requiredNullableInt64) UnmarshalJSON(raw []byte) error {
+	v.set = true
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		v.value = nil
+		return nil
+	}
+	var value int64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	v.value = &value
+	return nil
+}
+
+type rawNoteValueSummary struct {
+	NoteCount *int64 `json:"note_count"`
+	ValueZat  *int64 `json:"value_zat"`
+}
+
+type rawSpendableNoteSummary struct {
+	NoteCount       *int64                `json:"note_count"`
+	ValueZat        *int64                `json:"value_zat"`
+	SmallestNoteZat requiredNullableInt64 `json:"smallest_note_zat"`
+	LargestNoteZat  requiredNullableInt64 `json:"largest_note_zat"`
+}
+
+type rawPendingSpendNoteSummary struct {
+	NoteCount        *int64                `json:"note_count"`
+	ValueZat         *int64                `json:"value_zat"`
+	KnownExpiryCount *int64                `json:"known_expiry_count"`
+	NextExpiryHeight requiredNullableInt64 `json:"next_expiry_height"`
+	LastExpiryHeight requiredNullableInt64 `json:"last_expiry_height"`
+}
+
+type rawWalletNoteSummary struct {
+	WalletID           *string                     `json:"wallet_id"`
+	MinConfirmations   *int64                      `json:"min_confirmations"`
+	MinNoteZat         *int64                      `json:"min_note_zat"`
+	AsOfScannerHeight  *int64                      `json:"as_of_scanner_height"`
+	AsOfScannerHash    *string                     `json:"as_of_scanner_hash"`
+	TotalUnspent       *rawNoteValueSummary        `json:"total_unspent"`
+	Spendable          *rawSpendableNoteSummary    `json:"spendable"`
+	Immature           *rawNoteValueSummary        `json:"immature"`
+	PendingSpend       *rawPendingSpendNoteSummary `json:"pending_spend"`
+	BelowMinNote       *rawNoteValueSummary        `json:"below_min_note"`
+	WitnessUnavailable *rawNoteValueSummary        `json:"witness_unavailable"`
+}
+
+func (c *Client) NoteSummary(ctx context.Context, walletID string, minConfirmations, minNoteZat int64, maxNotes int) (domain.WalletNoteSummary, bool, error) {
+	q := url.Values{}
+	q.Set("min_confirmations", strconv.FormatInt(minConfirmations, 10))
+	q.Set("min_note_zat", strconv.FormatInt(minNoteZat, 10))
+	q.Set("max_notes", strconv.Itoa(maxNotes))
+	path := "/v1/wallets/" + url.PathEscape(walletID) + "/notes/summary?" + q.Encode()
+	var raw *rawWalletNoteSummary
+	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+		var he *httpError
+		if errors.As(err, &he) && he.status == http.StatusNotFound {
+			return domain.WalletNoteSummary{}, false, nil
+		}
+		if errors.As(err, &he) && he.status == http.StatusUnprocessableEntity {
+			return domain.WalletNoteSummary{}, false, domain.ErrNoteSummaryLimitExceeded
+		}
+		return domain.WalletNoteSummary{}, false, err
+	}
+	if raw == nil || raw.WalletID == nil || raw.MinConfirmations == nil || raw.MinNoteZat == nil || raw.AsOfScannerHeight == nil || raw.AsOfScannerHash == nil ||
+		raw.TotalUnspent == nil || raw.Spendable == nil || raw.Immature == nil || raw.PendingSpend == nil || raw.BelowMinNote == nil || raw.WitnessUnavailable == nil ||
+		!completeRawNoteValue(raw.TotalUnspent) || !completeRawNoteValue(raw.Immature) || !completeRawNoteValue(raw.BelowMinNote) || !completeRawNoteValue(raw.WitnessUnavailable) ||
+		raw.Spendable.NoteCount == nil || raw.Spendable.ValueZat == nil || !raw.Spendable.SmallestNoteZat.set || !raw.Spendable.LargestNoteZat.set ||
+		raw.PendingSpend.NoteCount == nil || raw.PendingSpend.ValueZat == nil || raw.PendingSpend.KnownExpiryCount == nil || !raw.PendingSpend.NextExpiryHeight.set || !raw.PendingSpend.LastExpiryHeight.set {
+		return domain.WalletNoteSummary{}, false, invalidNoteSummaryResponse()
+	}
+	out := domain.WalletNoteSummary{
+		WalletID:          strings.TrimSpace(*raw.WalletID),
+		MinConfirmations:  *raw.MinConfirmations,
+		MinNoteZat:        *raw.MinNoteZat,
+		AsOfScannerHeight: *raw.AsOfScannerHeight,
+		AsOfScannerHash:   strings.TrimSpace(*raw.AsOfScannerHash),
+		TotalUnspent:      noteValueSummary(raw.TotalUnspent),
+		Spendable: domain.SpendableNoteSummary{
+			NoteValueSummary: domain.NoteValueSummary{NoteCount: *raw.Spendable.NoteCount, ValueZat: *raw.Spendable.ValueZat},
+			SmallestNoteZat:  raw.Spendable.SmallestNoteZat.value,
+			LargestNoteZat:   raw.Spendable.LargestNoteZat.value,
+		},
+		Immature: noteValueSummary(raw.Immature),
+		PendingSpend: domain.PendingSpendNoteSummary{
+			NoteValueSummary: domain.NoteValueSummary{NoteCount: *raw.PendingSpend.NoteCount, ValueZat: *raw.PendingSpend.ValueZat},
+			KnownExpiryCount: *raw.PendingSpend.KnownExpiryCount,
+			NextExpiryHeight: raw.PendingSpend.NextExpiryHeight.value,
+			LastExpiryHeight: raw.PendingSpend.LastExpiryHeight.value,
+		},
+		BelowMinNote:       noteValueSummary(raw.BelowMinNote),
+		WitnessUnavailable: noteValueSummary(raw.WitnessUnavailable),
+	}
+	if !out.ValidFor(walletID, minConfirmations, minNoteZat, maxNotes) {
+		return domain.WalletNoteSummary{}, false, invalidNoteSummaryResponse()
+	}
+	return out, true, nil
+}
+
+func completeRawNoteValue(value *rawNoteValueSummary) bool {
+	return value != nil && value.NoteCount != nil && value.ValueZat != nil
+}
+
+func noteValueSummary(value *rawNoteValueSummary) domain.NoteValueSummary {
+	return domain.NoteValueSummary{NoteCount: *value.NoteCount, ValueZat: *value.ValueZat}
+}
+
+func invalidNoteSummaryResponse() error {
+	return &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner returned invalid note summary")}
+}
+
 func (c *Client) Events(ctx context.Context, walletID string, cursor int64, limit int, filter domain.EventFilter) (domain.EventsPage, error) {
 	q := url.Values{}
 	q.Set("cursor", strconv.FormatInt(cursor, 10))
