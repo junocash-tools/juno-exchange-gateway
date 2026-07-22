@@ -16,9 +16,16 @@ Example:
 
 First allocate and persist a same-UFVK operator address with an internal purpose such as `treasury:consolidation-1`; never reuse a customer deposit address. Then use that address for both `--to` and `--change-address`:
 
+Replace each example attempt ID with a new durable exchange attempt ID. Every command below fails if its attempt directory or output already exists. If that happens, stop and reconcile the existing attempt; never overwrite it.
+
 ```bash
+set -euo pipefail
+set -o noclobber
 umask 077
-install -d -m 0700 tmp
+install -d -m 0700 "$PWD/tmp"
+ATTEMPT_DIR="$PWD/tmp/consolidation-1842-attempt-1"
+mkdir -m 0700 "$ATTEMPT_DIR"
+
 docker compose --profile operator run --rm txbuild consolidate \
   --wallet-id hot \
   --coin-type 8133 \
@@ -28,7 +35,7 @@ docker compose --profile operator run --rm txbuild consolidate \
   --max-spends 50 \
   --fee-multiplier 20 \
   --minconf 100 \
-  > tmp/consolidation.txplan.json
+  > "$ATTEMPT_DIR/txplan.json"
 ```
 
 `consolidate` tries the greatest feasible input count up to `--max-spends`. It prefers smaller notes and substitutes larger notes only when needed to cover the fee. At least two eligible notes are required. The planner and signer both limit a transaction to 200 inputs and 200 total outputs, including change.
@@ -36,6 +43,13 @@ docker compose --profile operator run --rm txbuild consolidate \
 Sweep every eligible note when the input count is at most 200:
 
 ```bash
+set -euo pipefail
+set -o noclobber
+umask 077
+install -d -m 0700 "$PWD/tmp"
+ATTEMPT_DIR="$PWD/tmp/sweep-1843-attempt-1"
+mkdir -m 0700 "$ATTEMPT_DIR"
+
 docker compose --profile operator run --rm -T txbuild sweep \
   --wallet-id hot \
   --coin-type 8133 \
@@ -43,21 +57,28 @@ docker compose --profile operator run --rm -T txbuild sweep \
   --to '<registered-treasury-address>' \
   --fee-multiplier 20 \
   --minconf 100 \
-  > tmp/sweep.txplan.json
+  > "$ATTEMPT_DIR/txplan.json"
 ```
 
-For a multi-tier rebalance, first create `tmp/rebalance.outputs.json` with only operator-controlled destinations:
-
-```json
-[
-  {"to_address":"<registered-hot-address>","amount_zat":"200000000"},
-  {"to_address":"<registered-warm-address>","amount_zat":"800000000"}
-]
-```
+For a multi-tier rebalance, create the output file once inside a fresh attempt directory with only operator-controlled destinations:
 
 ```bash
+set -euo pipefail
+set -o noclobber
+umask 077
+install -d -m 0700 "$PWD/tmp"
+ATTEMPT_DIR="$PWD/tmp/rebalance-1844-attempt-1"
+mkdir -m 0700 "$ATTEMPT_DIR"
+
+jq -n '
+  [
+    {"to_address":"<registered-hot-address>","amount_zat":"200000000"},
+    {"to_address":"<registered-warm-address>","amount_zat":"800000000"}
+  ]
+' > "$ATTEMPT_DIR/outputs.json"
+
 docker compose --profile operator run --rm -T \
-  -v "$PWD/tmp/rebalance.outputs.json:/work/outputs.json:ro" \
+  -v "$ATTEMPT_DIR/outputs.json:/work/outputs.json:ro" \
   txbuild rebalance \
   --wallet-id hot \
   --coin-type 8133 \
@@ -66,7 +87,7 @@ docker compose --profile operator run --rm -T \
   --change-address '<registered-hot-change-address>' \
   --fee-multiplier 20 \
   --minconf 100 \
-  > tmp/rebalance.txplan.json
+  > "$ATTEMPT_DIR/txplan.json"
 ```
 
 The signer proves ownership only for a nonzero change output. It validates the network but does not prove that explicit `--to` or `--outputs-file` destinations belong to the exchange. Before approval, require every explicit sweep, consolidation, or rebalance destination to match the exchange treasury registry exactly. A mistyped external destination is otherwise a valid irreversible payment.

@@ -21,6 +21,7 @@ All commands produce the same versioned `TxPlan` JSON consumed by the signer. `c
 The Compose operator profile can reach the private node and scanner. It has no published port and is not a public API:
 
 ```bash
+set -euo pipefail
 umask 077
 set -o noclobber
 install -d -m 0700 "$PWD/tmp"
@@ -43,20 +44,27 @@ The attempt directory and every file name are one-shot. `mkdir` and `noclobber` 
 
 Use coin type `8133` on mainnet, `8134` on testnet, and `8135` on regtest. `0` asks the planner to infer it from the node.
 
-For `send-many` and `rebalance`, pass a JSON array with `--outputs-file`:
-
-```json
-[
-  {"to_address":"j1...","amount_zat":"250000"},
-  {"to_address":"j1...","amount_zat":"400000","memo_hex":"6869"}
-]
-```
+For `send-many` and `rebalance`, pass a JSON array with `--outputs-file`. This standalone `send-many` alternative creates both its input and plan once inside a fresh attempt directory.
 
 One transaction may contain at most 200 total Orchard outputs. Change counts toward that ceiling, so a batch that produces change may contain at most 199 explicit destinations; 200 explicit destinations are valid only when the selected inputs and fee produce no change.
 
 ```bash
+set -euo pipefail
+set -o noclobber
+umask 077
+install -d -m 0700 "$PWD/tmp"
+ATTEMPT_DIR="$PWD/tmp/withdrawal-batch-1843-attempt-1"
+mkdir -m 0700 "$ATTEMPT_DIR"
+
+jq -n '
+  [
+    {"to_address":"j1...","amount_zat":"250000"},
+    {"to_address":"j1...","amount_zat":"400000","memo_hex":"6869"}
+  ]
+' > "$ATTEMPT_DIR/outputs.json"
+
 docker compose --profile operator run --rm -T \
-  -v "$PWD/tmp/withdrawal-1842/outputs.json:/work/outputs.json:ro" \
+  -v "$ATTEMPT_DIR/outputs.json:/work/outputs.json:ro" \
   txbuild send-many \
   --wallet-id hot --coin-type 8133 --account 0 \
   --outputs-file /work/outputs.json --change-address 'j1...' \
@@ -104,6 +112,12 @@ The bundled planner always identifies each selected input as `note_id = txid:act
 Treat the complete plan as sensitive operational data. Hash the exact file bytes, bind the digest to the withdrawal attempt and approval, then verify the same digest after transfer:
 
 ```bash
+set -euo pipefail
+set -o noclobber
+umask 077
+ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
+test -s "$ATTEMPT_DIR/txplan.json"
+
 sha256sum "$ATTEMPT_DIR/txplan.json" | awk '{print $1}' > "$ATTEMPT_DIR/txplan.sha256"
 test "$(sha256sum "$ATTEMPT_DIR/txplan.json" | awk '{print $1}')" = "$(tr -d '\r\n' < "$ATTEMPT_DIR/txplan.sha256")"
 ```
@@ -131,6 +145,9 @@ On the isolated signer host, put the verified plan at `tmp/withdrawal-1842/txpla
 Run every offline command from a dedicated non-root signer OS account that owns the owner-only inputs and output directories. The `--user` override maps the container to that account; never invoke this flow from UID `0`.
 
 ```bash
+set -euo pipefail
+set -o noclobber
+umask 077
 TXSIGN_IMAGE=ghcr.io/junocash-tools/juno-exchange-gateway-txsign@sha256:<verified-digest>
 ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
 SIGN_DIR="$ATTEMPT_DIR/direct"
@@ -200,6 +217,8 @@ Orchard PCZT proving requires NU6.2. The bundled 0.9.12 node therefore activates
 On mainnet or testnet before NU6.2 activates, `ext-prepare` fails closed with `prepare_failed` and reason `external_signing_branch_unsupported`. Do not change public-network activation parameters. Use the direct offline `sign` flow until the network reaches NU6.2, or keep external signing disabled.
 
 ```bash
+set -euo pipefail
+set -o noclobber
 umask 077
 TXSIGN_IMAGE=ghcr.io/junocash-tools/juno-exchange-gateway-txsign@sha256:<verified-digest>
 ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
@@ -299,6 +318,13 @@ Generic Ed25519, ECDSA, or bridge `sign-digest` signatures are not compatible. T
 For regtest integration only, the pinned `juno-txsign` source builds a seed-backed reference helper. It validates `rk` before producing the same submission shape:
 
 ```bash
+set -euo pipefail
+set -o noclobber
+umask 077
+ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
+EXT_DIR="$ATTEMPT_DIR/external"
+test "$(id -u)" -ne 0
+
 cargo build --locked --release \
   --manifest-path ../juno-txsign/rust/juno-tx/Cargo.toml \
   --bin juno_orchard_spendauth_sign
@@ -316,6 +342,12 @@ chmod 0600 "$EXT_DIR/sigs.json"
 This helper is a test oracle, not a production HSM or TSS service.
 
 ```bash
+set -euo pipefail
+set -o noclobber
+umask 077
+TXSIGN_IMAGE=ghcr.io/junocash-tools/juno-exchange-gateway-txsign@sha256:<verified-digest>
+ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
+EXT_DIR="$ATTEMPT_DIR/external"
 FINAL_DIR="$ATTEMPT_DIR/final"
 test "$(id -u)" -ne 0
 mkdir -m 0700 "$FINAL_DIR"
@@ -384,7 +416,10 @@ Signer-managed output paths are reserved before cryptographic work, owner-only, 
 Return the approved raw hex and txid to the online side. Set `SIGNED_RESULT` to the transferred durable result: direct signing writes `$ATTEMPT_DIR/direct/signed.json`, while external finalization writes `$ATTEMPT_DIR/final/signed.json`. Submit the exact result with a stable idempotency key, then reconcile the txid through [transaction lookup](../capabilities/transaction-lookup.md).
 
 ```bash
+set -euo pipefail
 set -o noclobber
+umask 077
+ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
 SIGNED_RESULT="$ATTEMPT_DIR/direct/signed.json"
 # For external signing, use: SIGNED_RESULT="$ATTEMPT_DIR/final/signed.json"
 RAW_TX_HEX="$(jq -er '.data.raw_tx_hex' "$SIGNED_RESULT")"
@@ -402,7 +437,7 @@ curl --fail-with-body -X POST \
   "$GATEWAY_URL/v1/transactions/broadcast"
 ```
 
-Persist the `wallet_id`, exact request body, principal name, and idempotency key before the call. A timeout is uncertain: retry the identical body with the same key and principal. Never rebuild merely because the first HTTP response was lost.
+The block above is for the first submission only. Persist the `wallet_id`, exact request body, principal name, and idempotency key before the call. A timeout is uncertain: rerun only its `curl` command against the existing `broadcast.json`, using the same key and principal. Never regenerate the body or rebuild because the first HTTP response was lost.
 
 After a completed operation, the same key always replays its durable receipt without contacting the node. If later lookup proves that the txid is orphaned or absent while canonical height is still strictly below expiry, keep the inputs reserved and deliberately resubmit the same signed bytes under a fresh rebroadcast-operation key linked to this attempt. Require enough remaining blocks for the exchange's mining policy. Do not use that exception for an uncertain original call; resolve uncertainty with the original key first.
 
