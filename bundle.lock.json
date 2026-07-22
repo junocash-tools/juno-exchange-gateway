@@ -48,7 +48,7 @@
     "scanner": {
       "repository": "https://github.com/junocash-tools/juno-scan.git",
       "repository_slug": "junocash-tools/juno-scan",
-      "revision": "56bd7edd9b8b93fd73a97110c8ef01326f4f136f"
+      "revision": "3f6009fe16d15faa0da5a8962e0f5dad30307135"
     },
     "addrgen": {
       "repository": "https://github.com/junocash-tools/juno-addrgen.git",
