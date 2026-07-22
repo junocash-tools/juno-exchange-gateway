@@ -57,7 +57,7 @@ The five operational buckets partition `total_unspent`. Each note enters the fir
 | `below_min_note` | Mature, non-pending, positioned note below the requested floor, plus zero-value notes | Include only after checking marginal fee economics |
 | `witness_unavailable` | Mature, non-pending note has no spend position | Alert; the planner cannot use it |
 
-`pending_spend` is not an offline plan reservation. A note becomes pending only after the node accepts a signed transaction and the scanner observes its nullifier. Keep a per-wallet exchange lock from planning through mempool observation; otherwise two plans can select the same notes.
+`pending_spend` is not an offline plan reservation. A note becomes pending only after the node accepts a signed transaction and the scanner observes its nullifier. Mempool observation is not a reservation-release point. Without a durable reservation ledger, serialize the complete plan, approve, sign, broadcast, and terminal-reconciliation lifecycle per wallet. With one, atomically prove every new plan's selected note IDs are disjoint and keep each reservation until that attempt is final or meets the strict post-expiry release rule. Follow [note selection and reservations](../transactions/note-selection-and-reservations.md).
 
 `smallest_note_zat` and `largest_note_zat` are omitted when `spendable.note_count` is zero. Pending expiry heights are omitted when `known_expiry_count` is zero; a pending note without a known expiry still appears in the pending count and value.
 
