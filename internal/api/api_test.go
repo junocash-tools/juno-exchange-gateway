@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"math"
@@ -39,6 +40,15 @@ type fakeNode struct {
 	broadcastTxID  string
 	broadcastErr   error
 	broadcastCalls int
+}
+
+type addressFailingStore struct {
+	storage.Store
+	err error
+}
+
+func (s addressFailingStore) Address(context.Context, string, string) (storage.Address, bool, error) {
+	return storage.Address{}, false, s.err
 }
 
 func (f *fakeNode) Tip(context.Context) (domain.NodeTip, error) {
@@ -663,7 +673,6 @@ func TestDepositsFailClosedOnInconsistentLifecycle(t *testing.T) {
 		mutate func(map[string]any)
 	}{
 		{name: "detected event height", kind: "DepositEvent", mutate: func(payload map[string]any) { payload["height"] = float64(89) }},
-		{name: "missing zero diversifier index", kind: "DepositEvent", mutate: func(payload map[string]any) { delete(payload, "diversifier_index") }},
 		{name: "confirmed marker", kind: "DepositConfirmed", mutate: func(payload map[string]any) { payload["confirmed_height"] = float64(99) }},
 		{name: "unconfirmed previous marker", kind: "DepositUnconfirmed", mutate: func(payload map[string]any) { delete(payload, "previous_confirmed_height") }},
 		{name: "unconfirmed without prior finality", kind: "DepositUnconfirmed", mutate: func(payload map[string]any) {
@@ -694,6 +703,150 @@ func TestDepositsFailClosedOnInconsistentLifecycle(t *testing.T) {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestDepositsBindLegacyMissingDiversifierIndexOnlyToRegisteredZero(t *testing.T) {
+	for _, kind := range []string{"DepositEvent", "DepositConfirmed", "DepositUnconfirmed", "DepositOrphaned"} {
+		t.Run("registered zero/"+kind, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			address := allocate(t, service.Handler())
+			txid := strings.Repeat("a", 64)
+			eventHeight := int64(100)
+			if kind == "DepositEvent" {
+				eventHeight = 90
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(depositEffectPayload(kind, "hot", txid, address, eventHeight, 1, 55), &payload); err != nil {
+				t.Fatal(err)
+			}
+			delete(payload, "diversifier_index")
+			raw, _ := json.Marshal(payload)
+			scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 1, Kind: kind, Height: eventHeight, Payload: raw, CreatedAt: time.Unix(1, 0).UTC()}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/deposits", ``, nil)
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"diversifier_index":0`) {
+				t.Fatalf("legacy index zero was not bound to the allocation ledger: %s", rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("registered nonzero", func(t *testing.T) {
+		cfg := testConfig(domain.Regtest)
+		service, _, scanner := newTestAPI(t, cfg)
+		_ = allocate(t, service.Handler())
+		address := allocate(t, service.Handler())
+		txid := strings.Repeat("a", 64)
+		var payload map[string]any
+		if err := json.Unmarshal(depositEffectPayload("DepositEvent", "hot", txid, address, 90, 1, 55), &payload); err != nil {
+			t.Fatal(err)
+		}
+		delete(payload, "diversifier_index")
+		raw, _ := json.Marshal(payload)
+		scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Height: 90, Payload: raw, CreatedAt: time.Unix(1, 0).UTC()}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}
+		rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/deposits", ``, nil)
+		if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestDepositsRejectExplicitRegisteredAddressIndexMismatch(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, scanner := newTestAPI(t, cfg)
+	address := allocate(t, service.Handler())
+	txid := strings.Repeat("a", 64)
+	var payload map[string]any
+	if err := json.Unmarshal(depositEffectPayload("DepositEvent", "hot", txid, address, 90, 1, 55), &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["diversifier_index"] = float64(1)
+	raw, _ := json.Marshal(payload)
+	scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Height: 90, Payload: raw}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/deposits", ``, nil)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDepositsSkipUnregisteredLegacyMissingIndexAndAdvanceCursor(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, _, scanner := newTestAPI(t, cfg)
+	txid := strings.Repeat("a", 64)
+	var payload map[string]any
+	if err := json.Unmarshal(depositEffectPayload("DepositEvent", "hot", txid, "jregtest1derivedoutsidegateway", 90, 1, 55), &payload); err != nil {
+		t.Fatal(err)
+	}
+	delete(payload, "diversifier_index")
+	raw, _ := json.Marshal(payload)
+	scanner.events = domain.EventsPage{Events: []domain.ScannerEvent{{ID: 9, Kind: "DepositEvent", Height: 90, Payload: raw}}, NextCursor: 9, EventEpoch: scanner.health.EventEpoch}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/wallets/hot/deposits", ``, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data struct {
+			Deposits   []deposit `json:"deposits"`
+			NextCursor string    `json:"next_cursor"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	position, err := service.codec.decode(out.Data.NextCursor, "hot", scanner.health.EventEpoch, depositCursorFilter("", "", ""))
+	if err != nil || position != 9 || len(out.Data.Deposits) != 0 {
+		t.Fatalf("position=%d deposits=%d err=%v body=%s", position, len(out.Data.Deposits), err, rec.Body.String())
+	}
+}
+
+func TestWalletTransactionRejectsUnregisteredLegacyDepositIdentity(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, scanner := newTestAPI(t, cfg)
+	txid := strings.Repeat("a", 64)
+	node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
+	var payload map[string]any
+	if err := json.Unmarshal(depositEffectPayload("DepositEvent", "hot", txid, "jregtest1derivedoutsidegateway", 90, 1, 55), &payload); err != nil {
+		t.Fatal(err)
+	}
+	delete(payload, "diversifier_index")
+	raw, _ := json.Marshal(payload)
+	scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Height: 90, Payload: raw}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWalletTransactionBindsRegisteredLegacyZeroDiversifierIndex(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, scanner := newTestAPI(t, cfg)
+	address := allocate(t, service.Handler())
+	txid := strings.Repeat("a", 64)
+	node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
+	var payload map[string]any
+	if err := json.Unmarshal(depositEffectPayload("DepositEvent", "hot", txid, address, 90, 1, 55), &payload); err != nil {
+		t.Fatal(err)
+	}
+	delete(payload, "diversifier_index")
+	raw, _ := json.Marshal(payload)
+	scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Height: 90, Payload: raw}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"diversifier_index":0`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWalletTransactionClassifiesAddressLedgerFailureAsInternal(t *testing.T) {
+	cfg := testConfig(domain.Regtest)
+	service, node, scanner := newTestAPI(t, cfg)
+	address := allocate(t, service.Handler())
+	txid := strings.Repeat("a", 64)
+	node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
+	scanner.eventPages = map[int64]domain.EventsPage{0: {Events: []domain.ScannerEvent{{ID: 1, Kind: "DepositEvent", Height: 90, Payload: depositEffectPayload("DepositEvent", "hot", txid, address, 90, 1, 55)}}, NextCursor: 1, EventEpoch: scanner.health.EventEpoch}}
+	service.store = addressFailingStore{Store: service.store, err: errors.New("address ledger unavailable")}
+	rec := request(t, service.Handler(), http.MethodGet, "/v1/transactions/"+txid+"?wallet_id=hot", ``, nil)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"code":"internal"`) || strings.Contains(rec.Body.String(), "scanner_not_ready") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

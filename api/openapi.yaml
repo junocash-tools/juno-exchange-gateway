@@ -60,6 +60,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "503":
           description: A dependency cannot safely serve financial reads.
           content:
@@ -105,6 +106,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "502": { $ref: "#/components/responses/NodeRPCError" }
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/wallets/{wallet_id}/addresses:
@@ -175,6 +177,7 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
               example: { status: error, error: { code: not_found, message: address is not registered to this wallet, retryable: false, details: {} }, request_id: req_018f }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/wallets/{wallet_id}/notes/summary:
     get:
@@ -241,6 +244,7 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
               example: { status: error, error: { code: note_summary_limit_exceeded, message: wallet note inventory exceeds the configured summary cap, retryable: false, details: { max_notes: 100000 } }, request_id: req_018f }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "502":
           description: Scanner returned a malformed or internally inconsistent aggregate; no partial result is returned.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
@@ -299,6 +303,7 @@ paths:
                 epoch_reset: { value: { status: error, error: { code: cursor_reset_required, message: scanner event history was reset; restart without a cursor and idempotently replay deposits, retryable: false, details: { action: restart_without_cursor, event_epoch: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb } }, request_id: req_018f } }
                 filter_mismatch: { value: { status: error, error: { code: cursor_filter_mismatch, message: cursor was created for different deposit filters, retryable: false, details: { action: restart_without_cursor_or_restore_filters } }, request_id: req_018f } }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "502":
           description: Scanner returned a malformed or internally inconsistent deposit lifecycle event; the page and cursor are not returned.
           content:
@@ -345,6 +350,7 @@ paths:
           description: Wallet effects exceed the configured safe event cap.
           content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "502": { $ref: "#/components/responses/NodeRPCError" }
         "503": { $ref: "#/components/responses/NotReady" }
   /v1/transactions/broadcast:
@@ -412,6 +418,7 @@ paths:
                 mismatch: { value: { status: error, error: { code: expected_txid_mismatch, message: expected_txid does not match raw_tx_hex, retryable: false, details: {} }, request_id: req_018f } }
                 rejected: { value: { status: error, error: { code: transaction_rejected, message: node rejected the signed transaction, retryable: false, details: {} }, request_id: req_018f } }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
         "502": { $ref: "#/components/responses/NodeRPCError" }
         "503": { $ref: "#/components/responses/NotReady" }
 components:

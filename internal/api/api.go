@@ -745,14 +745,17 @@ func (a *API) handleDeposits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		next = event.ID
-		if allocated, registered, err := a.store.Address(r.Context(), walletID, effect.Address); err != nil {
+		registered, err := a.bindRegisteredDepositIdentity(r.Context(), walletID, &effect)
+		if err != nil {
+			if domain.IsUpstreamKind(err, "invalid_response") {
+				a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned a deposit with mismatched address identity", true, nil)
+				return
+			}
 			a.writeError(w, r, http.StatusInternalServerError, "internal", "state lookup failed", false, nil)
 			return
-		} else if !registered {
+		}
+		if !registered {
 			continue
-		} else if effect.DiversifierIndex == nil || allocated.DiversifierIndex != *effect.DiversifierIndex {
-			a.writeError(w, r, http.StatusBadGateway, "scanner_not_ready", "scanner returned a deposit with mismatched address identity", true, nil)
-			return
 		}
 		if status != "" && publicStatus != status {
 			continue
@@ -780,6 +783,24 @@ func (a *API) handleDeposits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeData(w, r, http.StatusOK, map[string]any{"deposits": items, "next_cursor": a.codec.encode(walletID, page.EventEpoch, cursorFilter, next), "delivery": "at_least_once", "event_epoch": page.EventEpoch})
+}
+
+func (a *API) bindRegisteredDepositIdentity(ctx context.Context, walletID string, effect *walletEffect) (bool, error) {
+	allocated, registered, err := a.store.Address(ctx, walletID, effect.Address)
+	if err != nil || !registered {
+		return registered, err
+	}
+	if effect.DiversifierIndex == nil {
+		if allocated.DiversifierIndex != 0 {
+			return true, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner omitted a nonzero deposit diversifier index")}
+		}
+		index := uint32(0)
+		effect.DiversifierIndex = &index
+	}
+	if allocated.DiversifierIndex != *effect.DiversifierIndex {
+		return true, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner deposit address identity does not match the allocation ledger")}
+	}
+	return true, nil
 }
 
 func depositCursorFilter(status, address, txid string) string {
@@ -869,6 +890,10 @@ func (a *API) handleTransaction(w http.ResponseWriter, r *http.Request) {
 				a.writeError(w, r, http.StatusUnprocessableEntity, "wallet_effects_limit_exceeded", "wallet transaction effects exceed the configured safety cap", false, map[string]any{"max_events": a.cfg.WalletEffectsMaxEvents})
 				return
 			}
+			if errors.Is(err, errWalletEffectsStateLookup) {
+				a.writeError(w, r, http.StatusInternalServerError, "internal", "state lookup failed", false, nil)
+				return
+			}
 			a.writeError(w, r, http.StatusServiceUnavailable, "scanner_not_ready", "wallet transaction lookup failed", true, nil)
 			return
 		}
@@ -930,7 +955,10 @@ func terminalScannerTransaction(txid string, effects []walletEffect, nodeHeight 
 	return tx, true, nil
 }
 
-var errWalletEffectsLimit = errors.New("wallet effects limit exceeded")
+var (
+	errWalletEffectsLimit       = errors.New("wallet effects limit exceeded")
+	errWalletEffectsStateLookup = errors.New("wallet effects state lookup failed")
+)
 
 func (a *API) walletEffects(ctx context.Context, walletID, txid, eventEpoch string) ([]walletEffect, error) {
 	effects := make([]walletEffect, 0)
@@ -958,6 +986,18 @@ func (a *API) walletEffects(ctx context.Context, walletID, txid, eventEpoch stri
 			effect, err := sanitizeWalletEffect(event, walletID, txid, a.cfg.Network.AddressHRP(), a.cfg.DefaultConfirmations)
 			if err != nil {
 				return nil, err
+			}
+			if strings.HasPrefix(event.Kind, "Deposit") {
+				registered, err := a.bindRegisteredDepositIdentity(ctx, walletID, &effect)
+				if err != nil {
+					if !domain.IsUpstreamKind(err, "invalid_response") {
+						return nil, fmt.Errorf("%w: %v", errWalletEffectsStateLookup, err)
+					}
+					return nil, err
+				}
+				if !registered && effect.DiversifierIndex == nil {
+					return nil, &domain.UpstreamError{Kind: "invalid_response", Err: errors.New("scanner omitted an unregistered deposit diversifier index")}
+				}
 			}
 			position = event.ID
 			effects = append(effects, effect)

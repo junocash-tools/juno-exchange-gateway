@@ -126,9 +126,11 @@ func sanitizeWalletEffect(event domain.ScannerEvent, walletID, expectedTxID, add
 		if err := validateDepositEffect(event, &payload, addressHRP, requiredConfirmations); err != nil {
 			return walletEffect{}, err
 		}
-		index := *payload.DiversifierIndex
 		out.ActionIndex = payload.ActionIndex
-		out.DiversifierIndex = &index
+		if payload.DiversifierIndex != nil {
+			index := *payload.DiversifierIndex
+			out.DiversifierIndex = &index
+		}
 		out.Address = strings.TrimSpace(*payload.RecipientAddress)
 	case "SpendEvent", "SpendConfirmed", "SpendUnconfirmed", "SpendOrphaned":
 		if err := validateSpendEffect(event, &payload, addressHRP, requiredConfirmations); err != nil {
@@ -156,7 +158,7 @@ func sanitizeWalletEffect(event domain.ScannerEvent, walletID, expectedTxID, add
 
 func validateDepositEffect(event domain.ScannerEvent, payload *rawWalletEffectPayload, addressHRP string, requiredConfirmations int64) error {
 	if payload.Origin == nil || *payload.Origin != "external" || payload.Height == nil || payload.ActionIndex == nil || payload.AmountZatoshis == nil ||
-		payload.RecipientAddress == nil || payload.DiversifierIndex == nil ||
+		payload.RecipientAddress == nil ||
 		!strings.HasPrefix(strings.TrimSpace(*payload.RecipientAddress), addressHRP+"1") {
 		return invalidWalletEffect("deposit identity or value fields are incomplete")
 	}
