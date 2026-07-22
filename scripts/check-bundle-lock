@@ -22,7 +22,7 @@ jq -e '
   .supported_networks == ["mainnet", "testnet", "regtest"] and
   .supported_platforms.appliance_native == ["linux/amd64"] and
   .supported_platforms.node == ["linux/amd64"] and
-  ([.components | keys[]] == ["addrgen", "scanner", "txbuild", "txsign"]) and
+  ([.components | keys[]] == ["addrgen", "keys", "scanner", "txbuild", "txsign"]) and
   all(.components[]; (.revision | type == "string" and test("^[0-9a-f]{40}$"))) and
   (.node_artifact.sha256 | test("^[0-9a-f]{64}$")) and
   .node_artifact.platform == "linux/amd64" and
@@ -72,12 +72,41 @@ workflow_value() {
   awk -v key="$1" '$1 == key ":" {print $2; exit}' .github/workflows/images.yml
 }
 
+docker_arg_value() {
+  awk -F= -v key="$1" '$1 == "ARG " key {print $2; exit}' "$2"
+}
+
+env_value() {
+  awk -F= -v key="$1" '$1 == key {print $2; exit}' .env.example
+}
+
 check_equal() {
   local name="$1"
   local actual="$2"
   local expected="$3"
   if [[ "$actual" != "$expected" ]]; then
     echo "$name differs from bundle.lock.json: actual=$actual expected=$expected" >&2
+    exit 1
+  fi
+}
+
+check_compose_default_count() {
+  local key="$1"
+  local expected="$2"
+  local expected_count="$3"
+  local needle
+  printf -v needle '${%s:-%s}' "$key" "$expected"
+  check_equal "compose_${key}_default_count" \
+    "$(grep -Fo "$needle" compose.dev.yaml | wc -l | tr -d ' ')" \
+    "$expected_count"
+}
+
+check_docs_default() {
+  local key="$1"
+  local expected="$2"
+  local row="| \`$key\` | \`$expected\` |"
+  if ! grep -Fq "$row" website/docs/operations/configuration.md; then
+    echo "documented $key default differs from bundle.lock.json: expected=$expected" >&2
     exit 1
   fi
 }
@@ -90,6 +119,22 @@ check_equal JUNO_TXBUILD_REPO "$(workflow_value JUNO_TXBUILD_REPO)" "$(jq -r '.c
 check_equal JUNO_TXBUILD_REF "$(workflow_value JUNO_TXBUILD_REF)" "$(jq -r '.components.txbuild.revision' bundle.lock.json)"
 check_equal JUNO_TXSIGN_REPO "$(workflow_value JUNO_TXSIGN_REPO)" "$(jq -r '.components.txsign.repository' bundle.lock.json)"
 check_equal JUNO_TXSIGN_REF "$(workflow_value JUNO_TXSIGN_REF)" "$(jq -r '.components.txsign.revision' bundle.lock.json)"
+check_equal docker_gateway_JUNO_ADDRGEN_REF "$(docker_arg_value JUNO_ADDRGEN_REF docker/gateway/Dockerfile)" "$(jq -r '.components.addrgen.revision' bundle.lock.json)"
+check_equal docker_txbuild_JUNO_TXBUILD_REF "$(docker_arg_value JUNO_TXBUILD_REF docker/txbuild/Dockerfile)" "$(jq -r '.components.txbuild.revision' bundle.lock.json)"
+check_equal docker_txsign_JUNO_TXSIGN_REF "$(docker_arg_value JUNO_TXSIGN_REF docker/txsign/Dockerfile)" "$(jq -r '.components.txsign.revision' bundle.lock.json)"
+
+for component_ref in \
+  'JUNO_ADDRGEN_REF:addrgen:2' \
+  'JUNO_SCAN_REF:scanner:1' \
+  'JUNO_TXBUILD_REF:txbuild:2' \
+  'JUNO_TXSIGN_REF:txsign:1'; do
+  IFS=: read -r key component compose_count <<<"$component_ref"
+  expected="$(jq -r ".components.$component.revision" bundle.lock.json)"
+  check_equal "env_${key}" "$(env_value "$key")" "$expected"
+  check_compose_default_count "$key" "$expected" "$compose_count"
+  check_docs_default "$key" "$expected"
+done
+
 check_equal JUNOCASH_VERSION "$(workflow_value JUNOCASH_VERSION)" "$(jq -r '.node_artifact.version' bundle.lock.json)"
 check_equal JUNOCASH_LINUX64_SHA256 "$(workflow_value JUNOCASH_LINUX64_SHA256)" "$(jq -r '.node_artifact.sha256' bundle.lock.json)"
 check_equal BUILDX_VERSION "$(workflow_value BUILDX_VERSION)" "$(jq -r '.release_tooling.buildx_version' bundle.lock.json)"

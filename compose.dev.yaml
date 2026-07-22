@@ -25,7 +25,7 @@ services:
         REVISION: ${JUNO_GATEWAY_REVISION:-local}
         BUILD_TIME: ${JUNO_GATEWAY_BUILD_TIME:-}
         COMPONENTS_JSON: >-
-          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-c70e9c36e64ba44d1dda8e4882434566d0e10dc9}","juno-txbuild":"${JUNO_TXBUILD_REF:-c0558dae91165568c4c5dc5022b02c4f4f0486c9}","juno-txsign":"${JUNO_TXSIGN_REF:-aef2a1cee50f16d9c2c77448be983748c97f9496}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
+          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-56bd7edd9b8b93fd73a97110c8ef01326f4f136f}","juno-txbuild":"${JUNO_TXBUILD_REF:-40a185c38d8e0767fa5d98bf1967c7e64e544984}","juno-txsign":"${JUNO_TXSIGN_REF:-1a32836f77f2d8a01ef0ef20842538cbc506f0c3}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
 
   txbuild:
     image: juno-exchange-gateway/txbuild:dev
@@ -33,4 +33,4 @@ services:
       context: .
       dockerfile: docker/txbuild/Dockerfile
       args:
-        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-c0558dae91165568c4c5dc5022b02c4f4f0486c9}
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-40a185c38d8e0767fa5d98bf1967c7e64e544984}
