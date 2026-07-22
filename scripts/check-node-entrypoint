@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(basename "$0")" == "junocashd" ]]; then
+  printf '%s\n' "$@"
+  exit 0
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fake_root="$repo_root/tmp/check-node-entrypoint/$$"
+fake_bin="$fake_root/bin"
+
+mkdir -p "$fake_bin"
+ln -s "$repo_root/scripts/check-node-entrypoint" "$fake_bin/junocashd"
+cleanup() {
+  rm -f "$fake_bin/junocashd"
+  rmdir "$fake_bin" "$fake_root" "$repo_root/tmp/check-node-entrypoint" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+run_entrypoint() {
+  local network=$1
+  JUNO_NETWORK="$network" PATH="$fake_bin:$PATH" \
+    /bin/sh "$repo_root/docker/junocashd/entrypoint.sh" -server=1
+}
+
+has_exact_arg() {
+  local output=$1
+  local expected=$2
+  grep -Fqx -- "$expected" <<<"$output"
+}
+
+regtest_args="$(run_entrypoint regtest)"
+testnet_args="$(run_entrypoint testnet)"
+mainnet_args="$(run_entrypoint mainnet)"
+
+has_exact_arg "$regtest_args" -regtest
+has_exact_arg "$regtest_args" -nuparams=5437f330:1
+has_exact_arg "$regtest_args" -server=1
+[[ "$(grep -Fxc -- '-nuparams=5437f330:1' <<<"$regtest_args")" == "1" ]]
+
+has_exact_arg "$testnet_args" -testnet
+has_exact_arg "$testnet_args" -server=1
+! grep -Fq -- '-nuparams=' <<<"$testnet_args"
+
+has_exact_arg "$mainnet_args" -listen=1
+has_exact_arg "$mainnet_args" -server=1
+! grep -Fq -- '-nuparams=' <<<"$mainnet_args"
+
+if JUNO_NETWORK=invalid PATH="$fake_bin:$PATH" \
+  /bin/sh "$repo_root/docker/junocashd/entrypoint.sh" >/dev/null 2>&1; then
+  echo "invalid network unexpectedly succeeded" >&2
+  exit 1
+fi
+
+echo "node entrypoint: NU6.2 override is regtest-only"

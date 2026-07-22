@@ -48,7 +48,7 @@
     "scanner": {
       "repository": "https://github.com/junocash-tools/juno-scan.git",
       "repository_slug": "junocash-tools/juno-scan",
-      "revision": "5956f233d51ed11d354d3ba24a982d367a1b91ed"
+      "revision": "c70e9c36e64ba44d1dda8e4882434566d0e10dc9"
     },
     "addrgen": {
       "repository": "https://github.com/junocash-tools/juno-addrgen.git",
@@ -56,11 +56,11 @@
     },
     "txbuild": {
       "repository": "https://github.com/junocash-tools/juno-txbuild.git",
-      "revision": "e7b1d5c01aaf705be1d76da7966e36437fdbc75f"
+      "revision": "c0558dae91165568c4c5dc5022b02c4f4f0486c9"
     },
     "txsign": {
       "repository": "https://github.com/junocash-tools/juno-txsign.git",
-      "revision": "29a58cc0a840a8e58b05981c0674475841ae6890"
+      "revision": "aef2a1cee50f16d9c2c77448be983748c97f9496"
     }
   },
   "node_artifact": {

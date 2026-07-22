@@ -21,13 +21,13 @@ env:
   SBOM_GENERATOR_IMAGE: docker.io/docker/buildkit-syft-scanner:1.11.0@sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68
   JUNO_SCAN_REPOSITORY: junocash-tools/juno-scan
   # Repin this one full SHA after each approved scanner release.
-  JUNO_SCAN_REF: 5956f233d51ed11d354d3ba24a982d367a1b91ed
+  JUNO_SCAN_REF: c70e9c36e64ba44d1dda8e4882434566d0e10dc9
   JUNO_ADDRGEN_REPO: https://github.com/junocash-tools/juno-addrgen.git
   JUNO_ADDRGEN_REF: 4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834
   JUNO_TXBUILD_REPO: https://github.com/junocash-tools/juno-txbuild.git
-  JUNO_TXBUILD_REF: e7b1d5c01aaf705be1d76da7966e36437fdbc75f
+  JUNO_TXBUILD_REF: c0558dae91165568c4c5dc5022b02c4f4f0486c9
   JUNO_TXSIGN_REPO: https://github.com/junocash-tools/juno-txsign.git
-  JUNO_TXSIGN_REF: 29a58cc0a840a8e58b05981c0674475841ae6890
+  JUNO_TXSIGN_REF: aef2a1cee50f16d9c2c77448be983748c97f9496
   JUNOCASH_VERSION: 0.9.12
   JUNOCASH_LINUX64_SHA256: 41f74d61feb9a4284a4200b1fc163ecd072da3314a25db7222522f2e548ec386
 

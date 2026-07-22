@@ -6,6 +6,7 @@ cd "$repo_root"
 mkdir -p tmp
 
 ./scripts/check-bundle-lock
+./scripts/check-node-entrypoint
 
 # Never persist caller credentials in rendered validation artifacts.
 export JUNO_RPC_USER=compose-validation-user
@@ -23,10 +24,11 @@ for network in regtest testnet mainnet; do
     -f compose.yaml \
     -f compose.dev.yaml \
     config --format json >"tmp/compose-${network}.json"
-  jq -e '
+  jq -e --arg network "$network" '
     (.services.gateway.networks | keys | sort) == ["backend", "ingress"]
     and (.services["juno-scan"].networks | keys | sort) == ["backend", "storage"]
     and (.services.junocashd.networks | keys | sort) == ["backend", "chain"]
+    and .services.junocashd.environment.JUNO_NETWORK == $network
     and (.services.gateway.ports | length) == 1
     and .services.gateway.ports[0].target == 8080
     and .services.gateway.ports[0].host_ip == "127.0.0.1"
