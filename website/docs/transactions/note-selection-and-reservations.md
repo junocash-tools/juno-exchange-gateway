@@ -53,12 +53,13 @@ The scanner marks a known note pending after observing its nullifier in the memp
 
 - with a known expiry, pending remains set while `chain_height <= expiry_height`
 - pending clears only when `chain_height > expiry_height`
-- with no known expiry, pending clears when the transaction is absent
+- with no known expiry, pending remains sticky even when the transaction is absent; it clears only through a mined/replacement spend or an audited scanner repair that proves the outcome
 - when mined, pending is replaced by the mined-spent state
 
 At the exact expiry height the note is still locked. Do not release it until the next block has made the strict `>` condition true.
+An exchange-recorded expiry does not override an API item whose expiry is absent: keep that item reserved and investigate why the scanner could not recover the transaction expiry.
 
-Apply the same conservative rule to the exchange reservation. An unsigned canceled plan can be released under a controlled approval policy. Once raw signed bytes may exist, keep the reservation until the transaction is final. A never-mined attempt can be released only after canonical node height is greater than its expiry, lookup and wallet effects confirm it was never mined, and every selected note is reconciled as unspent and non-pending. If the attempt was ever mined or orphaned, also retain it through `orphaned_at_height + configured_confirmations` with no later remine event; when that height is unavailable, require manual chain evidence.
+Apply the same conservative rule to the exchange reservation. An unsigned canceled plan can be released under a controlled approval policy. Once raw signed bytes may exist, keep the reservation until the transaction is final. A never-mined attempt can be released only after canonical node height is greater than its expiry, lookup and wallet effects confirm it was never mined, and [selected-note status](../capabilities/selected-note-status.md) reconciles the complete recorded ID set as unspent. If the attempt was ever mined or orphaned, also retain it through `orphaned_at_height + configured_confirmations` with no later remine event; when that height is unavailable, require manual chain evidence.
 
 ## Retry, expiry, and reorg lifecycle
 

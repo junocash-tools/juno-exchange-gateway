@@ -65,6 +65,6 @@ This endpoint has no idempotency key. `X-Request-ID` is correlation only. Every 
 
 Treat a timeout or `500 internal` as an unknown, non-idempotent allocation, retain its request ID and audit record, and alert for reconciliation. Never retry it as though the result were known. After gateway state is healthy, it is safe to make a separate allocation request for the customer, but never infer that the unknown address was unused or make it customer-facing later. Any index reserved by the unknown operation remains permanently skipped unless the original `201` response was durably recorded.
 
-Allocation is readiness-gated. On a retryable `503`, leave exchange state unchanged and retry with backoff. A reserved diversifier index may be skipped after a failure; gaps are expected and indices are never reused.
+Allocation is readiness-gated. On a retryable `503`, leave exchange state unchanged and retry with backoff. A reserved diversifier index may be skipped after a failure; gaps are expected and indices are never reused. `400 invalid_request` means the JSON, media type, or label is invalid. `413 invalid_request` means the body exceeds `JUNO_GATEWAY_MAX_JSON_BODY_BYTES`; fix the caller rather than retrying unchanged.
 
 The UFVK and address HRP must match the configured network. No seed or spending key is used.

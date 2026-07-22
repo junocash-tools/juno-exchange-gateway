@@ -10,7 +10,7 @@ title: Best practices
 - Use the default `100` confirmations and process unconfirmation and orphan events.
 - Poll the complete deposit stream, deduplicate by stable identity, and commit cursor and ledger changes atomically.
 - Allow only one complete plan-to-outcome lifecycle per wallet, or atomically reserve every selected `notes[].note_id`.
-- For a never-mined attempt, release after canonical height is strictly greater than `expiry_height` only when lookup, effects, and every selected note are reconciled. If it was ever mined or orphaned, also wait through `orphaned_at_height + configured_confirmations`, or require manual chain evidence when that height is unavailable.
+- For a never-mined attempt, release after canonical height is strictly greater than `expiry_height` only when lookup/effects reconcile and the complete selected-ID batch is `unspent`. If it was ever mined or orphaned, also wait through `orphaned_at_height + configured_confirmations`, or require manual chain evidence when that height is unavailable.
 - Bind withdrawal, attempt, plan digest, txid, raw-transaction hash, and idempotency key before broadcast.
 - Retry uncertain broadcasts with the same wallet ID, principal, key, expected txid, and bytes. Never rebuild first.
 - After a completed broadcast later becomes orphaned or absent while height is strictly below expiry, keep reservations and use a fresh operation key only to rebroadcast the identical signed bytes.

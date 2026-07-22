@@ -13,6 +13,7 @@ module.exports = {
         'capabilities/address-allocation',
         'capabilities/address-balances',
         'capabilities/note-summary',
+        'capabilities/selected-note-status',
         'capabilities/chain-tip',
         'capabilities/deposits',
         'capabilities/transaction-lookup',

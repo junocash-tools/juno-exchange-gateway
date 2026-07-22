@@ -11,7 +11,7 @@ title: Observability
 | `GET /v1/version` | `read` | Build and component versions |
 | `GET /v1/network/tip` | `read` | Node and scanner positions |
 
-Readiness checks gateway state, network identity, node sync, scanner lag, and wallet history. With the default complete-history policy it requires an explicit scanner `history_complete: true` attestation, and returns `200` only when each wallet backfill is `complete` with `next_height` beyond the scanner tip. Never route financial traffic from liveness alone.
+Readiness checks gateway state, network identity, node sync, scanner lag, pending-spend reconciliation, and wallet history. It requires scanner `pending_spends_ready: true` for the current event epoch and exact scanner tip. With the default complete-history policy it also requires an explicit scanner `history_complete: true` attestation, and returns `200` only when each wallet backfill is `complete` with `next_height` beyond the scanner tip. Never route financial traffic from liveness alone.
 
 Scanner `GET /v1/wallets/{wallet_id}/backfill` is the authoritative diagnostic for birthday, next and target heights, state, last error, and update time.
 
@@ -36,7 +36,7 @@ At the exact expiry height a pending note is still locked. If an absent transact
 ## Alerts
 
 - readiness `503`, node initial block download, or network mismatch
-- scanner lag above the configured maximum, stalled backfill, or shard-cache failure
+- scanner lag above the configured maximum, `pending_spends_ready: false`, stalled backfill, or shard-cache failure
 - repeated cursor/event-epoch resets or reorg lifecycle events
 - sustained `429`, `5xx`, broadcast uncertainty, or idempotency storage errors
 - outstanding reservations near or beyond expiry

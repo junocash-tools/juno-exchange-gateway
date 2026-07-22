@@ -141,7 +141,7 @@ The appliance exposes the operational subset below in `.env`.
 
 Keep `auto` in production. The other witness modes are diagnostic controls. Disabling the shard cache preserves the subtree and legacy fallbacks but increases witness work.
 
-Readiness requires `JUNO_SCAN_CONFIRMATIONS` to be positive and exactly equal to `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS`. It also requires scanner `ready=true` and requires the scanner-reported lag to equal the lag independently derived from the gateway node tip and scanner height. This prevents deposit events and default balance reads from using different finality policies or inconsistent chain positions.
+Readiness requires `JUNO_SCAN_CONFIRMATIONS` to be positive and exactly equal to `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS`. It also requires scanner `ready=true`, `pending_spends_ready=true`, and scanner-reported lag equal to the lag independently derived from the gateway node tip and scanner height. The pending-spend attestation is emitted only after a successful mempool reconciliation for the current event epoch and exact scanner tip, so a restart or reorg cannot briefly expose stale note availability. This prevents deposit events and default balance reads from using different finality policies or inconsistent chain positions.
 
 Direct scanner deployments also support:
 
@@ -191,7 +191,7 @@ The tracked auth example separates reader, allocator, treasury, and broadcaster 
 | `read` | readiness, version, tip, balances, deposits, and node-only transaction lookup |
 | `address` | allocate deposit addresses |
 | `broadcast` | submit signed raw transactions |
-| `treasury` | `GET /v1/wallets/{wallet_id}/notes/summary` aggregate consolidation inventory; no raw notes |
+| `treasury` | aggregate note summary plus batch status for selected IDs already recorded in a withdrawal or consolidation attempt; no nullifiers, memos, addresses, or wallet-wide raw-note list |
 | `withdrawal` | wallet-enriched transaction lookup and sanitized wallet effects; combine with `read` |
 | `raw` | include raw hex in transaction lookup |
 | `admin` | satisfies any endpoint scope; wallet restrictions still apply |

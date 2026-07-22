@@ -23,6 +23,7 @@ JSON requests also require `Content-Type: application/json`. Parameters such as 
 | `POST` | `/v1/wallets/{wallet_id}/addresses` | `address` + wallet |
 | `GET` | `/v1/wallets/{wallet_id}/addresses/{address}/balance` | `read` + wallet |
 | `GET` | `/v1/wallets/{wallet_id}/notes/summary` | `treasury` + wallet |
+| `POST` | `/v1/wallets/{wallet_id}/notes/status` | `treasury` + wallet |
 | `GET` | `/v1/wallets/{wallet_id}/deposits` | `read` + wallet |
 | `GET` | `/v1/transactions/{txid}` | `read`; add `withdrawal` + wallet grant for `wallet_id`, and `raw` for raw hex |
 | `POST` | `/v1/transactions/broadcast` | `broadcast` + wallet grant + `Idempotency-Key` |
@@ -64,7 +65,7 @@ Use `error.retryable`, not the status alone. Preserve a valid `X-Request-ID` or 
 | `401` / `403` | Missing authentication or authorization |
 | `404` | Unknown resource |
 | `409` | Safe cursor/history reset or idempotency conflict/in progress |
-| `413` | Broadcast body limit exceeded |
+| `413` | JSON body exceeds `JUNO_GATEWAY_MAX_JSON_BODY_BYTES`, or broadcast exceeds `JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES` |
 | `422` | Safe response cap or transaction validation/rejection |
 | `429` | Rate limit |
 | `500` | Internal gateway or durable-state failure; stop automatic processing, preserve the exact request/checkpoint, and alert |

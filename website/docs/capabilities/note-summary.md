@@ -63,6 +63,6 @@ The five operational buckets partition `total_unspent`. Each note enters the fir
 
 The scanner calculates every bucket and `as_of_scanner_hash` in one atomic database snapshot, including current mempool-pending state. The gateway requires that exact height and hash to match a stable scanner health and canonical node view around the aggregate. A concurrent chain snapshot change returns retryable `409 scanner_snapshot_changed`. `422 note_summary_limit_exceeded` means the inventory exceeds `JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES`; the gateway never returns a truncated total. Raise the cap deliberately or consolidate in smaller batches.
 
-Use this endpoint for alerts and [consolidation decisions](../transactions/consolidation.md). `juno-txbuild` remains authoritative for exact selection and fees.
+Use this endpoint for alerts and [consolidation decisions](../transactions/consolidation.md). `juno-txbuild` remains authoritative for exact selection and fees. To reconcile the exact IDs selected by an existing plan, use [selected-note status](./selected-note-status.md); never infer one note's state from these aggregates.
 
 For `409` or retryable `502`/`503`, discard the response and retry the complete request with bounded backoff. A persistent `502` means the scanner aggregate violates the contract and needs operator repair. A `403` means the credential lacks `treasury` scope or the wallet grant; `404` means the configured wallet ID is unknown. Never substitute a stale summary to authorize a withdrawal.

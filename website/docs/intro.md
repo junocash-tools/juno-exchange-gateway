@@ -46,14 +46,14 @@ Create `auth.json` with mode `0600`. Mainnet and testnet require at least one cr
     {
       "name": "exchange-api",
       "token_sha256": "<64-lowercase-hex-sha256>",
-      "scopes": ["read", "address", "broadcast", "withdrawal"],
+      "scopes": ["read", "address", "treasury", "broadcast", "withdrawal"],
       "wallets": ["hot"]
     }
   ]
 }
 ```
 
-An isolated anonymous regtest may use `{"credentials":[]}`. The file is still required by Compose.
+This combined credential keeps the first regtest walkthrough short. Split it into the least-privilege service credentials shown in [Wallet and authentication setup](getting-started/wallet-and-auth.md) before production. An isolated anonymous regtest may use `{"credentials":[]}`. The file is still required by Compose.
 
 Generate the hash without storing the token in shell history:
 
@@ -135,6 +135,7 @@ Example:
     "scanner": {
       "status": "ok",
       "ready": true,
+      "pending_spends_ready": true,
       "history_complete": true,
       "network": "regtest",
       "ua_hrp": "jregtest",
@@ -157,6 +158,6 @@ Regtest permits anonymous access only when no credentials are configured. Keep a
 
 1. [Allocate a deposit address](capabilities/address-allocation.md) and durably map it to the customer.
 2. [Poll the unfiltered deposit stream](capabilities/deposits.md) and atomically checkpoint its cursor with ledger changes.
-3. Plan withdrawals online, sign in the isolated signer environment, then submit only the signed raw transaction to the broadcast endpoint.
+3. For withdrawals, plan online, reserve every selected `note_id`, sign in the isolated custody boundary, submit only approved raw bytes, and use [selected-note status](capabilities/selected-note-status.md) for exact post-expiry or conflicting-spend reconciliation.
 
 Use `100` confirmations unless the exchange has an explicit, tested risk policy for another value.

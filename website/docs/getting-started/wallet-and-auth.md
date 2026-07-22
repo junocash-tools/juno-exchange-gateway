@@ -115,6 +115,18 @@ Example:
       "wallets": ["hot"]
     },
     {
+      "name": "treasury-monitor",
+      "token_sha256": "<64-lowercase-hex-sha256>",
+      "scopes": ["treasury"],
+      "wallets": ["hot"]
+    },
+    {
+      "name": "transaction-broadcaster",
+      "token_sha256": "<64-lowercase-hex-sha256>",
+      "scopes": ["broadcast"],
+      "wallets": ["hot"]
+    },
+    {
       "name": "withdrawal-monitor",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["read", "withdrawal"],
@@ -129,7 +141,7 @@ Example:
 | `read` | readiness, version, tip, owned-address balances, deposits, and node-only transaction lookup |
 | `address` | allocate deposit addresses |
 | `broadcast` | submit a signed raw transaction |
-| `treasury` | call the [wallet-level aggregate note summary](../capabilities/note-summary.md) for consolidation; does not expose raw notes |
+| `treasury` | call the [aggregate note summary](../capabilities/note-summary.md) and reconcile only the [selected note IDs](../capabilities/selected-note-status.md) recorded in an attempt; no nullifiers, memos, addresses, or wallet-wide raw-note list |
 | `withdrawal` | add a wallet ID and sanitized wallet effects to transaction lookup; must be combined with `read` |
 | `raw` | add raw transaction hex to transaction lookup |
 | `admin` | satisfy any operation scope; wallet restrictions still apply |
