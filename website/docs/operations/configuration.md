@@ -17,7 +17,7 @@ Copy `.env.example` to `.env`. Testnet and mainnet reject the shipped RPC and sc
 | `JUNO_RPC_USER` | `juno-rpc` | Private node RPC user |
 | `JUNO_RPC_PASSWORD` | placeholder | Private node RPC password |
 | `JUNO_SCAN_API_BEARER_TOKEN` | placeholder | Gateway-to-scanner token |
-| `JUNO_NODE_PERSIST_MEMPOOL` | `1` | Preserve the node mempool across restarts; E2E sets `0` to exercise expiry |
+| `JUNO_NODE_PERSIST_MEMPOOL` | `1` | Preserve the node mempool across restarts; keep `1` in production, while E2E sets `0` to exercise expiry |
 | `JUNO_POSTGRES_DB` | `junoscan` | Postgres database |
 | `JUNO_POSTGRES_USER` | `junoscan` | Postgres user |
 | `JUNO_POSTGRES_PASSWORD` | required in Postgres mode | Postgres password; URI-reserved symbols are supported |
@@ -32,6 +32,8 @@ Use digest-pinned image references in production.
 
 When `JUNO_NETWORK=regtest`, the bundled node entrypoint adds `-nuparams=5437f330:1` so the pinned 0.9.12 node reaches NU6.2 for Orchard PCZT proving. This flag is intentionally not configurable through Compose and is never passed for testnet or mainnet; their consensus activation schedules come from the node.
 
+Keep `JUNO_NODE_PERSIST_MEMPOOL=1` in production. With `0`, a node restart can forget an accepted but unmined withdrawal even though its signed bytes remain valid. Do not release its selected note IDs: look up the txid, keep the original broadcast operation's uncertainty rules, and deliberately rebroadcast the identical bytes only when the original result is reconciled and canonical height remains below expiry. Release reservations only after the strict post-expiry checks in [Backups and recovery](./recovery.md). Use `0` only for disposable expiry tests or a documented recovery drill.
+
 ## Source builds and documentation
 
 These settings identify local source builds and the documentation site. They are not gateway runtime policy.
@@ -40,12 +42,12 @@ These settings identify local source builds and the documentation site. They are
 | --- | --- | --- |
 | `JUNOCASH_VERSION` | `0.9.12` | Node release downloaded by the development image |
 | `JUNOCASH_LINUX64_SHA256` | `41f74d…ec386` | Verify the downloaded node archive |
-| `JUNO_ADDRGEN_REF` | `4a2b3a3…db834` | Address-deriver source and version manifest |
+| `JUNO_ADDRGEN_REF` | `4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834` | Address-deriver source and version manifest |
 | `JUNO_ADDRGEN_REPO` | `junocash-tools/juno-addrgen` | Direct gateway-image build argument |
-| `JUNO_SCAN_REF` | pinned release SHA | Scanner commit recorded in the version manifest |
-| `JUNO_TXBUILD_REF` | `c0558da…f0486c9` | Planner source and version manifest |
+| `JUNO_SCAN_REF` | `56bd7edd9b8b93fd73a97110c8ef01326f4f136f` | Scanner commit recorded in the version manifest |
+| `JUNO_TXBUILD_REF` | `40a185c38d8e0767fa5d98bf1967c7e64e544984` | Planner source and version manifest |
 | `JUNO_TXBUILD_REPO` | `junocash-tools/juno-txbuild` | Direct planner-image build argument |
-| `JUNO_TXSIGN_REF` | `aef2a1c…f9496` | Offline signer source and published image |
+| `JUNO_TXSIGN_REF` | `1a32836f77f2d8a01ef0ef20842538cbc506f0c3` | Offline signer source and published image |
 | `JUNO_TXSIGN_REPO` | `junocash-tools/juno-txsign` | Offline signer-image build argument |
 | `JUNO_GATEWAY_VERSION` | `dev` | Gateway version recorded in the binary |
 | `JUNO_GATEWAY_REVISION` | `local` | Gateway commit recorded in the binary |
@@ -104,6 +106,17 @@ The Compose appliance sets private URLs and paths. Direct gateway deployments ma
 | `JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS` | `10000` | Fail-closed cap for one transaction's wallet effects |
 | `JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES` | `100000` | Fail-closed cap for one wallet aggregate note summary; valid range `1` to `1000000` |
 
+Startup enforces these tuning constraints:
+
+- listen address and state DSN are non-empty; the installation-state path is an absolute file path; node and scanner URLs are valid HTTP(S) URLs; at least one wallet is registered
+- scanner lag is non-negative; ordinary and broadcast body limits are each at least `1024` bytes
+- default and maximum confirmations are positive, the default cannot exceed the maximum, and the maximum cannot exceed `10000`
+- all request, upstream, shutdown, HTTP, backfill, and rate-limit values are positive; the idempotency lease is at least `1s`
+- HTTP read timeout is at least the read-header timeout, and HTTP write timeout is strictly greater than the broadcast timeout
+- backfill batch size and wallet-effects event cap are each `1` to `100000`; the note-summary cap is `1` to `1000000`
+- outside regtest, node RPC user/password and a scanner token are mandatory; the two secrets must be distinct, non-placeholder values of at least 24 characters
+- outside regtest, both the gateway database and installation manifest must use persistent, non-memory paths
+
 Rate buckets are separate and keyed by credential plus client IP. Set `JUNO_GATEWAY_TRUST_PROXY_HEADERS=true` only when direct access is blocked and a trusted proxy overwrites forwarding headers.
 
 A credential `name` is also its durable broadcast-idempotency namespace. Rotate its token without changing the name. Before renaming a broadcast principal, reconcile every outstanding withdrawal attempt because the new name creates a new namespace.
@@ -154,6 +167,8 @@ Broker and MySQL drivers require tagged scanner builds and are not part of the p
 ## Wallet file
 
 Each wallet requires a unique `wallet_id`, a unique network-matching `ufvk`, and non-negative `birthday_height`.
+
+Wallet IDs and credential names must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. A UFVK is limited to `4096` bytes. Both `wallets.json` and `auth.json` must be owner-only regular files, not symlinks, contain exactly one JSON object, reject unknown fields, and be no larger than `1 MiB`; use mode `0600`.
 
 | Network | Required UFVK prefix |
 | --- | --- |

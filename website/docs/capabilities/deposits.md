@@ -57,6 +57,8 @@ Example response:
 
 The lifecycle is not strictly one-way. A re-mined transaction can produce `detected` and `confirmed` again after `unconfirmed` or `orphaned`. Apply each transition idempotently against the current state and keep the full history. The gateway reports only external deposits to addresses allocated by this installation; internal change is excluded.
 
+The scanner always supplies `diversifier_index`, including index `0`, and the gateway verifies it against the allocation ledger. For compatibility with older scanner data that omitted a zero value, the gateway infers `0` only when the exact recipient address is already registered at index `0`; every other missing or mismatched identity fails closed with `502 scanner_not_ready`.
+
 `detected` is a mined note, normally at its first scanned confirmation; it is not a mempool notification. With the appliance defaults, `confirmed` arrives at 100 confirmations. The threshold is `JUNO_SCAN_CONFIRMATIONS` and must equal `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS`. Poll continuously while waiting—do not sleep for 100 blocks—because reorg and other deposits share the same ordered stream.
 
 ## Production polling loop
@@ -107,4 +109,6 @@ On `409 cursor_reset_required`, discard the cursor, restart once without it, rep
 
 Changing filters while reusing a cursor returns `409 cursor_filter_mismatch` with action `restart_without_cursor_or_restore_filters`. Restore the original filters or start a separate diagnostic cursor. A malformed cursor or one for another wallet returns `400 invalid_request`.
 
-For `429`, honor `Retry-After` and retain the current cursor. For retryable `5xx`, including `502` for a malformed or inconsistent scanner event, retain the cursor and use bounded exponential backoff with jitter. The gateway returns no page cursor with that error. Alert if it persists: retrying cannot repair corrupt upstream data. Never skip a page to recover from an error.
+For `429`, honor `Retry-After` and retain the current cursor. For retryable `502`/`503`, retain the cursor and use bounded exponential backoff with jitter. A `502` for malformed or inconsistent scanner data needs an alert if it persists because retries cannot repair upstream data.
+
+For `500 internal`, stop the poller, retain the last **successfully committed** cursor, and alert the gateway/storage operator. The failed response has no usable page cursor. After gateway state is healthy, retry from that same committed cursor; at-least-once replay and `deposit_id` idempotency make this safe. Never advance, skip a page, or start a second production cursor to bypass any error.

@@ -24,7 +24,21 @@ Use a birthday at or before the wallet's first possible receipt. An earlier heig
 
 ## 2. Derive the UFVK offline
 
-In an isolated environment, use a separately verified `juno-keys` build:
+The gateway release pins the supported `juno-keys` source in `bundle.lock.json`. From a checked-out gateway release, build and test that exact revision on a trusted build host:
+
+```bash
+KEYS_REF="$(jq -er '.components.keys.revision' bundle.lock.json)"
+git clone https://github.com/junocash-tools/juno-keys.git
+git -C juno-keys checkout --detach "$KEYS_REF"
+test "$(git -C juno-keys rev-parse HEAD)" = "$KEYS_REF"
+cargo test --locked --manifest-path juno-keys/Cargo.toml
+cargo build --locked --release --manifest-path juno-keys/Cargo.toml
+sha256sum juno-keys/target/release/juno-keys
+```
+
+Record the binary hash in the exchange release record, transfer the binary to the isolated key host, and verify the hash again before use. Do not download an unpinned binary or build a moving branch for production key creation.
+
+In the isolated environment, use that verified build:
 
 ```bash
 umask 077

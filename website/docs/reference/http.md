@@ -67,7 +67,10 @@ Use `error.retryable`, not the status alone. Preserve a valid `X-Request-ID` or 
 | `413` | Broadcast body limit exceeded |
 | `422` | Safe response cap or transaction validation/rejection |
 | `429` | Rate limit |
+| `500` | Internal gateway or durable-state failure; stop automatic processing, preserve the exact request/checkpoint, and alert |
 | `502` | Invalid scanner response, upstream node failure, or uncertain broadcast |
 | `503` | Financial dependency not ready |
+
+An `internal` error deliberately has `retryable: false`: the exchange must not loop blindly while gateway state may be unhealthy. Preserve the current deposit cursor or broadcast idempotency key, diagnose readiness and storage, then follow the capability-specific reconciliation procedure. Never manufacture a new cursor, signed attempt, or idempotency key to bypass a `500`.
 
 The OpenAPI document is served with the source repository at `api/openapi.yaml`.

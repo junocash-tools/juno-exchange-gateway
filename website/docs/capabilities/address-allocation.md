@@ -63,7 +63,7 @@ Store `purpose=internal_change` or `purpose=treasury` in the exchange address ta
 
 This endpoint has no idempotency key. `X-Request-ID` is correlation only. Every successful call allocates a new address. If the client loses a `201` response, a retry may allocate another address and cannot recover the first response through the API.
 
-Treat a timeout as an unknown allocation, retain its request ID and audit record, and alert for reconciliation. It is safe to request a new address for the customer, but never infer that the unknown address was unused or make it customer-facing later.
+Treat a timeout or `500 internal` as an unknown, non-idempotent allocation, retain its request ID and audit record, and alert for reconciliation. Never retry it as though the result were known. After gateway state is healthy, it is safe to make a separate allocation request for the customer, but never infer that the unknown address was unused or make it customer-facing later. Any index reserved by the unknown operation remains permanently skipped unless the original `201` response was durably recorded.
 
 Allocation is readiness-gated. On a retryable `503`, leave exchange state unchanged and retry with backoff. A reserved diversifier index may be skipped after a failure; gaps are expected and indices are never reused.
 

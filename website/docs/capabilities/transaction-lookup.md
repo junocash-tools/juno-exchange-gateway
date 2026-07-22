@@ -77,10 +77,10 @@ The array is ordered by scanner event ID. Common fields identify the event, wall
 | --- | --- | --- |
 | `mempool` | Accepted but not mined | Keep inputs reserved |
 | `confirmed` | Mined with one or more confirmations | Keep provisional until the configured threshold; default `100` |
-| `orphaned` | Node reports a conflicted or stale-block tx, or terminal wallet fallback applies after node removal | Reverse finality-dependent actions, keep inputs reserved, and follow the deliberate pre-expiry [rebroadcast procedure](./broadcast.md#retry-rules) if policy permits |
-| `expired` | Latest valid wallet event is expired, node no longer has the tx, and node height is greater than expiry | Reconcile effects, then release inputs |
+| `orphaned` | Node reports a conflicted or stale-block tx, or terminal wallet fallback applies after node removal | Reverse finality-dependent actions. Before expiry, keep inputs reserved and follow the deliberate [rebroadcast procedure](./broadcast.md#retry-rules) if policy permits. After expiry, also wait until canonical height is at least `orphaned_at_height + configured_confirmations`; then reconcile every selected note and release only those that are unspent and non-pending |
+| `expired` | Latest valid wallet event is expired, node no longer has the tx, and node height is greater than expiry | Reconcile effects and selected-note state. If it was previously mined/orphaned, first satisfy the same fork-finality wait; release only unspent, non-pending notes |
 
-A later nonterminal wallet event cancels terminal scanner fallback. A mined transaction can return to mempool or disappear during a reorg, so continue lookup through the finality threshold and retain lifecycle history.
+A later nonterminal wallet event cancels terminal scanner fallback. An `orphaned` state is not guaranteed to be renamed `expired`. Expiry alone is insufficient after prior mining because the stale block can return; require both the strict expiry boundary and finality of the replacement branch from `orphaned_at_height`. If the wallet effect does not supply that fork height, require manual chain evidence instead of releasing automatically. Then reconcile source-note state. A mined transaction can return to mempool or disappear during a reorg, so retain lifecycle history.
 
 ## Errors
 
@@ -105,7 +105,10 @@ A later nonterminal wallet event cancels terminal scanner fallback. A mined tran
 | `409` | `event_history_reset` | Retry the whole lookup |
 | `422` | `wallet_effects_limit_exceeded` | Investigate the event volume or raise the configured cap deliberately |
 | `429` | `rate_limited` | Back off and retry |
+| `500` | `internal` | Pause reconciliation, preserve reservations, and alert; retry only after gateway state is healthy |
 | `502` | `node_rpc_error` | Retry after the node recovers |
 | `503` | readiness errors | Keep financial decisions paused and retry after readiness |
+
+A failed lookup never proves absence, expiry, or spendability. In particular, do not release selected note-ID reservations after `500`, `502`, or `503`.
 
 Historical arbitrary lookup requires the node transaction index enabled by the appliance.

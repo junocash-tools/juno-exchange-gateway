@@ -83,6 +83,7 @@ Successful planning writes one `TxPlan v0` object. This is the approval and sign
   "fee_zat": "200000",
   "notes": [
     {
+      "note_id": "<source-txid>:<source-action-index>",
       "action_nullifier": "<64-hex>",
       "cmx": "<64-hex>",
       "position": 18273,
@@ -93,6 +94,8 @@ Successful planning writes one `TxPlan v0` object. This is the approval and sign
   ]
 }
 ```
+
+The bundled planner always identifies each selected input as `note_id = txid:action_index`. Use `note_id` as the exchange reservation key. Before approval, require every selected note to have a unique canonical ID matching `<64-lowercase-hex-txid>:<base-10-action-index>` with no leading zero in a multi-digit action index. Reject the plan if an ID is missing, malformed, or repeated. The signer independently enforces that structural rule, but it cannot see or mutate the exchange reservation ledger; the exchange must still reserve the IDs atomically before approval. `action_nullifier` is decryption context from the Orchard action that created the note; it is not the nullifier produced when this transaction later spends that note and must not be used as the reservation identity.
 
 Treat the complete plan as sensitive operational data. Hash the exact file bytes, bind the digest to the withdrawal attempt and approval, then verify the same digest after transfer:
 
@@ -169,18 +172,34 @@ A validation or signing failure returns a non-zero exit status:
 
 Orchard PCZT proving requires NU6.2. The bundled 0.9.12 node therefore activates branch `5437f330` at regtest height 1; verify `getblockchaininfo.consensus.chaintip` before a local signing test that uses another regtest node. This override is for regtest only—never copy it to testnet or mainnet.
 
-```bash
-ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
+On mainnet or testnet before NU6.2 activates, `ext-prepare` fails closed with `prepare_failed` and reason `external_signing_branch_unsupported`. Do not change public-network activation parameters. Use the direct offline `sign` flow until the network reaches NU6.2, or keep external signing disabled.
 
-juno-txsign ext-prepare \
-  --txplan "$ATTEMPT_DIR/txplan.json" \
-  --ufvk-file "$PWD/wallet.ufvk" \
-  --out-prepared "$ATTEMPT_DIR/prepared.json" \
-  --out-requests "$ATTEMPT_DIR/requests.json" \
+```bash
+umask 077
+TXSIGN_IMAGE=ghcr.io/junocash-tools/juno-exchange-gateway-txsign@sha256:<verified-digest>
+ATTEMPT_DIR="$PWD/tmp/withdrawal-1842"
+EXT_DIR="$ATTEMPT_DIR/external"
+install -d -m 0700 "$EXT_DIR"
+chmod 0600 "$PWD/wallet.ufvk"
+
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --user "$(id -u):$(id -g)" \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  -v "$ATTEMPT_DIR/txplan.json:/work/txplan.json:ro" \
+  -v "$PWD/wallet.ufvk:/run/secrets/wallet.ufvk:ro" \
+  -v "$EXT_DIR:/work/output:rw" \
+  "$TXSIGN_IMAGE" ext-prepare \
+  --txplan /work/txplan.json \
+  --ufvk-file /run/secrets/wallet.ufvk \
+  --out-prepared /work/output/prepared.json \
+  --out-requests /work/output/requests.json \
   > "$ATTEMPT_DIR/prepare-result.json"
 
-sha256sum "$ATTEMPT_DIR/prepared.json" "$ATTEMPT_DIR/requests.json"
+sha256sum "$EXT_DIR/prepared.json" "$EXT_DIR/requests.json"
 ```
+
+Use the same digest-pinned signer image recorded in the release provenance. `ext-prepare` needs the UFVK but no spending key and needs no network; the command above gives it read-only inputs and one owner-only output directory. Transfer only `requests.json` and the approval metadata required by the external signer. Keep `prepared.json` with the coordinator and never send the UFVK to a signer that does not require it.
 
 `ext-prepare` always returns JSON. Treat `prepared.json` as opaque, retain its exact bytes through finalization, and bind both file digests to the approved withdrawal attempt. The prepared artifact also contains three coordination mappings:
 
@@ -230,6 +249,8 @@ The external signer must return one signature for every requested action:
 }
 ```
 
+Store the exact returned submission as `$EXT_DIR/sigs.json` with mode `0600`. Do not merge, reorder, or reconstruct signature entries between the external signer and finalization.
+
 Before signing, the external system must verify the approved plan/prepared digest, network, action count, and unique `action_index` set. Never sign a request batch reconstructed or edited outside `ext-prepare`.
 
 ### External signer contract
@@ -252,22 +273,34 @@ cargo build --locked --release \
   --bin juno_orchard_spendauth_sign
 
 ../juno-txsign/rust/juno-tx/target/release/juno_orchard_spendauth_sign \
-  --requests "$ATTEMPT_DIR/requests.json" \
+  --requests "$EXT_DIR/requests.json" \
   --coin-type 8135 \
   --account 0 \
   --seed-file "$PWD/hot.seed" \
-  --out "$ATTEMPT_DIR/sigs.json"
+  --out "$EXT_DIR/sigs.json"
 ```
 
 This helper is a test oracle, not a production HSM or TSS service.
 
 ```bash
-juno-txsign ext-finalize \
-  --prepared-tx "$ATTEMPT_DIR/prepared.json" \
-  --sigs "$ATTEMPT_DIR/sigs.json" \
-  --out "$ATTEMPT_DIR/rawtx.hex" \
+FINAL_DIR="$ATTEMPT_DIR/final"
+install -d -m 0700 "$FINAL_DIR"
+
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --user "$(id -u):$(id -g)" \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  -v "$EXT_DIR/prepared.json:/work/prepared.json:ro" \
+  -v "$EXT_DIR/sigs.json:/work/sigs.json:ro" \
+  -v "$FINAL_DIR:/work/output:rw" \
+  "$TXSIGN_IMAGE" ext-finalize \
+  --prepared-tx /work/prepared.json \
+  --sigs /work/sigs.json \
+  --out /work/output/rawtx.hex \
   --json > "$ATTEMPT_DIR/signed.json"
 ```
+
+Finalization also needs no network or spending key. Rehash `prepared.json` and require it to match the approval record before this command; verify the returned txid and fee before moving only the approved signed result back online.
 
 With `--json`, success uses the same envelope as direct signing:
 
@@ -327,4 +360,4 @@ See [signed-raw broadcast](../capabilities/broadcast.md) for complete requests, 
 
 The public gateway is watch-only and deliberately accepts no recipient, amount, plan, seed, or signing request. This keeps withdrawal authorization in the exchange and spending authority in the isolated signer.
 
-The current planner is an on-demand private CLI. A future private planner service is reasonable only after it adds atomic nullifier reservations, wallet-scoped authentication, idempotent plan IDs, server-selected registered change, fee and expiry policy limits, exact node/scanner consistency checks, durable lifecycle recovery, and an approval-bound plan digest. It must remain off the public ingress network. The signer must remain offline or behind an equivalently isolated HSM/TSS boundary.
+The current planner is an on-demand private CLI. A future private planner service is reasonable only after it adds atomic selected-note reservations, wallet-scoped authentication, idempotent plan IDs, server-selected registered change, fee and expiry policy limits, exact node/scanner consistency checks, durable lifecycle recovery, and an approval-bound plan digest. It must remain off the public ingress network. The signer must remain offline or behind an equivalently isolated HSM/TSS boundary.

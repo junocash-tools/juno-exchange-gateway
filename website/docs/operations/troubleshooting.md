@@ -19,7 +19,7 @@ docker compose logs --since=15m gateway juno-scan junocashd
 | Deposit unconfirmed/orphaned | Lifecycle event | Apply the compensating ledger action |
 | Cursor `409 cursor_reset_required` | Scanner event epoch changed | Restart without the cursor and replay idempotently by stable deposit identity |
 | Cursor `400` | Malformed, cross-wallet, wrong-key, or otherwise unauthenticated cursor | Fix the request; during audited key-loss recovery, discard it explicitly; never auto-reset on `400` |
-| Planner selects an already planned note | Exchange reservation ledger | Atomically reserve nullifiers or run only one complete lifecycle per wallet |
+| Planner selects an already planned note | Exchange reservation ledger | Atomically reserve `notes[].note_id` values or run only one complete lifecycle per wallet |
 | Planner uses immature notes | `--minconf` and component version | Use the default `100` or pass the documented policy explicitly |
 | Node rejects fee | Planner fee and node policy | Use the default multiplier `20`; revalidate after version changes |
 | `note_decrypt_failed` while signing | Plan, seed, account, coin type, network | Stop; verify the approved plan belongs to the isolated signing wallet |
@@ -28,7 +28,7 @@ docker compose logs --since=15m gateway juno-scan junocashd
 | Broadcast result uncertain | `retryable`, txid, original key/body | Retry identical input; never rebuild first |
 | Transaction `404` | Lowercase txid, node sync/index, wallet query | Retry with authorized `wallet_id`; keep reservations until expiry is strictly passed |
 | Pending remains at expiry height | Current height vs `expiry_height` | Expected: wait until `chain_height > expiry_height` |
-| Transaction orphaned | Node and wallet lifecycle | Reverse finality-dependent actions, keep inputs reserved, and deliberately rebroadcast identical bytes with a fresh operation key only after the original result is resolved and while height is strictly below expiry |
+| Transaction orphaned | Node and wallet lifecycle | Reverse finality-dependent actions and keep inputs reserved. Before expiry, deliberately rebroadcast identical bytes only under the reconciled fresh-key procedure. After expiry, also wait until the replacement branch is final from `orphaned_at_height`, then reconcile every selected note before release |
 | Consolidation has insufficient funds | Selected note sum vs action fee | Raise eligible value, reduce input count, or exclude uneconomic notes |
 | Witness planning is slow/fails | Scanner lag, shard cache, anchor freshness | Wait for readiness and rebuild a fresh plan |
 

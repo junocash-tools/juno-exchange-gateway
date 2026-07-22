@@ -43,7 +43,7 @@ An idempotent replay or a transaction already in the mempool or active chain ret
 
 An `orphaned` lookup does not short-circuit a newly claimed broadcast operation. The gateway resubmits the exact approved bytes so the node can accept them back into the mempool or return a current rejection.
 
-A completed idempotency receipt is immutable: replaying its key returns the stored result without contacting the node. Deliberate rebroadcast after a later orphan or mempool drop therefore uses a fresh **rebroadcast-operation key**, while keeping the same wallet ID, signed raw bytes, expected txid, withdrawal attempt, and nullifier reservations:
+A completed idempotency receipt is immutable: replaying its key returns the stored result without contacting the node. Deliberate rebroadcast after a later orphan or mempool drop therefore uses a fresh **rebroadcast-operation key**, while keeping the same wallet ID, signed raw bytes, expected txid, withdrawal attempt, and selected note-ID reservations:
 
 1. Resolve any uncertain original HTTP outcome with the original key.
 2. Look up the txid with its authorized wallet. Confirm `orphaned`, or confirm it is absent. Require canonical height to remain strictly less than `expiry_height` and leave enough blocks for the exchange's mining policy.
@@ -55,6 +55,7 @@ If the deliberate rebroadcast is uncertain, retry its identical request and its 
 ## Retry rules
 
 - After a timeout, `idempotency_in_progress`, `node_rpc_error`, `node_not_ready`, or `rate_limited`, retry the identical wallet ID, raw hex, expected txid, principal, and key.
+- Treat `500 internal` as an uncertain broadcast outcome: preserve the identical request and original key, stop automatic retries, and alert. After gateway state is healthy, reconcile the expected txid and retry only that identical request with the same key. Never choose a fresh key to bypass failed idempotency storage.
 - For `idempotency_in_progress` and `rate_limited`, wait for the `Retry-After` header. The former also returns the same value in `error.details.retry_after_seconds`.
 - A different body under the same key returns non-retryable `409 idempotency_conflict`.
 - A completed receipt is durable, immutable, and can replay without contacting the node; its `state` is the stored broadcast result, not a current chain lookup.
@@ -84,6 +85,7 @@ Example error:
 | `413` | `invalid_request` | Reduce the request below the configured body limit |
 | `422` | `expected_txid_mismatch`, `transaction_rejected` | Stop; inspect or rebuild the transaction |
 | `429` | `rate_limited` | Back off, then retry identical input |
+| `500` | `internal` | Outcome may be uncertain; preserve bytes/key and reconcile after gateway state is healthy |
 | `502` | `node_rpc_error` | Result may be uncertain; retry identical input |
 | `503` | `node_not_ready` | Wait for readiness, then retry identical input |
 

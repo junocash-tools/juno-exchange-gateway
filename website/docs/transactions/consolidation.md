@@ -33,6 +33,46 @@ docker compose --profile operator run --rm txbuild consolidate \
 
 `consolidate` tries the greatest feasible input count up to `--max-spends`. It prefers smaller notes and substitutes larger notes only when needed to cover the fee. At least two eligible notes are required. The planner and signer both limit a transaction to 200 inputs and 200 total outputs, including change.
 
+Sweep every eligible note when the input count is at most 200:
+
+```bash
+docker compose --profile operator run --rm -T txbuild sweep \
+  --wallet-id hot \
+  --coin-type 8133 \
+  --account 0 \
+  --to '<registered-treasury-address>' \
+  --fee-multiplier 20 \
+  --minconf 100 \
+  > tmp/sweep.txplan.json
+```
+
+For a multi-tier rebalance, first create `tmp/rebalance.outputs.json` with only operator-controlled destinations:
+
+```json
+[
+  {"to_address":"<registered-hot-address>","amount_zat":"200000000"},
+  {"to_address":"<registered-warm-address>","amount_zat":"800000000"}
+]
+```
+
+```bash
+docker compose --profile operator run --rm -T \
+  -v "$PWD/tmp/rebalance.outputs.json:/work/outputs.json:ro" \
+  txbuild rebalance \
+  --wallet-id hot \
+  --coin-type 8133 \
+  --account 0 \
+  --outputs-file /work/outputs.json \
+  --change-address '<registered-hot-change-address>' \
+  --fee-multiplier 20 \
+  --minconf 100 \
+  > tmp/rebalance.txplan.json
+```
+
+The signer proves ownership only for a nonzero change output. It validates the network but does not prove that explicit `--to` or `--outputs-file` destinations belong to the exchange. Before approval, require every explicit sweep, consolidation, or rebalance destination to match the exchange treasury registry exactly. A mistyped external destination is otherwise a valid irreversible payment.
+
+After any `consolidate`, `sweep`, or `rebalance` plan, use the same offline direct-signing or external-signing flow, note-ID reservation policy, signed-raw broadcast API, and txid reconciliation described in [build, sign, and broadcast](./build-sign-broadcast.md).
+
 ## Economics
 
 With the bundled node policy, a transaction fee is:
@@ -68,7 +108,7 @@ Do not broadcast consolidation on a blind cron. Evaluate the [note summary](../c
 
 Aim for at most `30` spendable notes after maintenance. These are operational defaults, not protocol rules; tune them from withdrawal size, note distribution, proof latency, and fee budget.
 
-Run only one plan lifecycle per wallet. After each batch, wait until the scanner marks its inputs pending-spent; waiting for one confirmation before the next batch is safer. Refresh the summary and repeat only while the threshold and fee policy still justify it. Do not immediately consolidate each customer deposit: batching at an off-peak, jittered time reduces cost and timing correlation.
+Without a durable exchange reservation ledger, run only one plan lifecycle per wallet and wait for finality or the strict post-expiry release rule before planning another. With atomic note-ID reservations, a later disjoint batch may begin after the scanner marks every prior input pending-spent; waiting for one confirmation is safer. In both cases, keep every earlier reservation until that transaction is final or safely released after expiry. Refresh the summary before each batch and repeat only while the threshold and fee policy still justify it. Do not immediately consolidate each customer deposit: batching at an off-peak, jittered time reduces cost and timing correlation.
 
 ## Privacy and operations
 
@@ -78,7 +118,7 @@ A consolidation transaction shows that many nullifiers were authorized together 
 - use a dedicated registered `purpose=treasury` or `purpose=internal_change` address, never a customer deposit address; see [address allocation](../capabilities/address-allocation.md#change-and-treasury-addresses)
 - do not credit the output as an external deposit
 - avoid a predictable public schedule when operations permit
-- reserve every selected nullifier through the full sign and broadcast lifecycle
+- reserve every selected `notes[].note_id` through the full sign and broadcast lifecycle
 - sign with the same offline or external spend-authority flow as withdrawals
 - monitor mining, finality, expiry, and reorgs by txid
 
