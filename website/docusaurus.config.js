@@ -1,3 +1,5 @@
+const path = require('path');
+
 const repository = process.env.GITHUB_REPOSITORY || 'junocash-tools/juno-exchange-gateway';
 const [organizationName, projectName] = repository.split('/');
 const pagesProject = `${organizationName}.github.io`.toLowerCase();
@@ -8,16 +10,21 @@ function normalizedBaseUrl() {
   return `/${value}`.replace(/\/+/g, '/').replace(/\/?$/, '/');
 }
 
+const docsURL = process.env.DOCS_URL || `https://${organizationName}.github.io`;
+const baseUrl = normalizedBaseUrl();
+const openAPIURL = new URL(`${baseUrl}openapi.yaml`, docsURL).toString();
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Juno Exchange Gateway',
   tagline: 'Watch-only exchange integration for Juno Cash',
-  url: process.env.DOCS_URL || `https://${organizationName}.github.io`,
-  baseUrl: normalizedBaseUrl(),
+  url: docsURL,
+  baseUrl,
   organizationName,
   projectName,
   deploymentBranch: 'gh-pages',
   trailingSlash: true,
+  staticDirectories: [path.resolve(__dirname, '../api'), path.resolve(__dirname, 'static')],
   onBrokenLinks: 'throw',
   markdown: {
     hooks: {onBrokenMarkdownLinks: 'throw'},
@@ -47,6 +54,7 @@ const config = {
       items: [
         {type: 'docSidebar', sidebarId: 'gatewaySidebar', position: 'left', label: 'Guide'},
         {to: '/operations/configuration', label: 'Configuration', position: 'left'},
+        {href: openAPIURL, label: 'OpenAPI', position: 'left'},
         {
           href: `https://github.com/${repository}`,
           label: 'GitHub',
@@ -69,6 +77,7 @@ const config = {
           title: 'Reference',
           items: [
             {label: 'HTTP API', to: '/reference/http'},
+            {label: 'OpenAPI YAML', href: openAPIURL},
             {label: 'Configuration', to: '/operations/configuration'},
             {label: 'Security', to: '/operations/security'},
           ],

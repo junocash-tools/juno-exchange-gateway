@@ -2,32 +2,42 @@
 title: Observability
 ---
 
-## Health endpoints
+## Health
 
 | Endpoint | Auth | Use |
 | --- | --- | --- |
 | `GET /v1/health/live` | No | Process liveness only |
 | `GET /v1/health/ready` | `read` | Financial traffic gate |
-| `GET /v1/version` | `read` | Build and API version |
-| `GET /v1/network/tip` | `read` | Node/scanner position |
+| `GET /v1/version` | `read` | Build and component versions |
+| `GET /v1/network/tip` | `read` | Node and scanner positions |
 
-Readiness verifies gateway state, network identity, node sync, scanner lag, and wallet history. It returns `200` only when every scanner wallet is `complete` with `next_height` beyond the scanner tip. Route financial requests only then.
+Readiness checks gateway state, network identity, node sync, scanner lag, and wallet history. With the default complete-history policy it requires an explicit scanner `history_complete: true` attestation, and returns `200` only when each wallet backfill is `complete` with `next_height` beyond the scanner tip. Never route financial traffic from liveness alone.
 
-For operator diagnosis, scanner `GET /v1/wallets/{wallet_id}/backfill` reports the authoritative birthday, next and target heights, state, last error, and update time. The gateway mirrors this progress; it does not override scanner state.
+Scanner `GET /v1/wallets/{wallet_id}/backfill` is the authoritative diagnostic for birthday, next and target heights, state, last error, and update time.
 
 ## Logs
 
-Gateway logs are structured JSON. Each request includes request ID, route, status, byte count, duration, principal, and remote IP. Collect container stdout and restrict access because metadata can still be sensitive.
+Gateway stdout is structured JSON with request ID, route, status, byte count, duration, principal, and remote IP. Restrict log access and do not record tokens, UFVKs, plans, raw transactions, memos, or signing material.
 
-Alert on:
+## Withdrawal signals
 
-- readiness `503`
-- scanner lag above the configured maximum
-- node initial block download or network mismatch
-- scanner shard-cache failures or stalled progress
-- backfill state `error` or a `next_height` that stops advancing
-- repeated reorg lifecycle events
-- sustained `429`, `5xx`, or broadcast uncertainty
-- storage and idempotency errors
+Reservations live in the exchange ledger, not the gateway. Export at least:
 
-Do not treat liveness as readiness.
+- reserved nullifier count and oldest reservation age by wallet
+- attempts by planned, signed, broadcast-uncertain, mempool, mined, final, orphaned, and expired state
+- blocks remaining to each signed transaction's expiry
+- broadcast retries, `idempotency_in_progress`, `node_rpc_error`, and rejected transactions
+- mempool age and confirmation depth for outstanding withdrawals
+- unconfirmation/orphan events after credit or withdrawal finality
+- note count and value distribution for consolidation planning
+
+At the exact expiry height a pending note is still locked. Alert when a transaction is absent after `chain_height > expiry_height` but its scanner pending marker or exchange reservation remains. See [note selection and reservations](../transactions/note-selection-and-reservations.md).
+
+## Alerts
+
+- readiness `503`, node initial block download, or network mismatch
+- scanner lag above the configured maximum, stalled backfill, or shard-cache failure
+- repeated cursor/event-epoch resets or reorg lifecycle events
+- sustained `429`, `5xx`, broadcast uncertainty, or idempotency storage errors
+- outstanding reservations near or beyond expiry
+- storage capacity, backup, and restore-test failures

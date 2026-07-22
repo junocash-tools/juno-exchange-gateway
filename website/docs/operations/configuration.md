@@ -30,6 +30,8 @@ Copy `.env.example` to `.env`. Testnet and mainnet reject the shipped RPC and sc
 
 Use digest-pinned image references in production.
 
+When `JUNO_NETWORK=regtest`, the bundled node entrypoint adds `-nuparams=5437f330:1` so the pinned 0.9.12 node reaches NU6.2 for Orchard PCZT proving. This flag is intentionally not configurable through Compose and is never passed for testnet or mainnet; their consensus activation schedules come from the node.
+
 ## Source builds and documentation
 
 These settings identify local source builds and the documentation site. They are not gateway runtime policy.
@@ -41,9 +43,9 @@ These settings identify local source builds and the documentation site. They are
 | `JUNO_ADDRGEN_REF` | `4a2b3a3…db834` | Address-deriver source and version manifest |
 | `JUNO_ADDRGEN_REPO` | `junocash-tools/juno-addrgen` | Direct gateway-image build argument |
 | `JUNO_SCAN_REF` | pinned release SHA | Scanner commit recorded in the version manifest |
-| `JUNO_TXBUILD_REF` | `e7b1d5c…c75f` | Planner source and version manifest |
+| `JUNO_TXBUILD_REF` | `c0558da…f0486c9` | Planner source and version manifest |
 | `JUNO_TXBUILD_REPO` | `junocash-tools/juno-txbuild` | Direct planner-image build argument |
-| `JUNO_TXSIGN_REF` | `29a58cc…ae6890` | Offline signer source and published image |
+| `JUNO_TXSIGN_REF` | `aef2a1c…f9496` | Offline signer source and published image |
 | `JUNO_TXSIGN_REPO` | `junocash-tools/juno-txsign` | Offline signer-image build argument |
 | `JUNO_GATEWAY_VERSION` | `dev` | Gateway version recorded in the binary |
 | `JUNO_GATEWAY_REVISION` | `local` | Gateway commit recorded in the binary |
@@ -77,9 +79,9 @@ The Compose appliance sets private URLs and paths. Direct gateway deployments ma
 | `JUNO_GATEWAY_WALLETS_FILE` | required | Wallet JSON path |
 | `JUNO_GATEWAY_AUTH_FILE` | required outside regtest | Credential JSON path |
 | `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS` | `100` | Positive default financial-read and scanner-event threshold |
-| `JUNO_GATEWAY_MAX_CONFIRMATIONS` | `10000` | Maximum request override |
+| `JUNO_GATEWAY_MAX_CONFIRMATIONS` | `10000` | Maximum request override; startup rejects values above the API hard ceiling of `10000` |
 | `JUNO_GATEWAY_MAX_SCANNER_LAG` | `2` | Readiness lag limit |
-| `JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY` | `true` | Gate financial reads on scanner history |
+| `JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY` | `true` | Require an explicit scanner `history_complete: true` attestation; keep enabled in production |
 | `JUNO_GATEWAY_MAX_JSON_BODY_BYTES` | `1048576` | Ordinary JSON body limit |
 | `JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES` | `4194304` | Broadcast body limit |
 | `JUNO_GATEWAY_READ_TIMEOUT` | `15s` | Read request deadline |
@@ -100,6 +102,7 @@ The Compose appliance sets private URLs and paths. Direct gateway deployments ma
 | `JUNO_GATEWAY_BACKFILL_YIELD` | `250ms` | Pause between backfill batches |
 | `JUNO_GATEWAY_BACKFILL_TIMEOUT` | `10m` | Deadline for one backfill request |
 | `JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS` | `10000` | Fail-closed cap for one transaction's wallet effects |
+| `JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES` | `100000` | Fail-closed cap for one wallet aggregate note summary; valid range `1` to `1000000` |
 
 Rate buckets are separate and keyed by credential plus client IP. Set `JUNO_GATEWAY_TRUST_PROXY_HEADERS=true` only when direct access is blocked and a trusted proxy overwrites forwarding headers.
 
@@ -125,7 +128,7 @@ The appliance exposes the operational subset below in `.env`.
 
 Keep `auto` in production. The other witness modes are diagnostic controls. Disabling the shard cache preserves the subtree and legacy fallbacks but increases witness work.
 
-Readiness requires `JUNO_SCAN_CONFIRMATIONS` to be positive and exactly equal to `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS`. This prevents deposit events and default balance reads from using different finality policies.
+Readiness requires `JUNO_SCAN_CONFIRMATIONS` to be positive and exactly equal to `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS`. It also requires scanner `ready=true` and requires the scanner-reported lag to equal the lag independently derived from the gateway node tip and scanner height. This prevents deposit events and default balance reads from using different finality policies or inconsistent chain positions.
 
 Direct scanner deployments also support:
 
@@ -150,20 +153,34 @@ Broker and MySQL drivers require tagged scanner builds and are not part of the p
 
 ## Wallet file
 
-Each wallet requires a unique `wallet_id`, a network-matching `ufvk`, and non-negative `birthday_height`. Keep the earliest reliable birthday; a later value can miss deposits during recovery.
+Each wallet requires a unique `wallet_id`, a unique network-matching `ufvk`, and non-negative `birthday_height`.
+
+| Network | Required UFVK prefix |
+| --- | --- |
+| `mainnet` | `jview1...` |
+| `testnet` | `jviewtest1...` |
+| `regtest` | `jviewregtest1...` |
+
+Keep the earliest reliable birthday; a later value can miss deposits during recovery. Wallet IDs are durable API and ledger identities, not display names.
+
+The one-time `init` binds the exact wallet set, IDs, UFVK fingerprints, birthdays, and network into the installation manifest. Any later addition, removal, or identity change fails startup. There is no post-init wallet-onboarding operation; prepare every required wallet first. See [Wallet and authentication setup](../getting-started/wallet-and-auth.md).
 
 ## Credential file
 
-Each credential has a unique `name`, exactly one of `token` or lowercase `token_sha256`, at least one scope, and at least one wallet. Plain tokens must be at least 24 characters; hashes are preferred.
+Each credential has a unique `name`, exactly one of `token` or lowercase `token_sha256`, at least one scope, and at least one wallet. Plain tokens must be at least 24 characters; hashes are preferred. Every plaintext token and effective SHA-256 token hash must also be unique across credential names. Startup rejects duplicates because each name defines a distinct authorization and broadcast-idempotency principal.
 
-The tracked auth example uses an all-zero hash that is rejected outside regtest. Replace it with the SHA-256 hash of a strong bearer token before testnet or mainnet startup.
+The tracked auth example separates reader, allocator, treasury, and broadcaster duties. Its repeated-digit hashes are placeholders rejected outside regtest. Replace each enabled credential with the hash of its own strong token, and remove credentials the deployment does not use.
 
 | Scope | Access |
 | --- | --- |
-| `read` | readiness, version, tip, balances, deposits, transaction lookup |
+| `read` | readiness, version, tip, balances, deposits, and node-only transaction lookup |
 | `address` | allocate deposit addresses |
 | `broadcast` | submit signed raw transactions |
+| `treasury` | `GET /v1/wallets/{wallet_id}/notes/summary` aggregate consolidation inventory; no raw notes |
+| `withdrawal` | wallet-enriched transaction lookup and sanitized wallet effects; combine with `read` |
 | `raw` | include raw hex in transaction lookup |
 | `admin` | satisfies any endpoint scope; wallet restrictions still apply |
 
-Use explicit wallet IDs. Reserve `"*"` for tightly controlled operational credentials.
+`read` does not imply `treasury` or `withdrawal`. Give those scopes only to the consolidation and withdrawal-monitoring services. Use explicit wallet IDs and reserve `"*"` for tightly controlled operational credentials.
+
+Credential files are loaded at startup. Rotate a token under the same credential `name` and recreate the gateway container. The name is the broadcaster's durable idempotency namespace; changing it can make the same withdrawal attempt appear new. For an overlapping non-broadcast rotation, use a temporary second name, switch clients, then remove the old credential.

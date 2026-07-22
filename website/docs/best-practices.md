@@ -2,17 +2,21 @@
 title: Best practices
 ---
 
-- Keep the gateway's public surface to one HTTPS or mTLS endpoint.
-- Keep seeds and spending keys offline; the online planner is intentionally watch-only.
+- Expose only the gateway through HTTPS or mTLS. Keep the node, scanner, planner, and databases private.
+- Keep seeds and spending keys offline. Export only an approved signed raw transaction and expected txid.
+- Keep build and sign outside the public API. A planner service needs durable atomic reservations and approval-bound plans first.
 - Use one registered UFVK and durable address mapping per wallet policy.
-- Initialize once; back up the external installation manifest after allocations and never replace it with an empty directory.
-- Default to 100 confirmations and process reorg lifecycle events.
-- Poll with opaque cursors, deduplicate events, and checkpoint atomically with ledger writes.
-- Use a unique, stable idempotency key for each withdrawal attempt.
-- Serialize planning per wallet or atomically reserve selected note nullifiers; release them only on confirmation, observed expiry, or an explicit replacement policy.
-- Send change to a dedicated registered address under the spending UFVK and never credit that internal change as a customer deposit.
-- Keep scanner witness mode on `auto`; monitor lag and shard-cache progress.
-- Use Postgres for production and RocksDB for a single-host deployment.
-- Pin component images by digest and test every release on regtest.
-- Back up installation state, gateway state, and customer address mappings separately; rebuild scanner data from the UFVK and birthday when needed.
-- Test deposit, reorg, withdrawal, expiry, recovery, and rollback runbooks regularly.
+- Initialize once. Back up the installation manifest after allocations and never replace it with an empty directory.
+- Use the default `100` confirmations and process unconfirmation and orphan events.
+- Poll the complete deposit stream, deduplicate by stable identity, and commit cursor and ledger changes atomically.
+- Allow only one complete plan-to-outcome lifecycle per wallet, or atomically reserve every selected nullifier.
+- At expiry, release reservations only when canonical height is strictly greater than `expiry_height` and lookup/effects are reconciled.
+- Bind withdrawal, attempt, plan digest, txid, raw-transaction hash, and idempotency key before broadcast.
+- Retry uncertain broadcasts with the same wallet ID, principal, key, expected txid, and bytes. Never rebuild first.
+- After a completed broadcast later becomes orphaned or absent while height is strictly below expiry, keep reservations and use a fresh operation key only to rebroadcast the identical signed bytes.
+- Use registered internal change under the spending UFVK; never credit change as a customer deposit.
+- Keep planner defaults at `--minconf 100` and `--fee-multiplier 20` unless a reviewed policy says otherwise.
+- Consolidate only when note count, signing time, or input limits justify its fee and privacy cost.
+- Keep scanner witness mode on `auto`; monitor readiness, lag, shard-cache progress, note inventory, and outstanding reservations.
+- Pin component images by digest and test deposits, withdrawals, expiry, reorgs, consolidation, recovery, and rollback on regtest before release.
+- Back up installation state, gateway state, exchange address mappings, and the withdrawal ledger separately. Rebuild confirmed scanner data from UFVK, birthday, network, and chain when needed.

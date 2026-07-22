@@ -18,6 +18,10 @@ Prepare:
 
 The online appliance never needs a seed or spending key.
 
+:::warning Initialize once
+`init` seals the complete wallet set, wallet IDs, UFVK fingerprints, birthdays, and network into the installation manifest. Decide every wallet before initialization; later wallet additions or identity changes are rejected at startup.
+:::
+
 ## Configure a wallet
 
 Create `wallets.json` with mode `0600`:
@@ -42,7 +46,7 @@ Create `auth.json` with mode `0600`. Mainnet and testnet require at least one cr
     {
       "name": "exchange-api",
       "token_sha256": "<64-lowercase-hex-sha256>",
-      "scopes": ["read", "address", "broadcast"],
+      "scopes": ["read", "address", "broadcast", "withdrawal"],
       "wallets": ["hot"]
     }
   ]
@@ -58,6 +62,8 @@ read -rsp 'Bearer token: ' TOKEN; echo
 printf %s "$TOKEN" | shasum -a 256
 unset TOKEN
 ```
+
+For offline seed-to-UFVK steps, least-privilege scopes, and token rotation, follow [Wallet and authentication setup](getting-started/wallet-and-auth.md).
 
 ## Start the appliance
 
@@ -110,6 +116,47 @@ curl --fail-with-body \
   "$GATEWAY_URL/v1/health/ready"
 ```
 
+Example:
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "network": "regtest",
+    "node": {
+      "network": "regtest",
+      "height": 120,
+      "hash": "0000000000000000000000000000000000000000000000000000000000000001",
+      "block_time": 1784631000,
+      "headers": 120,
+      "initial_sync": false,
+      "verification_progress": 1
+    },
+    "scanner": {
+      "status": "ok",
+      "ready": true,
+      "history_complete": true,
+      "network": "regtest",
+      "ua_hrp": "jregtest",
+      "confirmations": 100,
+      "event_epoch": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scanned_height": 120,
+      "scanned_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+      "scanner_lag": 0
+    },
+    "scanner_lag": 0,
+    "max_scanner_lag": 2
+  },
+  "request_id": "req_018f"
+}
+```
+
 Regtest permits anonymous access only when no credentials are configured. Keep authentication enabled whenever the port is reachable by another host.
 
-Next: [allocate a deposit address](capabilities/address-allocation.md), then [poll deposits](capabilities/deposits.md).
+## First exchange flow
+
+1. [Allocate a deposit address](capabilities/address-allocation.md) and durably map it to the customer.
+2. [Poll the unfiltered deposit stream](capabilities/deposits.md) and atomically checkpoint its cursor with ledger changes.
+3. Plan withdrawals online, sign in the isolated signer environment, then submit only the signed raw transaction to the broadcast endpoint.
+
+Use `100` confirmations unless the exchange has an explicit, tested risk policy for another value.

@@ -2,21 +2,6 @@
 title: Troubleshooting
 ---
 
-| Symptom | Check | Action |
-| --- | --- | --- |
-| Startup rejects wallet | UFVK prefix and `JUNO_NETWORK` | Use the matching network file |
-| `401 unauthorized` | Bearer token and recreated container | Hash the exact token; reload config |
-| `403 forbidden` | Scope and wallet list | Grant only the missing permission |
-| Readiness `503` | Error code, node sync, scanner lag | Keep traffic closed; fix the named dependency |
-| Balance `404` | Wallet and allocation record | Only gateway-owned addresses are queryable |
-| Deposit appears but is not final | Confirmations and chain height | Wait for 100 confirmations by default |
-| Deposit becomes unconfirmed/orphaned | Reorg lifecycle event | Apply the compensating ledger action |
-| Cursor rejected | Wallet/filter mismatch or scanner process restart | Restore the original filters, or restart without a cursor and replay by stable deposit identity when instructed |
-| Broadcast `409` | Idempotency state | Reuse identical payload, or use a new key for a new attempt |
-| Broadcast result uncertain | `retryable`, expected txid lookup | Retry the same key and payload |
-| Transaction `404` | txid, node sync, transaction index | Verify lowercase txid and indexed node |
-| Witness planning is slow | shard-cache health and scanner lag | Keep `auto`; allow cache backfill to catch up |
-
 Start with:
 
 ```bash
@@ -24,4 +9,27 @@ docker compose ps
 docker compose logs --since=15m gateway juno-scan junocashd
 ```
 
-Correlate errors with the response `request_id` and `X-Request-ID`. Do not paste secrets or full sensitive bodies into support channels.
+| Symptom | Check | Action |
+| --- | --- | --- |
+| Startup rejects wallet | UFVK prefix and `JUNO_NETWORK` | Use the matching mainnet, testnet, or regtest wallet file |
+| `401` / `403` | Token, scope, wallet grant | Reload the exact least-privilege credential |
+| Readiness `503` | Error code, node sync, scanner lag/backfill | Keep financial traffic closed; repair the named dependency |
+| Balance `404` | Wallet and allocation record | Query only gateway-allocated addresses under that wallet |
+| Deposit not final | Confirmations and chain height | Wait for the configured threshold; default `100` |
+| Deposit unconfirmed/orphaned | Lifecycle event | Apply the compensating ledger action |
+| Cursor `409 cursor_reset_required` | Scanner event epoch changed | Restart without the cursor and replay idempotently by stable deposit identity |
+| Cursor `400` | Malformed, cross-wallet, wrong-key, or otherwise unauthenticated cursor | Fix the request; during audited key-loss recovery, discard it explicitly; never auto-reset on `400` |
+| Planner selects an already planned note | Exchange reservation ledger | Atomically reserve nullifiers or run only one complete lifecycle per wallet |
+| Planner uses immature notes | `--minconf` and component version | Use the default `100` or pass the documented policy explicitly |
+| Node rejects fee | Planner fee and node policy | Use the default multiplier `20`; revalidate after version changes |
+| `note_decrypt_failed` while signing | Plan, seed, account, coin type, network | Stop; verify the approved plan belongs to the isolated signing wallet |
+| External finalize rejects signatures | Version, action indexes, hex lengths, duplicates | Return exactly one valid signature per request without changing the prepared transaction |
+| Broadcast `409` | Error code, payload, `Retry-After` | For `idempotency_in_progress`, wait then retry identical input; use a new key only for a new signed attempt or reconciled orphan/drop rebroadcast |
+| Broadcast result uncertain | `retryable`, txid, original key/body | Retry identical input; never rebuild first |
+| Transaction `404` | Lowercase txid, node sync/index, wallet query | Retry with authorized `wallet_id`; keep reservations until expiry is strictly passed |
+| Pending remains at expiry height | Current height vs `expiry_height` | Expected: wait until `chain_height > expiry_height` |
+| Transaction orphaned | Node and wallet lifecycle | Reverse finality-dependent actions, keep inputs reserved, and deliberately rebroadcast identical bytes with a fresh operation key only after the original result is resolved and while height is strictly below expiry |
+| Consolidation has insufficient funds | Selected note sum vs action fee | Raise eligible value, reduce input count, or exclude uneconomic notes |
+| Witness planning is slow/fails | Scanner lag, shard cache, anchor freshness | Wait for readiness and rebuild a fresh plan |
+
+Correlate gateway errors with `request_id` and `X-Request-ID`. Do not paste secrets or full sensitive bodies into support channels.

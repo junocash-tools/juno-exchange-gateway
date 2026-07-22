@@ -133,6 +133,10 @@ The gateway joins the internal backend and a dedicated ingress bridge. The ingre
 
 `make test` runs unit checks, Compose validation, the docs build, a reserved-character Postgres connection smoke test, and the full regtest deposit, withdrawal, reorg, scanner-recovery, and gateway-loss guard. The release E2E requires clean gateway, scanner, address, planner, signer, and key-tool checkouts so recorded commits match tested binaries. Signing runs in a container with Docker networking disabled. Private evidence and disposable seeds stay under ignored `tmp/` paths with owner-only permissions.
 
+The bundled `junocashd` 0.9.12 entrypoint activates NU6.2 at regtest height 1 with `-nuparams=5437f330:1`. Its default regtest schedule otherwise remains on NU6.1, while the shipped Orchard PCZT proving flow requires NU6.2. The E2E reads `getblockchaininfo` and requires `consensus.chaintip` and `consensus.nextblock` to be `5437f330` before each signing step.
+
+This is a fixed, regtest-only compatibility setting, not an operator toggle. The entrypoint does not pass `-nuparams` on testnet or mainnet; those networks must follow the node's built-in activation schedules.
+
 Set `KEEP_STACK=1` only when diagnosing a failed local run. `SKIP_GATEWAY_LOSS_TEST=1` skips the destructive gateway-loss guard and is for focused debugging, not release validation.
 
 ## Exposure

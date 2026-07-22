@@ -3,11 +3,12 @@
 Watch-only HTTP API for Juno Cash exchange deposits and withdrawals. It supports mainnet, testnet, and regtest, and exposes:
 
 - registered address allocation and balances
+- aggregate wallet note liquidity for consolidation decisions
 - durable-cursor deposit lifecycle events
 - chain tip and transaction lookup
 - signed raw transaction broadcast
 
-The online gateway never accepts seeds, spending keys, recipients, amounts, signing requests, or transaction plans.
+The online gateway never accepts seeds, spending keys, recipients, amounts, signing requests, or transaction plans. Planning is an online private-operator workflow; signing stays offline. See the [operator documentation](https://junocash-tools.github.io/juno-exchange-gateway/) and [OpenAPI contract](https://junocash-tools.github.io/juno-exchange-gateway/openapi.yaml).
 
 ## Quickstart
 

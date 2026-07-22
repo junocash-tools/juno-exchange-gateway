@@ -2,6 +2,7 @@
 module.exports = {
   gatewaySidebar: [
     'intro',
+    'getting-started/wallet-and-auth',
     'concepts/architecture',
     'concepts/networks',
     {
@@ -11,13 +12,23 @@ module.exports = {
       items: [
         'capabilities/address-allocation',
         'capabilities/address-balances',
+        'capabilities/note-summary',
         'capabilities/chain-tip',
         'capabilities/deposits',
         'capabilities/transaction-lookup',
         'capabilities/broadcast',
       ],
     },
-    'transactions/build-sign-broadcast',
+    {
+      type: 'category',
+      label: 'Transactions',
+      collapsed: false,
+      items: [
+        'transactions/build-sign-broadcast',
+        'transactions/note-selection-and-reservations',
+        'transactions/consolidation',
+      ],
+    },
     {
       type: 'category',
       label: 'Operations',

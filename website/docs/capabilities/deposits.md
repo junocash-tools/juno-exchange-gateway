@@ -2,7 +2,7 @@
 title: Poll deposits
 ---
 
-The v1 integration is polling-based. Each wallet has an opaque, durable cursor.
+The v1 integration is polling-based. Each wallet has an opaque, durable cursor. Required scope: `read`, with access to that wallet. Run one cursor owner per wallet, or serialize multiple workers through one durable checkpoint.
 
 ```bash
 curl --fail-with-body \
@@ -10,7 +10,64 @@ curl --fail-with-body \
   "$GATEWAY_URL/v1/wallets/hot/deposits?limit=100"
 ```
 
-Pass the returned `next_cursor` to the next request:
+Example response:
+
+```json
+{
+  "status": "ok",
+  "data": {
+    "deposits": [
+      {
+        "deposit_id": "hot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+        "event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:81",
+        "wallet_id": "hot",
+        "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "action_index": 0,
+        "address": "j1example",
+        "diversifier_index": 42,
+        "amount_zat": 100000000,
+        "status": "confirmed",
+        "block_height": 919901,
+        "confirmed_height": 920000,
+        "observed_at": "2026-07-21T12:00:00Z"
+      }
+    ],
+    "next_cursor": "eyJ2IjoyLCJ3IjoiaG90IiwiZSI6ImJiYiJ9.signature",
+    "delivery": "at_least_once",
+    "event_epoch": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "request_id": "req_018f"
+}
+```
+
+`amount_zat` is an integer number of zatoshis. One transaction can contain several deposit actions, so never deduplicate by `txid` alone.
+
+- `deposit_id` is stable: `wallet_id:txid:action_index`. Use it as the exchange ledger idempotency key across lifecycle changes and scanner rebuilds.
+- `event_id` is `event_epoch:event_number`. Use it only for transport deduplication within one epoch.
+- `block_height` is the containing block. Status-specific responses can also include `confirmed_height`, `rollback_height`, or `orphaned_at_height`.
+
+## Ledger lifecycle
+
+| Status | Meaning | Exchange action |
+| --- | --- | --- |
+| `detected` | An external note to an allocated address was scanned | Record pending; do not make final |
+| `confirmed` | The note reached the configured threshold | Apply an idempotent credit transition by `deposit_id` |
+| `unconfirmed` | A reorg moved a confirmed note below the threshold | Reverse, lock, or hold the prior credit |
+| `orphaned` | The containing block left the active chain | Reverse the deposit and retain its audit history |
+
+The lifecycle is not strictly one-way. A re-mined transaction can produce `detected` and `confirmed` again after `unconfirmed` or `orphaned`. Apply each transition idempotently against the current state and keep the full history. The gateway reports only external deposits to addresses allocated by this installation; internal change is excluded.
+
+`detected` is a mined note, normally at its first scanned confirmation; it is not a mempool notification. With the appliance defaults, `confirmed` arrives at 100 confirmations. The threshold is `JUNO_SCAN_CONFIRMATIONS` and must equal `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS`. Poll continuously while waiting—do not sleep for 100 blocks—because reorg and other deposits share the same ordered stream.
+
+## Production polling loop
+
+Maintain one unfiltered checkpoint per wallet:
+
+1. Start without `cursor`, or load the last committed `next_cursor`.
+2. Request `GET /v1/wallets/{wallet_id}/deposits?limit=100` with that cursor.
+3. Process `deposits` in response order. Apply credit or reversal by stable `deposit_id`.
+4. In the same exchange database transaction, commit every ledger change and the returned `next_cursor`.
+5. Repeat. On an empty page, persist the cursor and pause briefly before polling again.
 
 ```bash
 curl --fail-with-body \
@@ -18,19 +75,36 @@ curl --fail-with-body \
   "$GATEWAY_URL/v1/wallets/hot/deposits?limit=100&cursor=$CURSOR"
 ```
 
-The production ledger consumer must poll without filters. Optional `status`, `txid`, and owned `address` filters are for diagnostics. If automation uses a filter, it needs a separate complete cursor and cannot replace the unfiltered stream. `limit` is `1` to `1000`.
+There is no `has_more` field. Keep polling. An empty page can still advance `next_cursor` because the gateway safely skips scanner events that do not belong to allocated addresses. Persist every successful cursor, even when `deposits` is empty.
 
-A cursor is bound to the wallet and the exact filter set. Keep `status`, `txid`, and `address` unchanged while advancing it.
+Delivery is at least once. Never checkpoint before the corresponding ledger transaction is durable. If the process stops after commit, replaying the same events is safe because ledger mutations are keyed by `deposit_id`.
 
-## Lifecycle
+The optional `status`, `txid`, and owned `address` filters are for diagnostics. They bind the cursor to that exact filter set and must not replace the unfiltered ledger stream. `limit` is `1` to `1000` and defaults to `100`.
 
-| Status | Meaning | Ledger action |
-| --- | --- | --- |
-| `detected` | Note found in a scanned block | Record, do not make final |
-| `confirmed` | Reached the configured threshold | Credit according to policy |
-| `unconfirmed` | Reorg moved a confirmed note below threshold | Reverse or hold the credit |
-| `orphaned` | The containing block left the active chain | Reverse the deposit |
+## Cursor errors and retries
 
-Delivery is at least once. Within one event epoch, use `(deposit_id,event_id)` only to deduplicate transport delivery. Use stable `deposit_id` as the ledger idempotency key for credit, unconfirm, and orphan actions across epoch resets and scanner rebuilds. Commit the ledger change and unfiltered cursor checkpoint atomically. Do not advance the cursor before the ledger write is durable.
+A cursor is bound to its wallet, scanner event epoch, and exact filters. Treat it as opaque.
 
-Treat the cursor as opaque. Every scanner process start rotates the event epoch, so an old cursor returns `409 cursor_reset_required`. Restart once without a cursor, replay idempotently by stable `deposit_id`, and then persist the new cursor. Reconcile the ledger after a database rebuild.
+Every scanner process start rotates the event epoch. An older cursor returns:
+
+```json
+{
+  "status": "error",
+  "error": {
+    "code": "cursor_reset_required",
+    "message": "scanner event history was reset; restart without a cursor and idempotently replay deposits",
+    "retryable": false,
+    "details": {
+      "action": "restart_without_cursor",
+      "event_epoch": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "request_id": "req_018f"
+}
+```
+
+On `409 cursor_reset_required`, discard the cursor, restart once without it, replay by `deposit_id`, and persist the new cursor. Reconcile the exchange ledger after a scanner database rebuild.
+
+Changing filters while reusing a cursor returns `409 cursor_filter_mismatch` with action `restart_without_cursor_or_restore_filters`. Restore the original filters or start a separate diagnostic cursor. A malformed cursor or one for another wallet returns `400 invalid_request`.
+
+For `429`, honor `Retry-After` and retain the current cursor. For retryable `5xx`, including `502` for a malformed or inconsistent scanner event, retain the cursor and use bounded exponential backoff with jitter. The gateway returns no page cursor with that error. Alert if it persists: retrying cannot repair corrupt upstream data. Never skip a page to recover from an error.

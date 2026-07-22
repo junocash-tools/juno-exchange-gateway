@@ -2,14 +2,15 @@
 title: HTTP API
 ---
 
-All endpoints are under `/v1`. Except liveness, send:
+All routes are under `/v1`. Except liveness, send:
 
 ```http
 Authorization: Bearer <token>
 Accept: application/json
+X-Request-ID: <optional-correlation-id>
 ```
 
-JSON requests require media type `application/json`; parameters such as `charset=utf-8` are allowed, but JSON-like types such as `application/jsonp` are rejected. Wrong methods on known routes require authentication and return the normal JSON error envelope with `405 method_not_allowed`.
+JSON requests also require `Content-Type: application/json`. Parameters such as `charset=utf-8` are accepted; JSON-like types such as `application/jsonp` are not. Wrong methods on known routes return the authenticated JSON `405 method_not_allowed` envelope.
 
 ## Routes
 
@@ -21,11 +22,14 @@ JSON requests require media type `application/json`; parameters such as `charset
 | `GET` | `/v1/network/tip` | `read` |
 | `POST` | `/v1/wallets/{wallet_id}/addresses` | `address` + wallet |
 | `GET` | `/v1/wallets/{wallet_id}/addresses/{address}/balance` | `read` + wallet |
+| `GET` | `/v1/wallets/{wallet_id}/notes/summary` | `treasury` + wallet |
 | `GET` | `/v1/wallets/{wallet_id}/deposits` | `read` + wallet |
-| `GET` | `/v1/transactions/{txid}` | `read`; `raw` for raw hex |
-| `POST` | `/v1/transactions/broadcast` | `broadcast` |
+| `GET` | `/v1/transactions/{txid}` | `read`; add `withdrawal` + wallet grant for `wallet_id`, and `raw` for raw hex |
+| `POST` | `/v1/transactions/broadcast` | `broadcast` + wallet grant + `Idempotency-Key` |
 
-## Envelope
+There are no public build, approve, or sign routes. Use the private `juno-txbuild` CLI and isolated `juno-txsign`; see [build, sign, and broadcast](../transactions/build-sign-broadcast.md). A future planner service must meet the [private planner criteria](../transactions/note-selection-and-reservations.md#criteria-for-a-private-planner-service).
+
+## Envelopes
 
 Success:
 
@@ -52,6 +56,18 @@ Error:
 }
 ```
 
-Use `retryable`, not only the HTTP status, when deciding whether to retry. Preserve a valid `X-Request-ID` or use the one returned by the gateway.
+Use `error.retryable`, not the status alone. Preserve a valid `X-Request-ID` or record the returned ID.
 
-Common statuses are `400` invalid input, `401` missing/invalid auth, `403` missing scope, `404` unknown resource, `409` idempotency conflict/in progress, `422` rejected transaction, `429` rate limit, `502` upstream node failure, and `503` financial data not ready.
+| Status | Meaning |
+| --- | --- |
+| `400` | Invalid input |
+| `401` / `403` | Missing authentication or authorization |
+| `404` | Unknown resource |
+| `409` | Safe cursor/history reset or idempotency conflict/in progress |
+| `413` | Broadcast body limit exceeded |
+| `422` | Safe response cap or transaction validation/rejection |
+| `429` | Rate limit |
+| `502` | Invalid scanner response, upstream node failure, or uncertain broadcast |
+| `503` | Financial dependency not ready |
+
+The OpenAPI document is served with the source repository at `api/openapi.yaml`.
