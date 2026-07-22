@@ -97,27 +97,27 @@ check_equal BUILDKIT_IMAGE "$(workflow_value BUILDKIT_IMAGE)" "$(jq -r '.release
 check_equal QEMU_IMAGE "$(workflow_value QEMU_IMAGE)" "$(jq -r '.release_tooling.qemu_image' bundle.lock.json)"
 check_equal SBOM_GENERATOR_IMAGE "$(workflow_value SBOM_GENERATOR_IMAGE)" "$(jq -r '.release_tooling.sbom_generator_image' bundle.lock.json)"
 
-buildx_setups="$(rg -c 'uses: docker/setup-buildx-action@' .github/workflows/images.yml)"
+buildx_setups="$(grep -Ec 'uses: docker/setup-buildx-action@' .github/workflows/images.yml)"
 check_equal pinned_buildx_versions \
-  "$(rg -c '^          version: \$\{\{ env\.BUILDX_VERSION \}\}$' .github/workflows/images.yml)" \
+  "$(grep -Ec '^          version: \$\{\{ env\.BUILDX_VERSION \}\}$' .github/workflows/images.yml)" \
   "$buildx_setups"
 check_equal pinned_buildkit_drivers \
-  "$(rg -c '^            image=\$\{\{ env\.BUILDKIT_IMAGE \}\}$' .github/workflows/images.yml)" \
+  "$(grep -Ec '^            image=\$\{\{ env\.BUILDKIT_IMAGE \}\}$' .github/workflows/images.yml)" \
   "$buildx_setups"
 
-qemu_setups="$(rg -c 'uses: docker/setup-qemu-action@' .github/workflows/images.yml)"
+qemu_setups="$(grep -Ec 'uses: docker/setup-qemu-action@' .github/workflows/images.yml)"
 check_equal pinned_qemu_images \
-  "$(rg -c '^          image: \$\{\{ env\.QEMU_IMAGE \}\}$' .github/workflows/images.yml)" \
+  "$(grep -Ec '^          image: \$\{\{ env\.QEMU_IMAGE \}\}$' .github/workflows/images.yml)" \
   "$qemu_setups"
 
-build_pushes="$(rg -c 'uses: docker/build-push-action@' .github/workflows/images.yml)"
+build_pushes="$(grep -Ec 'uses: docker/build-push-action@' .github/workflows/images.yml)"
 check_equal pinned_sbom_generators \
-  "$(rg -c '^            type=sbom,generator=\$\{\{ env\.SBOM_GENERATOR_IMAGE \}\}$' .github/workflows/images.yml)" \
+  "$(grep -Ec '^            type=sbom,generator=\$\{\{ env\.SBOM_GENERATOR_IMAGE \}\}$' .github/workflows/images.yml)" \
   "$build_pushes"
 check_equal max_provenance_attestations \
-  "$(rg -c '^            type=provenance,mode=max$' .github/workflows/images.yml)" \
+  "$(grep -Ec '^            type=provenance,mode=max$' .github/workflows/images.yml)" \
   "$build_pushes"
-if rg -q '^          (provenance:|sbom:)' .github/workflows/images.yml; then
+if grep -Eq '^          (provenance:|sbom:)' .github/workflows/images.yml; then
   echo "Release workflow uses a mutable shorthand attestation input" >&2
   exit 1
 fi
@@ -135,7 +135,7 @@ check_equal openapi_version "$openapi_version" "$(jq -r '.api.openapi_version' b
 check_equal contract_version "$contract_version" "$(jq -r '.api.contract_version' bundle.lock.json)"
 
 postgres_image="$(jq -r '.service_images.postgres' bundle.lock.json)"
-rg -Fq "$postgres_image" compose.postgres.yaml
-rg -Fq "$postgres_image" .env.example
+grep -Fq "$postgres_image" compose.postgres.yaml
+grep -Fq "$postgres_image" .env.example
 
 echo "bundle lock: passed"

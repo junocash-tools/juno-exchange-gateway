@@ -1,0 +1,21 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Non-secret hexadecimal credentials used only by config tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+regexes = [
+  '''^[0][1][2][3][4][5][6][7][8][9][a][b][c][d][e][f][0][1][2][3][4][5][6][7]$''',
+  '''^[7][6][5][4][3][2][1][0][f][e][d][c][b][a][9][8][7][6][5][4][3][2][1][0]$''',
+]
+paths = ['''^internal/config/config_test\.go$''']
+
+[[allowlists]]
+description = "Non-secret idempotency key used in the broadcast documentation"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^[w]ithdrawal-[1]842-attempt-[1]$''']
+paths = ['''^website/docs/capabilities/broadcast\.md$''']
