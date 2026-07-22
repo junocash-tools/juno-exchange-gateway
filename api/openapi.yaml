@@ -41,7 +41,7 @@ paths:
       tags: [Health]
       summary: Financial-read readiness
       x-required-scope: read
-      description: Fails closed if the node is syncing or on another network, scanner `ready` is absent or false, required scanner `history_complete` attestation is absent or false, the scanner network/HRP differs, the scanner block hash does not match this gateway's node, scanner-reported lag differs from the gateway's node-derived lag, node-derived scanner lag exceeds the configured maximum, or gateway state is unavailable.
+      description: Fails closed if the node is syncing or on another network, scanner `ready` is absent or false, scanner `pending_spends_ready` is absent or false, required scanner `history_complete` attestation is absent or false, the scanner network/HRP differs, the scanner block hash does not match this gateway's node, scanner-reported lag differs from the gateway's node-derived lag, node-derived scanner lag exceeds the configured maximum, or gateway state is unavailable.
       responses:
         "200":
           description: Financial reads are safe.
@@ -53,7 +53,7 @@ paths:
                 data:
                   network: mainnet
                   node: { network: main, height: 920000, hash: "0000000000000000000000000000000000000000000000000000000000000001", block_time: 1784631000, headers: 920000, initial_sync: false, verification_progress: 1 }
-                  scanner: { status: ok, ready: true, history_complete: true, network: mainnet, ua_hrp: j, confirmations: 100, event_epoch: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, scanned_height: 920000, scanned_hash: "0000000000000000000000000000000000000000000000000000000000000001", scanner_lag: 0 }
+                  scanner: { status: ok, ready: true, pending_spends_ready: true, history_complete: true, network: mainnet, ua_hrp: j, confirmations: 100, event_epoch: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, scanned_height: 920000, scanned_hash: "0000000000000000000000000000000000000000000000000000000000000001", scanner_lag: 0 }
                   scanner_lag: 0
                   max_scanner_lag: 2
                 request_id: req_018f
@@ -590,7 +590,7 @@ components:
         verification_progress: { type: number, minimum: 0, maximum: 1 }
     ScannerHealth:
       type: object
-      required: [status, network, ua_hrp, confirmations, event_epoch, ready, scanned_height, scanned_hash, scanner_lag]
+      required: [status, network, ua_hrp, confirmations, event_epoch, ready, pending_spends_ready, scanned_height, scanned_hash, scanner_lag]
       properties:
         status: { type: string }
         network: { type: string, enum: [mainnet, testnet, regtest] }
@@ -598,6 +598,7 @@ components:
         confirmations: { type: integer, format: int64, minimum: 1 }
         event_epoch: { type: string, pattern: "^[0-9a-f]{64}$" }
         ready: { type: boolean, const: true }
+        pending_spends_ready: { type: boolean, const: true, description: True only after pending-spend state was reconciled successfully for this event epoch and exact scanner tip. }
         node_height: { type: integer, format: int64 }
         scanned_height: { type: integer, format: int64, minimum: 0 }
         scanned_hash: { type: string, pattern: "^[0-9a-f]{64}$" }

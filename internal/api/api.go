@@ -380,6 +380,12 @@ func (a *API) checkReady(ctx context.Context) (readiness, string, error) {
 	if health.Ready == nil || !*health.Ready {
 		return readiness{}, "scanner_not_ready", errors.New("scanner reports not ready")
 	}
+	if health.PendingSpendsReady == nil {
+		return readiness{}, "scanner_not_ready", errors.New("scanner cannot attest pending spend reconciliation")
+	}
+	if !*health.PendingSpendsReady {
+		return readiness{}, "scanner_not_ready", errors.New("scanner pending spend reconciliation is incomplete")
+	}
 	if a.cfg.RequireCompleteHistory {
 		if health.HistoryComplete == nil {
 			return readiness{}, "scanner_not_ready", errors.New("scanner cannot attest complete history")

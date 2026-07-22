@@ -330,10 +330,10 @@ func TestNoteStatusesMapsMissingAndUnavailableScanner(t *testing.T) {
 func TestHealthParsesConfirmationPolicy(t *testing.T) {
 	client := New("http://scanner.invalid", "", time.Second, time.Minute)
 	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"ok","confirmations":100}`))}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"ok","confirmations":100,"pending_spends_ready":true}`))}, nil
 	})
 	health, err := client.Health(context.Background())
-	if err != nil || health.Confirmations == nil || *health.Confirmations != 100 {
+	if err != nil || health.Confirmations == nil || *health.Confirmations != 100 || health.PendingSpendsReady == nil || !*health.PendingSpendsReady {
 		t.Fatalf("health=%+v err=%v", health, err)
 	}
 }

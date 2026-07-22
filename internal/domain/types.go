@@ -81,18 +81,19 @@ type NodeTip struct {
 }
 
 type ScannerHealth struct {
-	Status          string `json:"status"`
-	Network         string `json:"network,omitempty"`
-	UAHRP           string `json:"ua_hrp,omitempty"`
-	Confirmations   *int64 `json:"confirmations,omitempty"`
-	EventEpoch      string `json:"event_epoch,omitempty"`
-	Ready           *bool  `json:"ready,omitempty"`
-	NodeHeight      *int64 `json:"node_height,omitempty"`
-	ScannedHeight   *int64 `json:"scanned_height,omitempty"`
-	ScannedHash     string `json:"scanned_hash,omitempty"`
-	ScannerLag      *int64 `json:"scanner_lag,omitempty"`
-	MaxReadyLag     *int64 `json:"max_ready_lag,omitempty"`
-	HistoryComplete *bool  `json:"history_complete,omitempty"`
+	Status             string `json:"status"`
+	Network            string `json:"network,omitempty"`
+	UAHRP              string `json:"ua_hrp,omitempty"`
+	Confirmations      *int64 `json:"confirmations,omitempty"`
+	EventEpoch         string `json:"event_epoch,omitempty"`
+	Ready              *bool  `json:"ready,omitempty"`
+	NodeHeight         *int64 `json:"node_height,omitempty"`
+	ScannedHeight      *int64 `json:"scanned_height,omitempty"`
+	ScannedHash        string `json:"scanned_hash,omitempty"`
+	ScannerLag         *int64 `json:"scanner_lag,omitempty"`
+	MaxReadyLag        *int64 `json:"max_ready_lag,omitempty"`
+	HistoryComplete    *bool  `json:"history_complete,omitempty"`
+	PendingSpendsReady *bool  `json:"pending_spends_ready,omitempty"`
 }
 
 type Balance struct {

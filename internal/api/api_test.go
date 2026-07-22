@@ -249,11 +249,12 @@ func newTestAPI(t *testing.T, cfg config.Config) (*API, *fakeNode, *fakeScanner)
 	t.Cleanup(func() { _ = store.Close() })
 	node := &fakeNode{tip: domain.NodeTip{Network: cfg.Network.NodeChain(), Height: 100, Hash: strings.Repeat("b", 64), Headers: 100, VerificationProgress: 1}, blockHashes: map[int64]string{}, transactions: map[string]domain.Transaction{}}
 	ready := true
+	pendingSpendsReady := true
 	historyComplete := true
 	scanned := int64(100)
 	lag := int64(0)
 	confirmations := cfg.DefaultConfirmations
-	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), Confirmations: &confirmations, EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag, HistoryComplete: &historyComplete}, balanceFound: true, noteSummaryFound: true, noteStatusesFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
+	scanner := &fakeScanner{health: domain.ScannerHealth{Status: "ok", Network: string(cfg.Network), UAHRP: cfg.Network.AddressHRP(), Confirmations: &confirmations, EventEpoch: strings.Repeat("e", 64), Ready: &ready, ScannedHeight: &scanned, ScannedHash: node.tip.Hash, ScannerLag: &lag, HistoryComplete: &historyComplete, PendingSpendsReady: &pendingSpendsReady}, balanceFound: true, noteSummaryFound: true, noteStatusesFound: true, backfillStatuses: map[string]domain.BackfillStatus{}}
 	service, err := New(cfg, store, node, scanner, fakeDeriver{network: cfg.Network}, slog.New(slog.NewTextHandler(io.Discard, nil)), BuildInfo{Version: "test", Revision: "abc", APIVersion: "v1"})
 	if err != nil {
 		t.Fatal(err)
@@ -1836,6 +1837,26 @@ func TestReadinessRequiresScannerReadyAndLagFields(t *testing.T) {
 		},
 		"missing lag":  func(health *domain.ScannerHealth) { health.ScannerLag = nil },
 		"negative lag": func(health *domain.ScannerHealth) { lag := int64(-1); health.ScannerLag = &lag },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(domain.Regtest)
+			service, _, scanner := newTestAPI(t, cfg)
+			mutate(&scanner.health)
+			rec := request(t, service.Handler(), http.MethodGet, "/v1/health/ready", ``, nil)
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "scanner_not_ready") {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestReadinessRequiresPendingSpendsAttestation(t *testing.T) {
+	for name, mutate := range map[string]func(*domain.ScannerHealth){
+		"missing pending spends attestation": func(health *domain.ScannerHealth) { health.PendingSpendsReady = nil },
+		"pending spends not ready": func(health *domain.ScannerHealth) {
+			ready := false
+			health.PendingSpendsReady = &ready
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := testConfig(domain.Regtest)
