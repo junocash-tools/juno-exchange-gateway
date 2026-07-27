@@ -1329,11 +1329,26 @@ if (( blocks_after_expiry > 0 )); then
   node_cli generate "$blocks_after_expiry" >"$run_dir/coordinator-expiry-boundary-blocks.json"
 fi
 wait_ready "$run_dir/ready-after-coordinator-expiry.json"
-code="$(coordinator_api_status GET "/v1/transaction-attempts/$coordinator_expiry_attempt_id" "$run_dir/coordinator-expiry-state-pending.json")"
-[[ "$code" == "200" ]] || fail "post-expiry coordinator lookup returned HTTP $code"
-assert_jq "$run_dir/coordinator-expiry-state-pending.json" \
-  '.data.state == "expired_pending_reconciliation"' \
-  "coordinator did not keep the expired attempt locked for reconciliation"
+wait_coordinator_state "$coordinator_expiry_attempt_id" expired_pending_reconciliation \
+  "$run_dir/coordinator-expiry-state-pending.json" \
+  || fail "coordinator did not keep the expired attempt locked for reconciliation"
+
+if JUNO_COORDINATOR_URL="$coordinator_url" \
+  JUNO_COORDINATOR_TOKEN="$coordinator_token" \
+  JUNO_NETWORK=regtest \
+  JUNO_WALLET_ID="$wallet_id" \
+  JUNO_IDEMPOTENCY_KEY="$coordinator_expiry_creation_key" \
+    node "$workspace_root/juno-exchange-sdk/examples/create-raw-transaction.mjs" \
+      withdrawal:e2e-expiry \
+      "$expiry_destination_address" \
+      500000 \
+      >"$run_dir/coordinator-expiry-sdk-rejected.stdout" \
+      2>"$run_dir/coordinator-expiry-sdk-rejected.json"; then
+  fail "Node SDK returned expired raw transaction material as broadcastable"
+fi
+assert_jq "$run_dir/coordinator-expiry-sdk-rejected.json" \
+  '.code == "transaction_attempt_expired_pending_reconciliation" and .retryable == false' \
+  "Node SDK did not reject expired raw transaction material with the expected error"
 
 tip_height="$(node_cli getblockcount | jq -er '.')"
 release_guard_height=$((coordinator_expiry_height + 99))

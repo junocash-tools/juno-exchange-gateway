@@ -612,12 +612,18 @@ func validateSignerResult(result signerResult, request CreateRequest) error {
 	}
 	seen := make(map[uint32]struct{}, len(result.OrchardOutputActionIndices)+1)
 	for _, index := range result.OrchardOutputActionIndices {
+		if index > 199 {
+			return errors.New("signer output mapping contains an action index above 199")
+		}
 		if _, duplicate := seen[index]; duplicate {
 			return errors.New("signer output mapping contains duplicate action indices")
 		}
 		seen[index] = struct{}{}
 	}
 	if result.OrchardChangeActionIndex != nil {
+		if *result.OrchardChangeActionIndex > 199 {
+			return errors.New("signer change mapping contains an action index above 199")
+		}
 		if _, duplicate := seen[*result.OrchardChangeActionIndex]; duplicate {
 			return errors.New("signer change action overlaps a requested output")
 		}

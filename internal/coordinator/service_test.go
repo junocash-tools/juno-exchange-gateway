@@ -372,6 +372,25 @@ func TestCreateRejectsNonCanonicalFinancialInputsBeforeClaim(t *testing.T) {
 	}
 }
 
+func TestValidateSignerResultRejectsActionIndicesOutsideOrchardBundle(t *testing.T) {
+	request := coordinatorRequest("100")
+	for name, result := range map[string]signerResult{
+		"requested output": {OrchardOutputActionIndices: []uint32{200}},
+		"change output": {
+			OrchardOutputActionIndices: []uint32{0},
+			OrchardChangeActionIndex:   pointerTo(uint32(200)),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSignerResult(result, request); err == nil || !strings.Contains(err.Error(), "above 199") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func pointerTo[T any](value T) *T { return &value }
+
 func coordinatorTestConfig(t *testing.T) (config.Config, *sqlitestore.Store) {
 	t.Helper()
 	cfg := config.Config{
