@@ -106,6 +106,67 @@ func TestValidateSupportsAllNetworks(t *testing.T) {
 	}
 }
 
+func TestValidateCoordinatorSupportsAllNetworksAndRequiresPlanScope(t *testing.T) {
+	for _, network := range []domain.Network{domain.Mainnet, domain.Testnet, domain.Regtest} {
+		t.Run(string(network), func(t *testing.T) {
+			cfg := validConfig(network)
+			cfg.CoordinatorEnabled = true
+			cfg.CoordinatorListenAddress = "127.0.0.1:8081"
+			cfg.CoordinatorTxbuildPath = "/usr/local/bin/juno-txbuild"
+			cfg.CoordinatorSignerSocket = "/run/juno-signer/signer.sock"
+			cfg.CoordinatorWorkDir = "/var/lib/juno-gateway/coordinator-work"
+			cfg.CoordinatorPlanTimeout = 2 * time.Minute
+			cfg.CoordinatorSignTimeout = 10 * time.Minute
+			cfg.CoordinatorMaxBodyBytes = 1 << 20
+			cfg.CoordinatorMaxOutputs = 199
+			cfg.CoordinatorMaxAmountZat = 2_100_000_000_000_000
+			cfg.CoordinatorExpiryOffset = 40
+			cfg.CoordinatorFeeMultiplier = 20
+			cfg.CoordinatorMaxReplans = 3
+			cfg.CoordinatorRate = RateLimit{RPS: 5, Burst: 10}
+			cfg.Credentials[0].Scopes = []string{"plan"}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	cfg := validConfig(domain.Regtest)
+	cfg.CoordinatorEnabled = true
+	cfg.CoordinatorListenAddress = "127.0.0.1:8081"
+	cfg.CoordinatorTxbuildPath = "/usr/local/bin/juno-txbuild"
+	cfg.CoordinatorSignerSocket = "/run/juno-signer/signer.sock"
+	cfg.CoordinatorWorkDir = "/var/lib/juno-gateway/coordinator-work"
+	cfg.CoordinatorPlanTimeout = time.Minute
+	cfg.CoordinatorSignTimeout = time.Minute
+	cfg.CoordinatorMaxBodyBytes = 1 << 20
+	cfg.CoordinatorMaxOutputs = 1
+	cfg.CoordinatorMaxAmountZat = 1
+	cfg.CoordinatorExpiryOffset = 40
+	cfg.CoordinatorFeeMultiplier = 20
+	cfg.CoordinatorMaxReplans = 1
+	cfg.CoordinatorRate = RateLimit{RPS: 1, Burst: 1}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "plan or admin scope") {
+		t.Fatalf("missing coordinator credential error=%v", err)
+	}
+}
+
+func TestValidateEnvironmentRejectsInvalidCoordinatorValues(t *testing.T) {
+	for key, value := range map[string]string{
+		"JUNO_COORDINATOR_ENABLED":      "sometimes",
+		"JUNO_COORDINATOR_PLAN_TIMEOUT": "tomorrow",
+		"JUNO_COORDINATOR_RATE_RPS":     "fast",
+		"JUNO_COORDINATOR_MAX_REPLANS":  "many",
+	} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, value)
+			if err := validateEnvironment(); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("validation error=%v", err)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsWithdrawalScopeAndCapsConfirmationOverride(t *testing.T) {
 	cfg := validConfig(domain.Mainnet)
 	cfg.Credentials[0].Scopes = []string{"read", "withdrawal"}

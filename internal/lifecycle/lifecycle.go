@@ -46,6 +46,7 @@ func Identity(cfg config.Config) installation.Identity {
 			WalletID:        wallet.WalletID,
 			UFVKFingerprint: wallet.UFVKFingerprint(),
 			BirthdayHeight:  wallet.BirthdayHeight,
+			Account:         wallet.Account,
 		})
 	}
 	return installation.Identity{Network: string(cfg.Network), Wallets: wallets}

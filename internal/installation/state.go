@@ -18,12 +18,13 @@ import (
 	"time"
 )
 
-const manifestVersion = 1
+const manifestVersion = 2
 
 type WalletIdentity struct {
 	WalletID        string
 	UFVKFingerprint string
 	BirthdayHeight  int64
+	Account         uint32
 }
 
 type Identity struct {
@@ -34,6 +35,7 @@ type Identity struct {
 type WalletState struct {
 	UFVKFingerprint       string   `json:"ufvk_fingerprint"`
 	BirthdayHeight        int64    `json:"birthday_height"`
+	Account               uint32   `json:"account,omitempty"`
 	NextAddressIndex      uint64   `json:"next_address_index"`
 	SkippedAddressIndices []uint32 `json:"skipped_address_indices,omitempty"`
 }
@@ -105,6 +107,7 @@ func Create(path string, identity Identity) (*State, Manifest, error) {
 			created.Wallets[wallet.WalletID] = WalletState{
 				UFVKFingerprint: wallet.UFVKFingerprint,
 				BirthdayHeight:  wallet.BirthdayHeight,
+				Account:         wallet.Account,
 			}
 		}
 		return writeAtomic(state.path, created)
@@ -312,7 +315,7 @@ func (s *State) readAndVerify() (Manifest, error) {
 }
 
 func verifyManifest(manifest Manifest, expected Identity) error {
-	if manifest.Version != manifestVersion {
+	if manifest.Version != 1 && manifest.Version != manifestVersion {
 		return fmt.Errorf("unsupported installation manifest version %d", manifest.Version)
 	}
 	if len(manifest.InstallationID) != 64 {
@@ -324,7 +327,16 @@ func verifyManifest(manifest Manifest, expected Identity) error {
 	if manifest.Network != expected.Network {
 		return fmt.Errorf("installation network mismatch: manifest=%q configured=%q", manifest.Network, expected.Network)
 	}
-	if manifest.IdentitySHA256 != identityChecksum(expected) {
+	wantIdentityChecksum := identityChecksum(expected)
+	if manifest.Version == 1 {
+		for _, wallet := range expected.Wallets {
+			if wallet.Account != 0 {
+				return fmt.Errorf("installation manifest version 1 binds wallet %q to account 0; configured account=%d", wallet.WalletID, wallet.Account)
+			}
+		}
+		wantIdentityChecksum = legacyIdentityChecksum(expected)
+	}
+	if manifest.IdentitySHA256 != wantIdentityChecksum {
 		return errors.New("installation identity checksum does not match configured network and wallets")
 	}
 	if len(manifest.Wallets) != len(expected.Wallets) {
@@ -340,6 +352,9 @@ func verifyManifest(manifest Manifest, expected Identity) error {
 		}
 		if got.BirthdayHeight != wanted.BirthdayHeight {
 			return fmt.Errorf("installation wallet %q birthday mismatch: manifest=%d configured=%d", wanted.WalletID, got.BirthdayHeight, wanted.BirthdayHeight)
+		}
+		if got.Account != wanted.Account {
+			return fmt.Errorf("installation wallet %q account mismatch: manifest=%d configured=%d", wanted.WalletID, got.Account, wanted.Account)
 		}
 		if got.NextAddressIndex > uint64(math.MaxUint32)+1 {
 			return fmt.Errorf("installation wallet %q has an invalid address high-water", wanted.WalletID)
@@ -517,6 +532,9 @@ func validateIdentity(identity Identity) error {
 		if wallet.BirthdayHeight < 0 {
 			return fmt.Errorf("installation wallet %q birthday must be non-negative", wallet.WalletID)
 		}
+		if wallet.Account >= 1<<31 {
+			return fmt.Errorf("installation wallet %q account must be below 2147483648", wallet.WalletID)
+		}
 		if len(wallet.UFVKFingerprint) != 64 {
 			return fmt.Errorf("installation wallet %q has an invalid UFVK fingerprint", wallet.WalletID)
 		}
@@ -529,6 +547,18 @@ func validateIdentity(identity Identity) error {
 }
 
 func identityChecksum(identity Identity) string {
+	identity = canonicalIdentity(identity)
+	var data bytes.Buffer
+	data.WriteString(identity.Network)
+	data.WriteByte('\n')
+	for _, wallet := range identity.Wallets {
+		fmt.Fprintf(&data, "%s\x00%s\x00%d\x00%d\n", wallet.WalletID, wallet.UFVKFingerprint, wallet.BirthdayHeight, wallet.Account)
+	}
+	sum := sha256.Sum256(data.Bytes())
+	return hex.EncodeToString(sum[:])
+}
+
+func legacyIdentityChecksum(identity Identity) string {
 	identity = canonicalIdentity(identity)
 	var data bytes.Buffer
 	data.WriteString(identity.Network)

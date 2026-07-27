@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 	if err := s.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read gateway schema version: %w", err)
 	}
-	if version > 3 {
+	if version > 4 {
 		return fmt.Errorf("unsupported gateway schema version %d", version)
 	}
 	if version == 1 {
@@ -174,7 +174,70 @@ CREATE TABLE IF NOT EXISTS metadata (
 		}
 		version = 3
 	}
-	if version != 3 {
+	if version == 3 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin coordinator state migration: %w", err)
+		}
+		defer tx.Rollback()
+		const coordinatorSchema = `
+CREATE TABLE IF NOT EXISTS transaction_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  scoped_idempotency_key TEXT NOT NULL UNIQUE,
+  request_digest TEXT NOT NULL,
+  principal_name TEXT NOT NULL,
+  wallet_id TEXT NOT NULL REFERENCES wallets(wallet_id) ON DELETE RESTRICT,
+  approval_reference TEXT NOT NULL,
+  request_json BLOB NOT NULL,
+  state TEXT NOT NULL,
+  change_address TEXT,
+  plan_json BLOB,
+  plan_digest TEXT,
+  fee_zat TEXT,
+  expiry_height INTEGER,
+  selected_note_ids_json BLOB,
+  txid TEXT,
+  raw_tx_hex TEXT,
+  output_action_indices_json BLOB,
+  change_action_index INTEGER,
+  error_code TEXT,
+  error_message TEXT,
+  error_retryable INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_transaction_attempts_wallet_state ON transaction_attempts(wallet_id,state,updated_at);
+CREATE INDEX IF NOT EXISTS idx_transaction_attempts_txid ON transaction_attempts(txid) WHERE txid IS NOT NULL;
+CREATE TABLE IF NOT EXISTS active_note_reservations (
+  network TEXT NOT NULL,
+  wallet_id TEXT NOT NULL REFERENCES wallets(wallet_id) ON DELETE RESTRICT,
+  note_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL REFERENCES transaction_attempts(attempt_id) ON DELETE RESTRICT,
+  plan_digest TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(network,wallet_id,note_id)
+);
+CREATE INDEX IF NOT EXISTS idx_active_note_reservations_attempt ON active_note_reservations(attempt_id);
+CREATE TABLE IF NOT EXISTS transaction_attempt_events (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempt_id TEXT NOT NULL REFERENCES transaction_attempts(attempt_id) ON DELETE RESTRICT,
+  state TEXT NOT NULL,
+  detail_json BLOB,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_transaction_attempt_events_attempt ON transaction_attempt_events(attempt_id,event_id);`
+		if _, err := tx.ExecContext(ctx, coordinatorSchema); err != nil {
+			return fmt.Errorf("create coordinator state: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version(version) VALUES (4)`); err != nil {
+			return fmt.Errorf("record coordinator state migration: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit coordinator state migration: %w", err)
+		}
+		version = 4
+	}
+	if version != 4 {
 		return fmt.Errorf("unsupported gateway schema version %d", version)
 	}
 	return nil
@@ -556,16 +619,19 @@ func (s *Store) CursorKey(ctx context.Context) ([]byte, error) {
 func (s *Store) AssertInitializable(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var wallets, addresses, receipts, metadata int64
+	var wallets, addresses, receipts, attempts, reservations, events, metadata int64
 	if err := s.db.QueryRowContext(ctx, `SELECT
   (SELECT COUNT(*) FROM wallets),
   (SELECT COUNT(*) FROM addresses),
   (SELECT COUNT(*) FROM idempotency_receipts),
-  (SELECT COUNT(*) FROM metadata)`).Scan(&wallets, &addresses, &receipts, &metadata); err != nil {
+	(SELECT COUNT(*) FROM transaction_attempts),
+	(SELECT COUNT(*) FROM active_note_reservations),
+	(SELECT COUNT(*) FROM transaction_attempt_events),
+	  (SELECT COUNT(*) FROM metadata)`).Scan(&wallets, &addresses, &receipts, &attempts, &reservations, &events, &metadata); err != nil {
 		return fmt.Errorf("inspect gateway database before init: %w", err)
 	}
-	if wallets != 0 || addresses != 0 || receipts != 0 || metadata != 0 {
-		return fmt.Errorf("gateway database is not empty (wallets=%d addresses=%d receipts=%d metadata=%d); init refuses existing state", wallets, addresses, receipts, metadata)
+	if wallets != 0 || addresses != 0 || receipts != 0 || attempts != 0 || reservations != 0 || events != 0 || metadata != 0 {
+		return fmt.Errorf("gateway database is not empty (wallets=%d addresses=%d receipts=%d attempts=%d reservations=%d events=%d metadata=%d); init refuses existing state", wallets, addresses, receipts, attempts, reservations, events, metadata)
 	}
 	return nil
 }
@@ -612,16 +678,19 @@ func (s *Store) BeginInstallationRecovery(ctx context.Context, installationID st
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read installation recovery marker: %w", err)
 	}
-	var wallets, addresses, receipts, metadata int64
+	var wallets, addresses, receipts, attempts, reservations, events, metadata int64
 	if err := tx.QueryRowContext(ctx, `SELECT
   (SELECT COUNT(*) FROM wallets),
   (SELECT COUNT(*) FROM addresses),
   (SELECT COUNT(*) FROM idempotency_receipts),
-  (SELECT COUNT(*) FROM metadata)`).Scan(&wallets, &addresses, &receipts, &metadata); err != nil {
+	(SELECT COUNT(*) FROM transaction_attempts),
+	(SELECT COUNT(*) FROM active_note_reservations),
+	(SELECT COUNT(*) FROM transaction_attempt_events),
+	  (SELECT COUNT(*) FROM metadata)`).Scan(&wallets, &addresses, &receipts, &attempts, &reservations, &events, &metadata); err != nil {
 		return fmt.Errorf("inspect gateway database before recovery: %w", err)
 	}
-	if wallets != 0 || addresses != 0 || receipts != 0 || metadata != 0 {
-		return fmt.Errorf("unbound gateway database is not empty and has no matching recovery marker (wallets=%d addresses=%d receipts=%d metadata=%d)", wallets, addresses, receipts, metadata)
+	if wallets != 0 || addresses != 0 || receipts != 0 || attempts != 0 || reservations != 0 || events != 0 || metadata != 0 {
+		return fmt.Errorf("unbound gateway database is not empty and has no matching recovery marker (wallets=%d addresses=%d receipts=%d attempts=%d reservations=%d events=%d metadata=%d)", wallets, addresses, receipts, attempts, reservations, events, metadata)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO metadata(key,value) VALUES('recovery_installation_id',?)`, []byte(installationID)); err != nil {
 		return fmt.Errorf("store installation recovery marker: %w", err)

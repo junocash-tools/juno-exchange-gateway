@@ -161,6 +161,7 @@ func TestOpenRejectsIdentityMismatch(t *testing.T) {
 		"wallet set":  func(id *Identity) { id.Wallets = id.Wallets[:1] },
 		"fingerprint": func(id *Identity) { id.Wallets[0].UFVKFingerprint = strings.Repeat("c", 64) },
 		"birthday":    func(id *Identity) { id.Wallets[0].BirthdayHeight++ },
+		"account":     func(id *Identity) { id.Wallets[0].Account++ },
 	} {
 		t.Run(name, func(t *testing.T) {
 			identity := testIdentity()
@@ -170,6 +171,50 @@ func TestOpenRejectsIdentityMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManifestBindsAccountAndAcceptsLegacyAccountZero(t *testing.T) {
+	t.Run("new manifest", func(t *testing.T) {
+		identity := testIdentity()
+		identity.Wallets[0].Account = 7
+		path := filepath.Join(t.TempDir(), "manifest.json")
+		_, manifest, err := Create(path, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if manifest.Version != 2 || manifest.Wallets["cold"].Account != 7 {
+			t.Fatalf("manifest=%+v", manifest)
+		}
+		changed := identity
+		changed.Wallets = append([]WalletIdentity(nil), identity.Wallets...)
+		changed.Wallets[0].Account = 8
+		if _, _, err := Open(path, changed); err == nil || !strings.Contains(err.Error(), "identity checksum") {
+			t.Fatalf("account drift error=%v", err)
+		}
+	})
+
+	t.Run("legacy account zero", func(t *testing.T) {
+		identity := testIdentity()
+		path := filepath.Join(t.TempDir(), "manifest.json")
+		_, manifest, err := Create(path, identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest.Version = 1
+		manifest.IdentitySHA256 = legacyIdentityChecksum(identity)
+		if err := writeAtomic(path, manifest); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := Open(path, identity); err != nil {
+			t.Fatalf("legacy account zero rejected: %v", err)
+		}
+		changed := identity
+		changed.Wallets = append([]WalletIdentity(nil), identity.Wallets...)
+		changed.Wallets[0].Account = 1
+		if _, _, err := Open(path, changed); err == nil || !strings.Contains(err.Error(), "account 0") {
+			t.Fatalf("legacy account drift error=%v", err)
+		}
+	})
 }
 
 func TestConcurrentReservationsAreUnique(t *testing.T) {

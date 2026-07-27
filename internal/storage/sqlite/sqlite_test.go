@@ -294,7 +294,7 @@ CREATE TABLE metadata (key TEXT PRIMARY KEY,value BLOB NOT NULL);`)
 		t.Fatalf("bound wallet=%+v found=%v err=%v", wallet, found, err)
 	}
 	var version int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 3 {
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 4 {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	var generation int64

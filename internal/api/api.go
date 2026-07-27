@@ -125,6 +125,22 @@ func (a *API) ReconcileWallets(ctx context.Context) {
 	}
 }
 
+// AllocateInternalAddress gives the private coordinator the same guarded,
+// crash-safe allocator used by the public address API without exposing another
+// public route. The label must identify an internal exchange purpose.
+func (a *API) AllocateInternalAddress(ctx context.Context, walletID, label string) (storage.Address, error) {
+	if !strings.HasPrefix(label, "internal_") {
+		return storage.Address{}, errors.New("internal address label must start with internal_")
+	}
+	if len(label) > 128 {
+		return storage.Address{}, errors.New("internal address label is too long")
+	}
+	if _, code, err := a.checkReady(ctx); err != nil {
+		return storage.Address{}, fmt.Errorf("%s: %w", code, err)
+	}
+	return a.registry.allocate(ctx, walletID, label)
+}
+
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health/live", a.handleLive)

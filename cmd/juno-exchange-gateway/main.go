@@ -20,6 +20,7 @@ import (
 	"github.com/junocash-tools/juno-exchange-gateway/internal/adapters/scanner"
 	"github.com/junocash-tools/juno-exchange-gateway/internal/api"
 	"github.com/junocash-tools/juno-exchange-gateway/internal/config"
+	"github.com/junocash-tools/juno-exchange-gateway/internal/coordinator"
 	"github.com/junocash-tools/juno-exchange-gateway/internal/installation"
 	"github.com/junocash-tools/juno-exchange-gateway/internal/lifecycle"
 	storage "github.com/junocash-tools/juno-exchange-gateway/internal/storage/sqlite"
@@ -201,7 +202,7 @@ func runServe(ctx context.Context, logger *slog.Logger, cfg config.Config) int {
 	}
 	go service.ReconcileWallets(ctx)
 
-	server := &http.Server{
+	publicServer := &http.Server{
 		Addr:              cfg.ListenAddress,
 		Handler:           service.Handler(),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
@@ -210,27 +211,83 @@ func runServe(ctx context.Context, logger *slog.Logger, cfg config.Config) int {
 		IdleTimeout:       cfg.HTTPIdleTimeout,
 		MaxHeaderBytes:    32 << 10,
 	}
-	errCh := make(chan error, 1)
+	type serverResult struct {
+		name string
+		err  error
+	}
+	errCh := make(chan serverResult, 2)
 	go func() {
 		logger.Info("gateway_started", "listen", cfg.ListenAddress, "network", cfg.Network, "installation_id", manifest.InstallationID, "version", version, "revision", revision)
-		errCh <- server.ListenAndServe()
+		errCh <- serverResult{name: "gateway", err: publicServer.ListenAndServe()}
 	}()
 
+	var coordinatorServer *http.Server
+	if cfg.CoordinatorEnabled {
+		signer := coordinator.NewUnixSigner(cfg.CoordinatorSignerSocket, cfg.CoordinatorSignTimeout)
+		coordinatorService, err := coordinator.NewService(
+			cfg,
+			store,
+			nodeClient,
+			scannerClient,
+			service.AllocateInternalAddress,
+			coordinator.NewExecPlanner(cfg),
+			signer,
+			logger,
+		)
+		if err != nil {
+			logger.Error("coordinator_initialize_failed", "error", err.Error())
+			return 1
+		}
+		coordinatorHandler, err := coordinator.NewHandler(cfg, coordinatorService)
+		if err != nil {
+			logger.Error("coordinator_initialize_failed", "error", err.Error())
+			return 1
+		}
+		coordinatorService.Start(ctx)
+		coordinatorServer = &http.Server{
+			Addr:              cfg.CoordinatorListenAddress,
+			Handler:           coordinatorHandler,
+			ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
+			ReadTimeout:       cfg.HTTPReadTimeout,
+			WriteTimeout:      cfg.HTTPWriteTimeout,
+			IdleTimeout:       cfg.HTTPIdleTimeout,
+			MaxHeaderBytes:    32 << 10,
+		}
+		go func() {
+			logger.Info("coordinator_started", "listen", cfg.CoordinatorListenAddress, "network", cfg.Network)
+			errCh <- serverResult{name: "coordinator", err: coordinatorServer.ListenAndServe()}
+		}()
+	}
+
+	failed := false
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer cancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Error("gateway_shutdown_failed", "error", err.Error())
-			_ = server.Close()
+	case result := <-errCh:
+		if result.err == nil || !errors.Is(result.err, http.ErrServerClosed) {
+			message := "server stopped unexpectedly"
+			if result.err != nil {
+				message = result.err.Error()
+			}
+			logger.Error(result.name+"_server_failed", "error", message)
+			failed = true
 		}
-	case err := <-errCh:
-		if !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("gateway_server_failed", "error", err.Error())
-			return 1
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+	for name, server := range map[string]*http.Server{"gateway": publicServer, "coordinator": coordinatorServer} {
+		if server == nil {
+			continue
+		}
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error(name+"_shutdown_failed", "error", err.Error())
+			_ = server.Close()
+			failed = true
 		}
 	}
 	logger.Info("gateway_stopped")
+	if failed {
+		return 1
+	}
 	return 0
 }
 

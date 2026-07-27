@@ -33,6 +33,7 @@ type Wallet struct {
 	WalletID       string `json:"wallet_id"`
 	UFVK           string `json:"ufvk"`
 	BirthdayHeight int64  `json:"birthday_height"`
+	Account        uint32 `json:"account,omitempty"`
 }
 
 func (w Wallet) UFVKFingerprint() string {
@@ -99,6 +100,24 @@ type Config struct {
 	BackfillTimeout        time.Duration
 	WalletEffectsMaxEvents int
 	NoteSummaryMaxNotes    int
+
+	CoordinatorEnabled       bool
+	CoordinatorListenAddress string
+	CoordinatorTxbuildPath   string
+	CoordinatorSignerSocket  string
+	CoordinatorWorkDir       string
+	CoordinatorPlanTimeout   time.Duration
+	CoordinatorSignTimeout   time.Duration
+	CoordinatorMaxBodyBytes  int64
+	CoordinatorMaxOutputs    int
+	CoordinatorMaxAmountZat  int64
+	CoordinatorExpiryOffset  int64
+	CoordinatorFeeMultiplier int64
+	CoordinatorFeeAddZat     int64
+	CoordinatorMinNoteZat    int64
+	CoordinatorMinChangeZat  int64
+	CoordinatorMaxReplans    int
+	CoordinatorRate          RateLimit
 }
 
 func Load() (Config, error) {
@@ -110,39 +129,56 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		Network:                network,
-		ListenAddress:          env("JUNO_GATEWAY_LISTEN", ":8080"),
-		StateDSN:               env("JUNO_GATEWAY_STATE_DSN", "file:/var/lib/juno-gateway/gateway.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"),
-		InstallationStatePath:  env("JUNO_GATEWAY_INSTALLATION_STATE", "/var/lib/juno-installation/manifest.json"),
-		NodeRPCURL:             env("JUNO_GATEWAY_NODE_RPC_URL", "http://junocashd:8232"),
-		NodeRPCUser:            os.Getenv("JUNO_GATEWAY_NODE_RPC_USER"),
-		NodeRPCPassword:        os.Getenv("JUNO_GATEWAY_NODE_RPC_PASSWORD"),
-		ScannerURL:             env("JUNO_GATEWAY_SCANNER_URL", "http://juno-scan:8080"),
-		ScannerToken:           os.Getenv("JUNO_GATEWAY_SCANNER_TOKEN"),
-		AddrgenPath:            env("JUNO_GATEWAY_ADDRGEN_PATH", "/usr/local/bin/juno-addrgen"),
-		DefaultConfirmations:   envInt64("JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", 100),
-		MaxConfirmations:       envInt64("JUNO_GATEWAY_MAX_CONFIRMATIONS", 10000),
-		MaxScannerLag:          envInt64("JUNO_GATEWAY_MAX_SCANNER_LAG", 2),
-		RequireCompleteHistory: envBool("JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY", true),
-		JSONBodyBytes:          envInt64("JUNO_GATEWAY_MAX_JSON_BODY_BYTES", defaultJSONBodyBytes),
-		BroadcastBodyBytes:     envInt64("JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", defaultBroadcastBodyBytes),
-		ReadTimeout:            envDuration("JUNO_GATEWAY_READ_TIMEOUT", 15*time.Second),
-		BroadcastTimeout:       envDuration("JUNO_GATEWAY_BROADCAST_TIMEOUT", 30*time.Second),
-		UpstreamTimeout:        envDuration("JUNO_GATEWAY_UPSTREAM_TIMEOUT", 10*time.Second),
-		ShutdownTimeout:        envDuration("JUNO_GATEWAY_SHUTDOWN_TIMEOUT", 15*time.Second),
-		HTTPReadHeaderTimeout:  envDuration("JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
-		HTTPReadTimeout:        envDuration("JUNO_GATEWAY_HTTP_READ_TIMEOUT", 30*time.Second),
-		HTTPWriteTimeout:       envDuration("JUNO_GATEWAY_HTTP_WRITE_TIMEOUT", 45*time.Second),
-		HTTPIdleTimeout:        envDuration("JUNO_GATEWAY_HTTP_IDLE_TIMEOUT", 60*time.Second),
-		ReadRate:               RateLimit{RPS: envFloat("JUNO_GATEWAY_READ_RATE_RPS", 50), Burst: envInt("JUNO_GATEWAY_READ_RATE_BURST", 100)},
-		BroadcastRate:          RateLimit{RPS: envFloat("JUNO_GATEWAY_BROADCAST_RATE_RPS", 2), Burst: envInt("JUNO_GATEWAY_BROADCAST_RATE_BURST", 5)},
-		TrustProxyHeaders:      envBool("JUNO_GATEWAY_TRUST_PROXY_HEADERS", false),
-		IdempotencyLease:       envDuration("JUNO_GATEWAY_IDEMPOTENCY_LEASE", 30*time.Second),
-		BackfillBatchSize:      envInt64("JUNO_GATEWAY_BACKFILL_BATCH_SIZE", 10000),
-		BackfillYield:          envDuration("JUNO_GATEWAY_BACKFILL_YIELD", 250*time.Millisecond),
-		BackfillTimeout:        envDuration("JUNO_GATEWAY_BACKFILL_TIMEOUT", 10*time.Minute),
-		WalletEffectsMaxEvents: envInt("JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS", 10000),
-		NoteSummaryMaxNotes:    envInt("JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES", 100000),
+		Network:                  network,
+		ListenAddress:            env("JUNO_GATEWAY_LISTEN", ":8080"),
+		StateDSN:                 env("JUNO_GATEWAY_STATE_DSN", "file:/var/lib/juno-gateway/gateway.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"),
+		InstallationStatePath:    env("JUNO_GATEWAY_INSTALLATION_STATE", "/var/lib/juno-installation/manifest.json"),
+		NodeRPCURL:               env("JUNO_GATEWAY_NODE_RPC_URL", "http://junocashd:8232"),
+		NodeRPCUser:              os.Getenv("JUNO_GATEWAY_NODE_RPC_USER"),
+		NodeRPCPassword:          os.Getenv("JUNO_GATEWAY_NODE_RPC_PASSWORD"),
+		ScannerURL:               env("JUNO_GATEWAY_SCANNER_URL", "http://juno-scan:8080"),
+		ScannerToken:             os.Getenv("JUNO_GATEWAY_SCANNER_TOKEN"),
+		AddrgenPath:              env("JUNO_GATEWAY_ADDRGEN_PATH", "/usr/local/bin/juno-addrgen"),
+		DefaultConfirmations:     envInt64("JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", 100),
+		MaxConfirmations:         envInt64("JUNO_GATEWAY_MAX_CONFIRMATIONS", 10000),
+		MaxScannerLag:            envInt64("JUNO_GATEWAY_MAX_SCANNER_LAG", 2),
+		RequireCompleteHistory:   envBool("JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY", true),
+		JSONBodyBytes:            envInt64("JUNO_GATEWAY_MAX_JSON_BODY_BYTES", defaultJSONBodyBytes),
+		BroadcastBodyBytes:       envInt64("JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", defaultBroadcastBodyBytes),
+		ReadTimeout:              envDuration("JUNO_GATEWAY_READ_TIMEOUT", 15*time.Second),
+		BroadcastTimeout:         envDuration("JUNO_GATEWAY_BROADCAST_TIMEOUT", 30*time.Second),
+		UpstreamTimeout:          envDuration("JUNO_GATEWAY_UPSTREAM_TIMEOUT", 10*time.Second),
+		ShutdownTimeout:          envDuration("JUNO_GATEWAY_SHUTDOWN_TIMEOUT", 15*time.Second),
+		HTTPReadHeaderTimeout:    envDuration("JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
+		HTTPReadTimeout:          envDuration("JUNO_GATEWAY_HTTP_READ_TIMEOUT", 30*time.Second),
+		HTTPWriteTimeout:         envDuration("JUNO_GATEWAY_HTTP_WRITE_TIMEOUT", 45*time.Second),
+		HTTPIdleTimeout:          envDuration("JUNO_GATEWAY_HTTP_IDLE_TIMEOUT", 60*time.Second),
+		ReadRate:                 RateLimit{RPS: envFloat("JUNO_GATEWAY_READ_RATE_RPS", 50), Burst: envInt("JUNO_GATEWAY_READ_RATE_BURST", 100)},
+		BroadcastRate:            RateLimit{RPS: envFloat("JUNO_GATEWAY_BROADCAST_RATE_RPS", 2), Burst: envInt("JUNO_GATEWAY_BROADCAST_RATE_BURST", 5)},
+		TrustProxyHeaders:        envBool("JUNO_GATEWAY_TRUST_PROXY_HEADERS", false),
+		IdempotencyLease:         envDuration("JUNO_GATEWAY_IDEMPOTENCY_LEASE", 30*time.Second),
+		BackfillBatchSize:        envInt64("JUNO_GATEWAY_BACKFILL_BATCH_SIZE", 10000),
+		BackfillYield:            envDuration("JUNO_GATEWAY_BACKFILL_YIELD", 250*time.Millisecond),
+		BackfillTimeout:          envDuration("JUNO_GATEWAY_BACKFILL_TIMEOUT", 10*time.Minute),
+		WalletEffectsMaxEvents:   envInt("JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS", 10000),
+		NoteSummaryMaxNotes:      envInt("JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES", 100000),
+		CoordinatorEnabled:       envBool("JUNO_COORDINATOR_ENABLED", false),
+		CoordinatorListenAddress: env("JUNO_COORDINATOR_LISTEN", "127.0.0.1:8081"),
+		CoordinatorTxbuildPath:   env("JUNO_COORDINATOR_TXBUILD_PATH", "/usr/local/bin/juno-txbuild"),
+		CoordinatorSignerSocket:  env("JUNO_COORDINATOR_SIGNER_SOCKET", "/run/juno-signer/signer.sock"),
+		CoordinatorWorkDir:       env("JUNO_COORDINATOR_WORK_DIR", "/var/lib/juno-gateway/coordinator-work"),
+		CoordinatorPlanTimeout:   envDuration("JUNO_COORDINATOR_PLAN_TIMEOUT", 2*time.Minute),
+		CoordinatorSignTimeout:   envDuration("JUNO_COORDINATOR_SIGN_TIMEOUT", 10*time.Minute),
+		CoordinatorMaxBodyBytes:  envInt64("JUNO_COORDINATOR_MAX_BODY_BYTES", defaultJSONBodyBytes),
+		CoordinatorMaxOutputs:    envInt("JUNO_COORDINATOR_MAX_OUTPUTS", 199),
+		CoordinatorMaxAmountZat:  envInt64("JUNO_COORDINATOR_MAX_AMOUNT_ZAT", 2100000000000000),
+		CoordinatorExpiryOffset:  envInt64("JUNO_COORDINATOR_EXPIRY_OFFSET", 40),
+		CoordinatorFeeMultiplier: envInt64("JUNO_COORDINATOR_FEE_MULTIPLIER", 20),
+		CoordinatorFeeAddZat:     envInt64("JUNO_COORDINATOR_FEE_ADD_ZAT", 0),
+		CoordinatorMinNoteZat:    envInt64("JUNO_COORDINATOR_MIN_NOTE_ZAT", 0),
+		CoordinatorMinChangeZat:  envInt64("JUNO_COORDINATOR_MIN_CHANGE_ZAT", 0),
+		CoordinatorMaxReplans:    envInt("JUNO_COORDINATOR_MAX_REPLANS", 3),
+		CoordinatorRate:          RateLimit{RPS: envFloat("JUNO_COORDINATOR_RATE_RPS", 5), Burst: envInt("JUNO_COORDINATOR_RATE_BURST", 10)},
 	}
 
 	if path := strings.TrimSpace(os.Getenv("JUNO_GATEWAY_WALLETS_FILE")); path != "" {
@@ -211,6 +247,36 @@ func (c *Config) Validate() error {
 	if c.NoteSummaryMaxNotes < 1 || c.NoteSummaryMaxNotes > 1000000 {
 		return errors.New("note summary cap must be between 1 and 1000000")
 	}
+	if c.CoordinatorEnabled {
+		if strings.TrimSpace(c.CoordinatorListenAddress) == "" || c.CoordinatorListenAddress == c.ListenAddress {
+			return errors.New("coordinator listen address must be set and distinct from the public gateway listener")
+		}
+		for name, path := range map[string]string{
+			"coordinator txbuild path":   c.CoordinatorTxbuildPath,
+			"coordinator signer socket":  c.CoordinatorSignerSocket,
+			"coordinator work directory": c.CoordinatorWorkDir,
+		} {
+			if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+				return fmt.Errorf("%s must be an absolute path", name)
+			}
+		}
+		if c.CoordinatorPlanTimeout <= 0 || c.CoordinatorSignTimeout <= 0 {
+			return errors.New("coordinator timeouts must be positive")
+		}
+		if c.CoordinatorMaxBodyBytes < 1024 || c.CoordinatorMaxBodyBytes > 8<<20 {
+			return errors.New("coordinator body limit must be between 1 KiB and 8 MiB")
+		}
+		if c.CoordinatorMaxOutputs < 1 || c.CoordinatorMaxOutputs > 199 {
+			return errors.New("coordinator max outputs must be between 1 and 199")
+		}
+		if c.CoordinatorMaxAmountZat < 1 || c.CoordinatorExpiryOffset < 4 || c.CoordinatorExpiryOffset > int64(^uint32(0)) ||
+			c.CoordinatorFeeMultiplier < 1 || c.CoordinatorFeeAddZat < 0 || c.CoordinatorMinNoteZat < 0 || c.CoordinatorMinChangeZat < 0 {
+			return errors.New("coordinator amount, expiry, and fee policy is invalid")
+		}
+		if c.CoordinatorMaxReplans < 1 || c.CoordinatorMaxReplans > 20 || c.CoordinatorRate.RPS <= 0 || c.CoordinatorRate.Burst <= 0 {
+			return errors.New("coordinator replan and rate limits are invalid")
+		}
+	}
 	if c.ReadRate.RPS <= 0 || c.ReadRate.Burst <= 0 || c.BroadcastRate.RPS <= 0 || c.BroadcastRate.Burst <= 0 {
 		return errors.New("rate limits must be positive")
 	}
@@ -245,6 +311,9 @@ func (c *Config) Validate() error {
 		if w.BirthdayHeight < 0 {
 			return fmt.Errorf("wallet %q birthday_height must be non-negative", w.WalletID)
 		}
+		if w.Account >= 1<<31 {
+			return fmt.Errorf("wallet %q account must be below 2147483648", w.WalletID)
+		}
 	}
 	if c.Network != domain.Regtest && len(c.Credentials) == 0 {
 		return errors.New("authentication is required outside regtest")
@@ -276,6 +345,7 @@ func (c *Config) Validate() error {
 	}
 	seenNames := make(map[string]struct{}, len(c.Credentials))
 	seenTokenHashes := make(map[[sha256.Size]byte]string, len(c.Credentials))
+	hasCoordinatorCredential := false
 	for i := range c.Credentials {
 		cr := &c.Credentials[i]
 		cr.Name = strings.TrimSpace(cr.Name)
@@ -322,7 +392,10 @@ func (c *Config) Validate() error {
 		}
 		for _, scope := range cr.Scopes {
 			switch scope {
-			case "read", "address", "broadcast", "raw", "treasury", "withdrawal", "admin":
+			case "read", "address", "broadcast", "raw", "treasury", "withdrawal", "plan", "admin":
+				if scope == "plan" || scope == "admin" {
+					hasCoordinatorCredential = true
+				}
 			default:
 				return fmt.Errorf("credential %q has invalid scope %q", cr.Name, scope)
 			}
@@ -338,6 +411,9 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("credential %q references unknown wallet %q", cr.Name, walletID)
 			}
 		}
+	}
+	if c.CoordinatorEnabled && !hasCoordinatorCredential {
+		return errors.New("coordinator requires at least one credential with plan or admin scope")
 	}
 	return nil
 }
@@ -381,28 +457,28 @@ func readJSONFile(path string, out any) error {
 }
 
 func validateEnvironment() error {
-	for _, key := range []string{"JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", "JUNO_GATEWAY_MAX_CONFIRMATIONS", "JUNO_GATEWAY_MAX_SCANNER_LAG", "JUNO_GATEWAY_MAX_JSON_BODY_BYTES", "JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", "JUNO_GATEWAY_READ_RATE_BURST", "JUNO_GATEWAY_BROADCAST_RATE_BURST", "JUNO_GATEWAY_BACKFILL_BATCH_SIZE", "JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS", "JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES"} {
+	for _, key := range []string{"JUNO_GATEWAY_DEFAULT_CONFIRMATIONS", "JUNO_GATEWAY_MAX_CONFIRMATIONS", "JUNO_GATEWAY_MAX_SCANNER_LAG", "JUNO_GATEWAY_MAX_JSON_BODY_BYTES", "JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES", "JUNO_GATEWAY_READ_RATE_BURST", "JUNO_GATEWAY_BROADCAST_RATE_BURST", "JUNO_GATEWAY_BACKFILL_BATCH_SIZE", "JUNO_GATEWAY_WALLET_EFFECTS_MAX_EVENTS", "JUNO_GATEWAY_NOTE_SUMMARY_MAX_NOTES", "JUNO_COORDINATOR_MAX_BODY_BYTES", "JUNO_COORDINATOR_MAX_OUTPUTS", "JUNO_COORDINATOR_MAX_AMOUNT_ZAT", "JUNO_COORDINATOR_EXPIRY_OFFSET", "JUNO_COORDINATOR_FEE_MULTIPLIER", "JUNO_COORDINATOR_FEE_ADD_ZAT", "JUNO_COORDINATOR_MIN_NOTE_ZAT", "JUNO_COORDINATOR_MIN_CHANGE_ZAT", "JUNO_COORDINATOR_MAX_REPLANS", "JUNO_COORDINATOR_RATE_BURST"} {
 		if value := os.Getenv(key); value != "" {
 			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
 				return fmt.Errorf("%s must be an integer", key)
 			}
 		}
 	}
-	for _, key := range []string{"JUNO_GATEWAY_READ_RATE_RPS", "JUNO_GATEWAY_BROADCAST_RATE_RPS"} {
+	for _, key := range []string{"JUNO_GATEWAY_READ_RATE_RPS", "JUNO_GATEWAY_BROADCAST_RATE_RPS", "JUNO_COORDINATOR_RATE_RPS"} {
 		if value := os.Getenv(key); value != "" {
 			if _, err := strconv.ParseFloat(value, 64); err != nil {
 				return fmt.Errorf("%s must be a number", key)
 			}
 		}
 	}
-	for _, key := range []string{"JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY", "JUNO_GATEWAY_TRUST_PROXY_HEADERS"} {
+	for _, key := range []string{"JUNO_GATEWAY_REQUIRE_COMPLETE_HISTORY", "JUNO_GATEWAY_TRUST_PROXY_HEADERS", "JUNO_COORDINATOR_ENABLED"} {
 		if value := os.Getenv(key); value != "" {
 			if _, err := strconv.ParseBool(value); err != nil {
 				return fmt.Errorf("%s must be true or false", key)
 			}
 		}
 	}
-	for _, key := range []string{"JUNO_GATEWAY_READ_TIMEOUT", "JUNO_GATEWAY_BROADCAST_TIMEOUT", "JUNO_GATEWAY_UPSTREAM_TIMEOUT", "JUNO_GATEWAY_SHUTDOWN_TIMEOUT", "JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT", "JUNO_GATEWAY_HTTP_READ_TIMEOUT", "JUNO_GATEWAY_HTTP_WRITE_TIMEOUT", "JUNO_GATEWAY_HTTP_IDLE_TIMEOUT", "JUNO_GATEWAY_IDEMPOTENCY_LEASE", "JUNO_GATEWAY_BACKFILL_YIELD", "JUNO_GATEWAY_BACKFILL_TIMEOUT"} {
+	for _, key := range []string{"JUNO_GATEWAY_READ_TIMEOUT", "JUNO_GATEWAY_BROADCAST_TIMEOUT", "JUNO_GATEWAY_UPSTREAM_TIMEOUT", "JUNO_GATEWAY_SHUTDOWN_TIMEOUT", "JUNO_GATEWAY_HTTP_READ_HEADER_TIMEOUT", "JUNO_GATEWAY_HTTP_READ_TIMEOUT", "JUNO_GATEWAY_HTTP_WRITE_TIMEOUT", "JUNO_GATEWAY_HTTP_IDLE_TIMEOUT", "JUNO_GATEWAY_IDEMPOTENCY_LEASE", "JUNO_GATEWAY_BACKFILL_YIELD", "JUNO_GATEWAY_BACKFILL_TIMEOUT", "JUNO_COORDINATOR_PLAN_TIMEOUT", "JUNO_COORDINATOR_SIGN_TIMEOUT"} {
 		if value := os.Getenv(key); value != "" {
 			if _, err := time.ParseDuration(value); err != nil {
 				return fmt.Errorf("%s must be a duration", key)
