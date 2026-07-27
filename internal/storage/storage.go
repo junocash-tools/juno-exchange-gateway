@@ -98,7 +98,7 @@ type Store interface {
 	AbandonReceipt(context.Context, string, string, int64, time.Time) error
 	ClaimAttempt(context.Context, TransactionAttempt) (AttemptClaimResult, error)
 	Attempt(context.Context, string) (TransactionAttempt, bool, error)
-	RecoverableAttempts(context.Context, int) ([]TransactionAttempt, error)
+	RecoverableAttempts(context.Context, string, int) ([]TransactionAttempt, error)
 	SetAttemptChangeAddress(context.Context, string, string, time.Time) error
 	ActiveNoteIDs(context.Context, string, string) ([]string, error)
 	ReserveAttemptPlan(context.Context, string, string, []byte, string, string, int64, []string, time.Time) error

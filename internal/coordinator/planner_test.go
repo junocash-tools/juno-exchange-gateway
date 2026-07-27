@@ -14,6 +14,7 @@ import (
 )
 
 func TestExecPlannerPassesPolicyAndActiveReservationExclusions(t *testing.T) {
+	t.Setenv("LD_LIBRARY_PATH", "/test/juno-libs")
 	noteExcluded := fmt.Sprintf("%064x:0", 1)
 	noteSelected := fmt.Sprintf("%064x:0", 2)
 	cfg := config.Config{
@@ -42,6 +43,9 @@ func TestExecPlannerHelperProcess(t *testing.T) {
 		return
 	}
 	args := os.Args[separator+1:]
+	if got := os.Getenv("LD_LIBRARY_PATH"); got != "/test/juno-libs" {
+		t.Fatalf("LD_LIBRARY_PATH=%q want %q", got, "/test/juno-libs")
+	}
 	value := func(flag string) string {
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == flag {

@@ -83,6 +83,7 @@ func (p *ExecPlanner) Plan(ctx context.Context, request CreateRequest, wallet co
 	cmd := commandContext(ctx, p.cfg.CoordinatorTxbuildPath, args...)
 	cmd.Dir = dir
 	cmd.Env = []string{
+		"LD_LIBRARY_PATH=" + os.Getenv("LD_LIBRARY_PATH"),
 		"JUNO_RPC_URL=" + p.cfg.NodeRPCURL,
 		"JUNO_RPC_USER=" + p.cfg.NodeRPCUser,
 		"JUNO_RPC_PASS=" + p.cfg.NodeRPCPassword,

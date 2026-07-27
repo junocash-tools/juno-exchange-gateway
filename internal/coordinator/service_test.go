@@ -92,8 +92,11 @@ func TestServiceRecoversUnknownSigningOutcomeWithoutReplanning(t *testing.T) {
 func TestServiceReleasesReservationsOnlyAfterFinalityOrExpiryProof(t *testing.T) {
 	t.Run("confirmed finality", func(t *testing.T) {
 		cfg, store := coordinatorTestConfig(t)
-		node := &fakeCoordinatorNode{tip: domain.NodeTip{Network: "regtest", Height: 100, Hash: fmt.Sprintf("%064x", 100)}}
-		service := newCoordinatorTestServiceWithChain(t, cfg, store, &fakePlanner{notes: []string{fmt.Sprintf("%064x:0", 5)}}, &fakeSigner{}, node, &fakeCoordinatorScanner{})
+		noteID := fmt.Sprintf("%064x:0", 5)
+		hash := fmt.Sprintf("%064x", 100)
+		node := &fakeCoordinatorNode{tip: domain.NodeTip{Network: "regtest", Height: 100, Hash: hash}}
+		scanner := &fakeCoordinatorScanner{}
+		service := newCoordinatorTestServiceWithChain(t, cfg, store, &fakePlanner{notes: []string{noteID}}, &fakeSigner{}, node, scanner)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		service.Start(ctx)
@@ -106,6 +109,24 @@ func TestServiceReleasesReservationsOnlyAfterFinalityOrExpiryProof(t *testing.T)
 			t.Fatalf("signed reservations=%v", active)
 		}
 		node.setTransaction(domain.Transaction{TxID: signed.TxID, State: "confirmed", Confirmations: 100}, true)
+		service.enqueue(signed.AttemptID)
+		time.Sleep(50 * time.Millisecond)
+		if current, err := service.Attempt(ctx, "exchange", signed.AttemptID); err != nil || current.State != "signed" {
+			t.Fatalf("reservation released before scanner proof: attempt=%+v err=%v", current, err)
+		}
+		if active, _ := store.ActiveNoteIDs(ctx, "regtest", "hot"); len(active) != 1 {
+			t.Fatalf("pre-proof reservations=%v", active)
+		}
+		ready, complete, pendingReady := true, true, true
+		confirmations := int64(100)
+		height, sourceHeight, value, spentHeight, spentConfirmedHeight := int64(100), int64(1), int64(700000), int64(1), int64(100)
+		txid := signed.TxID
+		scanner.setProof(domain.ScannerHealth{Status: "ok", Network: "regtest", UAHRP: "jregtest", Confirmations: &confirmations, Ready: &ready, HistoryComplete: &complete,
+			PendingSpendsReady: &pendingReady, ScannedHeight: &height, ScannedHash: hash}, domain.WalletNoteStatuses{
+			WalletID: "hot", EventEpoch: fmt.Sprintf("%064x", 1), AsOfScannerHeight: height, AsOfScannerHash: hash,
+			Statuses: []domain.NoteStatus{{NoteID: noteID, State: "spent", SourceHeight: &sourceHeight, ValueZat: &value,
+				SpentTxID: &txid, SpentHeight: &spentHeight, SpentConfirmedHeight: &spentConfirmedHeight}},
+		})
 		service.enqueue(signed.AttemptID)
 		waitAttemptState(t, service, "exchange", signed.AttemptID, "final")
 		if active, _ := store.ActiveNoteIDs(ctx, "regtest", "hot"); len(active) != 0 {
@@ -130,9 +151,10 @@ func TestServiceReleasesReservationsOnlyAfterFinalityOrExpiryProof(t *testing.T)
 		hash := fmt.Sprintf("%064x", 240)
 		node.setTip(domain.NodeTip{Network: "regtest", Height: 240, Hash: hash})
 		ready, complete, pendingReady := true, true, true
+		confirmations := int64(100)
 		height := int64(240)
 		sourceHeight, value := int64(1), int64(700000)
-		scanner.setProof(domain.ScannerHealth{Status: "ok", Network: "regtest", UAHRP: "jregtest", Ready: &ready, HistoryComplete: &complete,
+		scanner.setProof(domain.ScannerHealth{Status: "ok", Network: "regtest", UAHRP: "jregtest", Confirmations: &confirmations, Ready: &ready, HistoryComplete: &complete,
 			PendingSpendsReady: &pendingReady, ScannedHeight: &height, ScannedHash: hash}, domain.WalletNoteStatuses{
 			WalletID: "hot", EventEpoch: fmt.Sprintf("%064x", 1), AsOfScannerHeight: height, AsOfScannerHash: hash,
 			Statuses: []domain.NoteStatus{{NoteID: noteID, State: "unspent", SourceHeight: &sourceHeight, ValueZat: &value}},

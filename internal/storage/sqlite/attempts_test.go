@@ -31,6 +31,34 @@ func TestTransactionAttemptClaimReplayAndConflict(t *testing.T) {
 	}
 }
 
+func TestRecoverableAttemptsUsesStableAttemptIDCursor(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	ensureAttemptWallet(t, store)
+	now := time.Now().UTC()
+	for number := 1; number <= 3; number++ {
+		if claim, err := store.ClaimAttempt(ctx, testAttempt(number, fmt.Sprintf("scope-%d", number), fmt.Sprintf("digest-%d", number), now)); err != nil || claim.State != storage.ClaimAcquired {
+			t.Fatalf("claim %d=%+v err=%v", number, claim, err)
+		}
+	}
+	first, err := store.RecoverableAttempts(ctx, "", 2)
+	if err != nil || len(first) != 2 || first[0].AttemptID != testAttempt(1, "", "", now).AttemptID || first[1].AttemptID != testAttempt(2, "", "", now).AttemptID {
+		t.Fatalf("first page=%v err=%v", attemptIDs(first), err)
+	}
+	second, err := store.RecoverableAttempts(ctx, first[1].AttemptID, 2)
+	if err != nil || len(second) != 1 || second[0].AttemptID != testAttempt(3, "", "", now).AttemptID {
+		t.Fatalf("second page=%v err=%v", attemptIDs(second), err)
+	}
+}
+
+func attemptIDs(attempts []storage.TransactionAttempt) []string {
+	out := make([]string, len(attempts))
+	for index := range attempts {
+		out[index] = attempts[index].AttemptID
+	}
+	return out
+}
+
 func TestTransactionAttemptReservationsAreAtomicAndSurviveSigning(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

@@ -69,11 +69,11 @@ func (s *Store) Attempt(ctx context.Context, attemptID string) (storage.Transact
 	return attempt, true, nil
 }
 
-func (s *Store) RecoverableAttempts(ctx context.Context, limit int) ([]storage.TransactionAttempt, error) {
+func (s *Store) RecoverableAttempts(ctx context.Context, afterAttemptID string, limit int) ([]storage.TransactionAttempt, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("recoverable attempt limit must be between 1 and 1000")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+attemptColumns+` FROM transaction_attempts WHERE state IN ('planning','reserved','signing','signing_unknown','signed','broadcast','mined','expired_pending_reconciliation','orphaned') ORDER BY created_at,attempt_id LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+attemptColumns+` FROM transaction_attempts WHERE state IN ('planning','reserved','signing','signing_unknown','signed','broadcast','mined','expired_pending_reconciliation','orphaned') AND attempt_id>? ORDER BY attempt_id LIMIT ?`, afterAttemptID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list recoverable transaction attempts: %w", err)
 	}

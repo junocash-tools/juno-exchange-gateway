@@ -39,12 +39,14 @@ type Service struct {
 	logger   *slog.Logger
 	wallets  map[string]config.Wallet
 
-	queue       chan string
-	startOnce   sync.Once
-	inflightMu  sync.Mutex
-	inflight    map[string]struct{}
-	walletMu    sync.Mutex
-	walletLocks map[string]*sync.Mutex
+	queue         chan string
+	startOnce     sync.Once
+	inflightMu    sync.Mutex
+	inflight      map[string]struct{}
+	walletMu      sync.Mutex
+	walletLocks   map[string]*sync.Mutex
+	recoveryMu    sync.Mutex
+	recoveryAfter string
 }
 
 func NewService(cfg config.Config, store storage.Store, node domain.Node, scanner domain.Scanner, allocate AddressAllocator, planner Planner, signer Signer, logger *slog.Logger) (*Service, error) {
@@ -190,23 +192,44 @@ func (s *Service) recoverLoop(ctx context.Context) {
 }
 
 func (s *Service) scheduleRecoverable(ctx context.Context) {
-	values, err := s.store.RecoverableAttempts(ctx, recoveryBatchSize)
+	s.recoveryMu.Lock()
+	defer s.recoveryMu.Unlock()
+	available := cap(s.queue) - len(s.queue)
+	if available < 1 {
+		return
+	}
+	limit := min(recoveryBatchSize, available)
+	values, err := s.store.RecoverableAttempts(ctx, s.recoveryAfter, limit)
 	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Error("coordinator_recovery_scan_failed", "error", err.Error())
 		}
 		return
 	}
+	if len(values) == 0 {
+		s.recoveryAfter = ""
+		return
+	}
+	enqueued := 0
 	for _, value := range values {
-		s.enqueue(value.AttemptID)
+		if !s.enqueue(value.AttemptID) {
+			break
+		}
+		s.recoveryAfter = value.AttemptID
+		enqueued++
+	}
+	if enqueued == len(values) && len(values) < limit {
+		s.recoveryAfter = ""
 	}
 }
 
-func (s *Service) enqueue(attemptID string) {
+func (s *Service) enqueue(attemptID string) bool {
 	select {
 	case s.queue <- attemptID:
+		return true
 	default:
 		s.logger.Warn("coordinator_queue_full", "attempt_id", attemptID)
+		return false
 	}
 }
 
@@ -394,7 +417,7 @@ func (s *Service) reconcileAttempt(ctx context.Context, attempt storage.Transact
 			return
 		case "confirmed":
 			if tx.Confirmations >= s.cfg.DefaultConfirmations {
-				s.transition(ctx, attempt, "final", true)
+				s.reconcileFinal(ctx, attempt)
 			} else {
 				s.transition(ctx, attempt, "mined", false)
 			}
@@ -416,23 +439,26 @@ func (s *Service) reconcileAttempt(ctx context.Context, attempt storage.Transact
 	s.reconcileExpired(ctx, attempt)
 }
 
+func (s *Service) reconcileFinal(ctx context.Context, attempt storage.TransactionAttempt) {
+	_, statuses, ok := s.scannerProof(ctx, attempt)
+	if !ok {
+		return
+	}
+	for _, status := range statuses.Statuses {
+		if status.State != "spent" || status.SpentTxID == nil || *status.SpentTxID != attempt.TxID ||
+			status.SpentHeight == nil || status.SpentConfirmedHeight == nil {
+			return
+		}
+	}
+	s.transition(ctx, attempt, "final", true)
+}
+
 func (s *Service) reconcileExpired(ctx context.Context, attempt storage.TransactionAttempt) {
 	if attempt.ExpiryHeight <= 0 || attempt.ExpiryHeight > int64(^uint32(0)) {
 		return
 	}
-	proofCtx, cancel := context.WithTimeout(ctx, s.cfg.UpstreamTimeout)
-	defer cancel()
-	tip, err := s.node.Tip(proofCtx)
-	if err != nil || tip.Network != s.cfg.Network.NodeChain() || tip.InitialBlockDownload || tip.Height < attempt.ExpiryHeight+s.cfg.DefaultConfirmations {
-		return
-	}
-	health, err := s.scanner.Health(proofCtx)
-	if err != nil || health.Status != "ok" || health.Network != string(s.cfg.Network) || health.UAHRP != s.cfg.Network.AddressHRP() || health.Ready == nil || !*health.Ready ||
-		health.HistoryComplete == nil || !*health.HistoryComplete || health.PendingSpendsReady == nil || !*health.PendingSpendsReady || health.ScannedHeight == nil || *health.ScannedHeight != tip.Height || health.ScannedHash != tip.Hash {
-		return
-	}
-	statuses, found, err := s.scanner.NoteStatuses(proofCtx, attempt.WalletID, attempt.SelectedNoteIDs)
-	if err != nil || !found || !statuses.ValidFor(attempt.WalletID, attempt.SelectedNoteIDs) || statuses.AsOfScannerHeight != tip.Height || statuses.AsOfScannerHash != tip.Hash {
+	tip, statuses, ok := s.scannerProof(ctx, attempt)
+	if !ok || tip.Height < attempt.ExpiryHeight+s.cfg.DefaultConfirmations {
 		return
 	}
 	for _, status := range statuses.Statuses {
@@ -441,6 +467,26 @@ func (s *Service) reconcileExpired(ctx context.Context, attempt storage.Transact
 		}
 	}
 	s.transition(ctx, attempt, "released", true)
+}
+
+func (s *Service) scannerProof(ctx context.Context, attempt storage.TransactionAttempt) (domain.NodeTip, domain.WalletNoteStatuses, bool) {
+	proofCtx, cancel := context.WithTimeout(ctx, s.cfg.UpstreamTimeout)
+	defer cancel()
+	tip, err := s.node.Tip(proofCtx)
+	if err != nil || tip.Network != s.cfg.Network.NodeChain() || tip.InitialBlockDownload {
+		return domain.NodeTip{}, domain.WalletNoteStatuses{}, false
+	}
+	health, err := s.scanner.Health(proofCtx)
+	if err != nil || health.Status != "ok" || health.Network != string(s.cfg.Network) || health.UAHRP != s.cfg.Network.AddressHRP() || health.Ready == nil || !*health.Ready ||
+		health.Confirmations == nil || *health.Confirmations != s.cfg.DefaultConfirmations ||
+		health.HistoryComplete == nil || !*health.HistoryComplete || health.PendingSpendsReady == nil || !*health.PendingSpendsReady || health.ScannedHeight == nil || *health.ScannedHeight != tip.Height || health.ScannedHash != tip.Hash {
+		return domain.NodeTip{}, domain.WalletNoteStatuses{}, false
+	}
+	statuses, found, err := s.scanner.NoteStatuses(proofCtx, attempt.WalletID, attempt.SelectedNoteIDs)
+	if err != nil || !found || !statuses.ValidFor(attempt.WalletID, attempt.SelectedNoteIDs) || statuses.AsOfScannerHeight != tip.Height || statuses.AsOfScannerHash != tip.Hash {
+		return domain.NodeTip{}, domain.WalletNoteStatuses{}, false
+	}
+	return tip, statuses, true
 }
 
 func (s *Service) transition(ctx context.Context, attempt storage.TransactionAttempt, state string, release bool) {
