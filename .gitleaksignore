@@ -1,0 +1,5 @@
+# Synthetic idempotency keys used only in coordinator tests and documentation.
+3907df1a453422086531365be75ed0543852d8db:internal/coordinator/service_test.go:generic-api-key:160
+3907df1a453422086531365be75ed0543852d8db:internal/coordinator/service_test.go:generic-api-key:170
+bac78cc88240dda87e5d6c80ce1f2081d4572e4a:website/docs/reference/coordinator-http.md:generic-api-key:26
+bac78cc88240dda87e5d6c80ce1f2081d4572e4a:website/docs/transactions/build-sign-broadcast.md:generic-api-key:126
