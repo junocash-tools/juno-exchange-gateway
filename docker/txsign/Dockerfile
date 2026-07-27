@@ -10,7 +10,7 @@ RUN git clone "${JUNO_TXSIGN_REPO}" . && git checkout --detach "${JUNO_TXSIGN_RE
 RUN cargo build --locked --release --manifest-path rust/juno-tx/Cargo.toml \
   && cargo build --locked --release --manifest-path rust/witness/Cargo.toml
 
-FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS go-build
+FROM golang:1.26-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS go-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
   && rm -rf /var/lib/apt/lists/*
