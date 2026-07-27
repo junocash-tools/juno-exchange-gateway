@@ -89,6 +89,50 @@ func TestServiceRecoversUnknownSigningOutcomeWithoutReplanning(t *testing.T) {
 	}
 }
 
+func TestSignedMaterialReplayChecksExpiryBeforeBackgroundReconciliation(t *testing.T) {
+	cfg, store := coordinatorTestConfig(t)
+	noteID := fmt.Sprintf("%064x:0", 33)
+	node := &fakeCoordinatorNode{tip: domain.NodeTip{Network: "regtest", Height: 100, Hash: fmt.Sprintf("%064x", 100)}}
+	service := newCoordinatorTestServiceWithChain(t, cfg, store, &fakePlanner{notes: []string{noteID}}, &fakeSigner{}, node, &fakeCoordinatorScanner{})
+	ctx := context.Background()
+	request := coordinatorRequest("330000")
+	created, _, err := service.Create(ctx, "exchange", "withdrawal-33-attempt-1", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err := store.Attempt(ctx, created.AttemptID)
+	if err != nil || !found || !service.planAttempt(ctx, stored) {
+		t.Fatalf("planning attempt=%+v found=%v err=%v", stored, found, err)
+	}
+	stored, found, err = store.Attempt(ctx, created.AttemptID)
+	if err != nil || !found || !service.signAttempt(ctx, stored) {
+		t.Fatalf("signing attempt=%+v found=%v err=%v", stored, found, err)
+	}
+	stored, found, err = store.Attempt(ctx, created.AttemptID)
+	if err != nil || !found || stored.State != "signed" || stored.RawTxHex == "" {
+		t.Fatalf("stored signed attempt=%+v found=%v err=%v", stored, found, err)
+	}
+
+	node.setTip(domain.NodeTip{Network: "regtest", Height: 141, Hash: fmt.Sprintf("%064x", 141)})
+	replay, replayed, err := service.Create(ctx, "exchange", "withdrawal-33-attempt-1", request)
+	if err != nil || !replayed || replay.State != "expired_pending_reconciliation" || replay.RawTxHex != "" {
+		t.Fatalf("expired replay=%+v replayed=%v err=%v", replay, replayed, err)
+	}
+	status, err := service.Attempt(ctx, "exchange", created.AttemptID)
+	if err != nil || status.State != "expired_pending_reconciliation" || status.RawTxHex != "" {
+		t.Fatalf("expired status=%+v err=%v", status, err)
+	}
+	stored, found, err = store.Attempt(ctx, created.AttemptID)
+	if err != nil || !found || stored.State != "signed" {
+		t.Fatalf("background-free stored attempt=%+v found=%v err=%v", stored, found, err)
+	}
+
+	node.setTipError(errors.New("node unavailable"))
+	if _, _, err := service.Create(ctx, "exchange", "withdrawal-33-attempt-1", request); !hasOperationCode(err, "expiry_status_unavailable") {
+		t.Fatalf("unavailable expiry status error=%v", err)
+	}
+}
+
 func TestServiceKeepsPriorSigningUncertaintySticky(t *testing.T) {
 	t.Run("unknown retry returns busy", func(t *testing.T) {
 		cfg, store := coordinatorTestConfig(t)
@@ -220,7 +264,10 @@ func TestServiceReleasesReservationsOnlyAfterFinalityOrExpiryProof(t *testing.T)
 		expiredHash := fmt.Sprintf("%064x", 141)
 		node.setTip(domain.NodeTip{Network: "regtest", Height: 141, Hash: expiredHash})
 		service.enqueue(signed.AttemptID)
-		waitAttemptState(t, service, "exchange", signed.AttemptID, "expired_pending_reconciliation")
+		expired := waitAttemptState(t, service, "exchange", signed.AttemptID, "expired_pending_reconciliation")
+		if expired.RawTxHex != "" {
+			t.Fatal("expired attempt exposed raw transaction material")
+		}
 		if active, _ := store.ActiveNoteIDs(ctx, "regtest", "hot"); len(active) != 1 {
 			t.Fatalf("expired-pending reservations=%v", active)
 		}
@@ -600,16 +647,17 @@ func waitSignerCallCount(t *testing.T, signer *fakeSigner, expected int) {
 func uint32Pointer(value uint32) *uint32 { return &value }
 
 type fakeCoordinatorNode struct {
-	mu    sync.Mutex
-	tip   domain.NodeTip
-	tx    domain.Transaction
-	found bool
+	mu     sync.Mutex
+	tip    domain.NodeTip
+	tipErr error
+	tx     domain.Transaction
+	found  bool
 }
 
 func (n *fakeCoordinatorNode) Tip(context.Context) (domain.NodeTip, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.tip, nil
+	return n.tip, n.tipErr
 }
 func (n *fakeCoordinatorNode) BlockHash(context.Context, int64) (string, error) {
 	n.mu.Lock()
@@ -636,7 +684,13 @@ func (n *fakeCoordinatorNode) setTransaction(tx domain.Transaction, found bool) 
 
 func (n *fakeCoordinatorNode) setTip(tip domain.NodeTip) {
 	n.mu.Lock()
-	n.tip = tip
+	n.tip, n.tipErr = tip, nil
+	n.mu.Unlock()
+}
+
+func (n *fakeCoordinatorNode) setTipError(err error) {
+	n.mu.Lock()
+	n.tipErr = err
 	n.mu.Unlock()
 }
 

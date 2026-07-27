@@ -255,7 +255,7 @@ func (h *Handler) writeOperationError(w http.ResponseWriter, requestID string, e
 		status = http.StatusNotFound
 	case "idempotency_conflict", "attempt_not_cancellable":
 		status = http.StatusConflict
-	case "coordinator_recovery_sealed", "recovery_gate_unavailable":
+	case "coordinator_recovery_sealed", "recovery_gate_unavailable", "expiry_status_unavailable":
 		status = http.StatusServiceUnavailable
 	case "rate_limited":
 		status = http.StatusTooManyRequests

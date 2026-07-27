@@ -121,14 +121,14 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/Internal" }
-        "503": { $ref: "#/components/responses/CoordinatorSealed" }
+        "503": { $ref: "#/components/responses/CoordinatorUnavailable" }
   /v1/transaction-attempts/{attempt_id}:
     get:
       operationId: getTransactionAttempt
       tags: [Transaction attempts]
       summary: Get a transaction attempt
       x-required-scope: plan
-      description: Returns the durable current state. Only the credential principal that created the attempt, with a grant for its wallet, can read it.
+      description: Returns the durable current state. Before returning raw material for `signed`, `broadcast`, or `orphaned`, the coordinator verifies the canonical tip has not passed expiry. Only the credential principal that created the attempt, with a grant for its wallet, can read it.
       parameters:
         - $ref: "#/components/parameters/AttemptID"
         - $ref: "#/components/parameters/RequestID"
@@ -165,6 +165,7 @@ paths:
         "405": { $ref: "#/components/responses/MethodNotAllowed" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/SignedMaterialUnavailable" }
   /v1/transaction-attempts/{attempt_id}/cancel:
     post:
       operationId: cancelTransactionAttempt
@@ -319,12 +320,18 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
           example: { status: error, error: { code: coordinator_not_ready, message: transaction signer is unavailable, retryable: true }, request_id: req_018f }
-    CoordinatorSealed:
-      description: A reconstructed gateway database has empty attempt and reservation tables, or the recovery gate cannot be verified. Creation remains closed until the gate is healthy and every pre-loss attempt is externally reconciled before the explicit recovery-unseal command succeeds.
+    CoordinatorUnavailable:
+      description: Creation is closed because a reconstructed database is sealed, its recovery gate cannot be verified, or an idempotent signed-material replay cannot establish current canonical expiry.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
           example: { status: error, error: { code: coordinator_recovery_sealed, message: transaction automation is sealed after gateway database recovery; reconcile all prior transaction attempts and run recovery-unseal-coordinator, retryable: false }, request_id: req_018f }
+    SignedMaterialUnavailable:
+      description: The current canonical tip could not be verified for an expiry-sensitive signed transaction. Raw material is withheld; retry the same read after the node recovers.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: expiry_status_unavailable, message: current canonical tip could not be verified; signed transaction material was withheld, retryable: true }, request_id: req_018f }
   schemas:
     AttemptID:
       type: string

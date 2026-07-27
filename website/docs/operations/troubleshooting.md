@@ -32,6 +32,7 @@ docker compose -f compose.yaml -f compose.automation.yaml logs --since=15m gatew
 | Attempt is `signing_unknown` | Signer health and journal permissions | Keep notes locked and poll the same ID; never replan, cancel, or delete journal state |
 | Cancel returns `409 attempt_not_cancellable` | Attempt state and signer journal | Signing may have started; keep polling and do not create a replacement |
 | SDK wait times out | Stored attempt ID or original create key/body | Poll the same ID, or replay the exact create request/key to recover it; timeout does not cancel |
+| `503 expiry_status_unavailable` | Canonical node tip/network/IBD state | Restore a healthy node and retry the same attempt; raw material is withheld and selected notes remain reserved |
 | Planner uses immature notes | `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS` and component version | Keep the default `100` outside disposable tests |
 | Node rejects fee | Planner fee and node policy | Use the default multiplier `20`; revalidate after version changes |
 | `note_decrypt_failed` while signing | Plan, seed, account, coin type, network | Stop; verify the approved plan belongs to the isolated signing wallet |

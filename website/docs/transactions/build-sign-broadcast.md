@@ -70,6 +70,8 @@ const signed = await coordinator.createRawTransaction({
 
 After a gateway database reconstruction, the SDK reports `coordinator_recovery_sealed` and no attempt is created. Reconcile the pre-loss withdrawal ledger and selected notes, complete the [audited coordinator unseal](../operations/recovery.md#gatewaycoordinator-database-recovery), then retry the same key and request.
 
+The coordinator also checks current canonical height before the SDK returns expiry-sensitive signed material. A retryable `expiry_status_unavailable` means the node tip could not be verified and raw hex was withheld; retry the same attempt after node recovery. If height has passed expiry, the SDK rejects the attempt even before background reconciliation catches up.
+
 Start from the SDK's runnable [`create-raw-transaction.mjs`](https://github.com/junocash-tools/juno-exchange-sdk/blob/main/examples/create-raw-transaction.mjs) example. It emits a JSON record containing the wallet, approval reference, state, selected note IDs, and signed transaction material for your withdrawal store.
 
 Use `walletId`, not `addressFrom`. A shielded transaction consumes notes controlled by the registered wallet UFVK. It does not debit a visible source address. The coordinator chooses inputs and a registered same-wallet change address.

@@ -117,10 +117,17 @@ func (s *Service) Create(ctx context.Context, principal, idempotencyKey string, 
 		s.enqueue(claim.Attempt.AttemptID)
 		return attemptView(claim.Attempt), false, nil
 	case storage.ClaimReplay:
+		view, err := s.attemptForResponse(ctx, claim.Attempt)
+		if err != nil {
+			if recoverableState(claim.Attempt.State) {
+				s.enqueue(claim.Attempt.AttemptID)
+			}
+			return Attempt{}, false, err
+		}
 		if recoverableState(claim.Attempt.State) {
 			s.enqueue(claim.Attempt.AttemptID)
 		}
-		return attemptView(claim.Attempt), true, nil
+		return view, true, nil
 	default:
 		return Attempt{}, false, opError("internal", "unexpected idempotency state", false)
 	}
@@ -140,7 +147,11 @@ func (s *Service) Attempt(ctx context.Context, principal, attemptID string) (Att
 	if value.PrincipalName != principal {
 		return Attempt{}, opError("forbidden", "credential does not own this transaction attempt", false)
 	}
-	return attemptView(value), nil
+	view, err := s.attemptForResponse(ctx, value)
+	if err == nil && view.State != value.State {
+		s.enqueue(value.AttemptID)
+	}
+	return view, err
 }
 
 func (s *Service) Cancel(ctx context.Context, principal, attemptID string) (Attempt, error) {
@@ -193,6 +204,36 @@ func (s *Service) requireAutomationUnsealed(ctx context.Context) error {
 		return opError("coordinator_recovery_sealed", "transaction automation is sealed after gateway database recovery; reconcile all prior transaction attempts and run recovery-unseal-coordinator", false)
 	}
 	return nil
+}
+
+func (s *Service) attemptForResponse(ctx context.Context, value storage.TransactionAttempt) (Attempt, error) {
+	view := attemptView(value)
+	if !expirySensitiveResponseState(value.State) {
+		return view, nil
+	}
+	if value.ExpiryHeight <= 0 || value.ExpiryHeight > int64(^uint32(0)) {
+		return Attempt{}, opError("internal", "stored signed transaction expiry is invalid", false)
+	}
+	tipCtx, cancel := context.WithTimeout(ctx, s.cfg.UpstreamTimeout)
+	defer cancel()
+	tip, err := s.node.Tip(tipCtx)
+	if err != nil || tip.Network != s.cfg.Network.NodeChain() || tip.InitialBlockDownload {
+		return Attempt{}, opError("expiry_status_unavailable", "current canonical tip could not be verified; signed transaction material was withheld", true)
+	}
+	if tip.Height > value.ExpiryHeight {
+		view.State = "expired_pending_reconciliation"
+		view.RawTxHex = ""
+	}
+	return view, nil
+}
+
+func expirySensitiveResponseState(state string) bool {
+	switch state {
+	case "signed", "broadcast", "orphaned":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) recoverLoop(ctx context.Context) {

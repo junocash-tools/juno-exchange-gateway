@@ -99,6 +99,8 @@ When `state` is `signed`, `data` contains the broadcast inputs and reconciliatio
 
 Persist `change_address` and verify outgoing and change effects against that registered same-wallet address. `orchard_output_action_indices` follows request output order; persist the mapping and do not assume Orchard action order. `orchard_change_action_index` is omitted when there is no change action.
 
+For `signed`, `broadcast`, and `orphaned`, every POST replay and GET synchronously checks the healthy canonical node tip before returning raw hex. If the tip is past `expiry_height`, the response is `expired_pending_reconciliation` with raw hex omitted, even when the background row has not refreshed yet. If the tip cannot be verified, the API returns retryable `503 expiry_status_unavailable` and withholds raw material. Retry the same attempt; never substitute a new key because the existing notes remain reserved. `expired_pending_reconciliation` and `released` responses always omit raw hex.
+
 ## Cancel
 
 ```http

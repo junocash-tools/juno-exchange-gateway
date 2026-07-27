@@ -213,6 +213,9 @@ func attemptView(value storage.TransactionAttempt) Attempt {
 	if value.ErrorCode != "" {
 		out.Error = &APIError{Code: value.ErrorCode, Message: value.ErrorMessage, Retryable: value.ErrorRetryable}
 	}
+	if value.State == "expired_pending_reconciliation" || value.State == "released" {
+		out.RawTxHex = ""
+	}
 	return out
 }
 
