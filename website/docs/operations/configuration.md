@@ -150,6 +150,8 @@ The gateway binary and base stack keep the coordinator disabled. `compose.automa
 
 The work directory is not a ledger or backup. Exact approved plan bytes, digests, attempt states, signed results, and active note reservations are durable in the gateway state database. Temporary planner files are owner-only and removed after each run.
 
+`JUNO_COORDINATOR_ENABLED` cannot bypass the post-recovery creation seal. After reconstructing a lost gateway database, follow the audited reconciliation and `recovery-unseal-coordinator` procedure; there is intentionally no environment toggle for it.
+
 The planner receives node/scanner credentials through its environment, never command arguments. The coordinator sends the signer only `attempt_id`, exact plan bytes, and `sha256:<64-lowercase-hex>` over the Unix socket. It never receives or stores the seed.
 
 ### Signer overlay

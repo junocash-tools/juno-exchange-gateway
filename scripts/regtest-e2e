@@ -55,6 +55,7 @@ signer_image=""
 signer_container="${project}-offline-signer"
 init_ack="I_UNDERSTAND_THIS_CREATES_A_NEW_JUNO_INSTALLATION"
 recover_ack="I_UNDERSTAND_RECOVERY_REBUILDS_JUNO_ADDRESS_STATE"
+recovery_unseal_ack="I_HAVE_RECONCILED_ALL_PRIOR_JUNO_TRANSACTION_ATTEMPTS"
 nu62_branch_hex="5437f330"
 nu62_branch_id=1412952880
 
@@ -1525,12 +1526,28 @@ if [[ "${SKIP_GATEWAY_LOSS_TEST:-0}" != "1" ]]; then
     --mapping-sha256 "$recovery_checksum" \
     --next-index "$cold_wallet_id=7" >"$run_dir/recovery.json"
   assert_jq "$run_dir/recovery.json" --arg checksum "$recovery_checksum" \
-    '.status == "recovered" and .mapping_sha256 == $checksum' \
+    '.status == "recovered" and .mapping_sha256 == $checksum and .coordinator_automation == "sealed"' \
     "audited gateway recovery returned invalid output"
+  recovery_installation_id="$(jq -er '.installation_id' "$run_dir/recovery.json")"
 
   "${compose[@]}" up -d juno-scan gateway
   wait_live
   wait_ready "$run_dir/ready-after-joint-recovery.json"
+  code="$(coordinator_api_status GET /v1/health/ready "$run_dir/coordinator-ready-sealed-after-recovery.json")"
+  [[ "$code" == "503" ]] || fail "recovered coordinator readiness returned HTTP $code instead of remaining sealed"
+  assert_jq "$run_dir/coordinator-ready-sealed-after-recovery.json" \
+    '.error.code == "coordinator_not_ready" and (.error.message | contains("sealed after gateway database recovery"))' \
+    "recovered coordinator readiness did not report its automation seal"
+
+  jq -n --arg wallet "$wallet_id" --arg destination "$expiry_destination_address" \
+    '{wallet_id:$wallet,approval_reference:"recovery-seal:e2e",outputs:[{to_address:$destination,amount_zat:"1000000000000000"}]}' \
+    >"$run_dir/recovery-sealed-create-request.json"
+  recovery_sealed_create_key="recovery-sealed-create-$(openssl rand -hex 8)"
+  code="$(coordinator_api_status POST /v1/transaction-attempts "$run_dir/recovery-sealed-create-response.json" "$run_dir/recovery-sealed-create-request.json" "$recovery_sealed_create_key")"
+  [[ "$code" == "503" ]] || fail "recovered coordinator accepted creation while sealed, HTTP $code"
+  assert_jq "$run_dir/recovery-sealed-create-response.json" \
+    '.error.code == "coordinator_recovery_sealed" and .error.retryable == false' \
+    "recovered coordinator creation did not fail with the recovery seal error"
 
   jq -n '{label:"customer-1003"}' >"$run_dir/allocate-3-request.json"
   code="$(api_status POST "/v1/wallets/$wallet_id/addresses" "$run_dir/address-3.json" "$run_dir/allocate-3-request.json" "" "$address_token")"
@@ -1549,6 +1566,42 @@ if [[ "${SKIP_GATEWAY_LOSS_TEST:-0}" != "1" ]]; then
   assert_jq "$run_dir/deposit-after-joint-recovery.json" --arg txid "$deposit_txid" \
     '.data.deposits | any(.txid == $txid and .status == "confirmed")' \
     "scanner did not rescan the confirmed deposit after joint recovery"
+
+  if "${compose[@]}" run --no-deps --rm -T gateway recovery-unseal-coordinator \
+    --acknowledge WRONG_ACKNOWLEDGEMENT \
+    --installation-id "$recovery_installation_id" \
+    --reconciliation-reference "regtest-e2e:$run_id" \
+    >"$run_dir/recovery-unseal-wrong-ack.log" 2>&1; then
+    fail "coordinator recovery unseal accepted the wrong acknowledgement"
+  fi
+  grep -F 'requires exact acknowledgement' "$run_dir/recovery-unseal-wrong-ack.log" >/dev/null || \
+    fail "wrong coordinator recovery unseal acknowledgement returned the wrong error"
+
+  "${compose[@]}" run --no-deps --rm -T gateway recovery-unseal-coordinator \
+    --acknowledge "$recovery_unseal_ack" \
+    --installation-id "$recovery_installation_id" \
+    --reconciliation-reference "regtest-e2e:$run_id" \
+    >"$run_dir/recovery-unseal.json"
+  assert_jq "$run_dir/recovery-unseal.json" --arg installation "$recovery_installation_id" \
+    '.status == "coordinator_automation_unsealed" and .installation_id == $installation' \
+    "audited coordinator recovery unseal returned invalid output"
+  "${compose[@]}" run --no-deps --rm -T gateway recovery-unseal-coordinator \
+    --acknowledge "$recovery_unseal_ack" \
+    --installation-id "$recovery_installation_id" \
+    --reconciliation-reference "regtest-e2e:$run_id" \
+    >"$run_dir/recovery-unseal-replay.json"
+  assert_jq "$run_dir/recovery-unseal-replay.json" \
+    '.status == "coordinator_automation_already_unsealed"' \
+    "coordinator recovery unseal did not replay its durable audit result"
+  wait_coordinator_ready "$run_dir/coordinator-ready-after-recovery-unseal.json" \
+    || fail "transaction coordinator did not become ready after audited recovery unseal"
+
+  code="$(coordinator_api_status POST /v1/transaction-attempts "$run_dir/recovery-unsealed-create-response.json" "$run_dir/recovery-sealed-create-request.json" "$recovery_sealed_create_key")"
+  [[ "$code" == "202" ]] || fail "reconciled coordinator did not accept creation after unseal, HTTP $code"
+  recovery_unsealed_attempt_id="$(jq -er '.data.attempt_id' "$run_dir/recovery-unsealed-create-response.json")"
+  wait_coordinator_state "$recovery_unsealed_attempt_id" failed_unsigned \
+    "$run_dir/recovery-unsealed-create-failed-unsigned.json" \
+    || fail "post-unseal insufficient-balance attempt did not terminate unsigned"
 fi
 
 jq -n \
@@ -1566,7 +1619,7 @@ jq -n \
   --arg txbuild_ref "$JUNO_TXBUILD_REF" \
   --arg txsign_ref "$JUNO_TXSIGN_REF" \
   --arg sdk_ref "$JUNO_SDK_REF" \
-  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,coordinator_expiry_txid:$coordinator_expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref,"juno-exchange-sdk":$sdk_ref},checks:["clean source provenance","one-time installation init","separate loopback public and private ports","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege public and coordinator authentication","wallet isolation","network-disabled UDS signer","mandatory seed-to-UFVK binding","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","Node SDK programmatic create","coordinator durable attempt","selected-note reservation","selected-note unspent reconciliation","selected-note unknown and wallet isolation","signed raw hex return","SDK programmatic broadcast","prevalidated raw broadcast","idempotent create and broadcast replay","same-key payload conflict","outgoing wallet effects","registered coordinator change scope","coordinator broadcast, mined, and final lifecycle","selected-note pending and spent lifecycle","mined pending-spend release","withdrawal expiry and drop","selected-note strict expiry boundary","coordinator expired-material rejection","coordinator post-expiry finality hold","coordinator proven-unspent release","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
+  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,coordinator_expiry_txid:$coordinator_expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref,"juno-exchange-sdk":$sdk_ref},checks:["clean source provenance","one-time installation init","separate loopback public and private ports","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege public and coordinator authentication","wallet isolation","network-disabled UDS signer","mandatory seed-to-UFVK binding","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","Node SDK programmatic create","coordinator durable attempt","selected-note reservation","selected-note unspent reconciliation","selected-note unknown and wallet isolation","signed raw hex return","SDK programmatic broadcast","prevalidated raw broadcast","idempotent create and broadcast replay","same-key payload conflict","outgoing wallet effects","registered coordinator change scope","coordinator broadcast, mined, and final lifecycle","selected-note pending and spent lifecycle","mined pending-spend release","withdrawal expiry and drop","selected-note strict expiry boundary","coordinator expired-material rejection","coordinator post-expiry finality hold","coordinator proven-unspent release","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery","recovered-database coordinator seal","audited coordinator recovery unseal"]}' \
   >"$run_dir/summary.json"
 
 log "PASS"

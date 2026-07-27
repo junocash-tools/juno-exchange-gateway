@@ -38,7 +38,7 @@ paths:
       tags: [Health]
       summary: Coordinator readiness
       x-required-scope: plan
-      description: Checks durable coordinator state, the configured planner executable, and the isolated signer service.
+      description: Checks durable coordinator state, the post-recovery automation seal, the configured planner executable, and the isolated signer service.
       responses:
         "200":
           description: New transaction attempts can be processed.
@@ -121,6 +121,7 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/CoordinatorSealed" }
   /v1/transaction-attempts/{attempt_id}:
     get:
       operationId: getTransactionAttempt
@@ -313,11 +314,17 @@ components:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
           example: { status: error, error: { code: internal, message: internal coordinator error, retryable: false }, request_id: req_018f }
     NotReady:
-      description: Durable state, planner, or signer is unavailable.
+      description: Durable state, planner, or signer is unavailable, or transaction automation is still sealed after database recovery.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
           example: { status: error, error: { code: coordinator_not_ready, message: transaction signer is unavailable, retryable: true }, request_id: req_018f }
+    CoordinatorSealed:
+      description: A reconstructed gateway database has empty attempt and reservation tables, or the recovery gate cannot be verified. Creation remains closed until the gate is healthy and every pre-loss attempt is externally reconciled before the explicit recovery-unseal command succeeds.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: coordinator_recovery_sealed, message: transaction automation is sealed after gateway database recovery; reconcile all prior transaction attempts and run recovery-unseal-coordinator, retryable: false }, request_id: req_018f }
   schemas:
     AttemptID:
       type: string

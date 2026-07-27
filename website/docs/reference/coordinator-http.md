@@ -60,6 +60,8 @@ A new or active replay returns `202`:
 
 Persist `attempt_id` before polling. Reusing the same key and normalized body returns the same attempt with `Idempotency-Replayed: true`. A terminal replay returns `200`. Reusing the key for another payload returns `409 idempotency_conflict`.
 
+After audited reconstruction of a lost gateway database, creation returns `503 coordinator_recovery_sealed` without claiming the idempotency key. Reconcile every pre-loss attempt and selected note, run the explicit `recovery-unseal-coordinator` command, wait for private readiness, then retry the exact request and key.
+
 ## Poll
 
 ```http
@@ -155,4 +157,4 @@ HTTP errors use the same top-level shape as the public gateway:
 }
 ```
 
-Retry only when `error.retryable` is true, and preserve the exact body, principal, and idempotency key. A `500 internal` is deliberately not retryable: stop new attempts, preserve the current ID/key, and repair durable state.
+Retry only when `error.retryable` is true, and preserve the exact body, principal, and idempotency key. A `500 internal` is deliberately not retryable: stop new attempts, preserve the current ID/key, and repair durable state. `503 coordinator_recovery_sealed` also requires operator reconciliation and an explicit unseal; blind client retry cannot clear it.

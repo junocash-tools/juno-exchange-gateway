@@ -106,6 +106,7 @@ type Store interface {
 	CompleteAttemptSigning(context.Context, string, string, string, string, []uint32, *uint32, time.Time) error
 	MarkAttemptState(context.Context, string, string, string, string, bool, bool, time.Time) error
 	CancelAttempt(context.Context, string, time.Time) (TransactionAttempt, error)
+	CoordinatorRecoverySealed(context.Context) (bool, error)
 	CursorKey(context.Context) ([]byte, error)
 	Ping(context.Context) error
 	Close() error

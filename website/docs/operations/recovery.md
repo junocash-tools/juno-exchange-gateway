@@ -76,13 +76,24 @@ docker compose run --no-deps --rm gateway recover \
   --next-index hot=125000
 ```
 
-Omit `--next-index` to use manifest values. Overrides can only increase a high-water mark. Recovery derives and verifies every address, rebuilds the registry with empty labels, and binds the database to the original installation ID. Customer labels and ownership must remain available in the exchange mapping. There is no gateway label import or update API, so recovered gateway responses keep empty labels; restore a verified gateway database backup instead when gateway-held labels are required.
+Omit `--next-index` to use manifest values. Overrides can only increase a high-water mark. Recovery derives and verifies every address, rebuilds the registry with empty labels, binds the database to the original installation ID, and returns `"coordinator_automation":"sealed"`. Customer labels and ownership must remain available in the exchange mapping. There is no gateway label import or update API, so recovered gateway responses keep empty labels; restore a verified gateway database backup instead when gateway-held labels are required.
 
 Audited reconstruction creates empty broadcast-receipt, transaction-attempt, event, and active-reservation tables. A scanner replay cannot reconstruct any of them.
 
 Before reopening broadcast, inventory every planned or signed attempt from the exchange ledger and signer journal, look up each txid, reconcile raw bytes, selected notes, expiry, and every formerly uncertain call. A lost receipt makes an old broadcast key appear new; keep broadcast closed when acceptance cannot be proven.
 
-Do not enable coordinator creation against reconstructed empty attempt tables while any pre-loss attempt can still sign, mine, reorg, or hold an input. There is no attempt-import API. Keep each old selected note ID externally locked until its transaction is final or the same strict post-expiry proof shows it unspent. Only after all pre-loss attempts are terminally reconciled may the empty coordinator state begin new attempts.
+Public watch, deposit, balance, address, and raw-broadcast routes can run while the coordinator is sealed. Keep public broadcast closed in the exchange until old receipts and uncertain submissions are reconciled; the coordinator seal does not disable that separate endpoint.
+
+Private coordinator readiness and `POST /v1/transaction-attempts` return `503` while sealed. There is no config bypass and no attempt-import API. Keep each old selected note ID externally locked until its transaction is final or the same strict post-expiry proof shows it unspent. After every pre-loss attempt is terminally reconciled, unlock creation with the installation ID returned by `recover` and a non-secret incident/change record:
+
+```bash
+docker compose run --no-deps --rm gateway recovery-unseal-coordinator \
+  --acknowledge I_HAVE_RECONCILED_ALL_PRIOR_JUNO_TRANSACTION_ATTEMPTS \
+  --installation-id '<64-lowercase-hex>' \
+  --reconciliation-reference 'INC-1842'
+```
+
+The gateway persists the reference and timestamp. Repeating the exact command is an idempotent audit replay; a different reference is rejected. Wait for private coordinator readiness before reopening creation. Restoring a normal consistent database backup does not create this seal because its attempts and reservations are retained.
 
 If a restore may contain a stale manifest and database:
 

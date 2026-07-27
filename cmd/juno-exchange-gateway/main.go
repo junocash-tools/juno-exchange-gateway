@@ -45,8 +45,8 @@ func run(logger *slog.Logger, args []string, stdout, stderr io.Writer) int {
 		command = args[0]
 		args = args[1:]
 	}
-	if command != "serve" && command != "init" && command != "recovery-checksum" && command != "recover" {
-		fmt.Fprintf(stderr, "unknown command %q; use serve, init, recovery-checksum, or recover\n", command)
+	if command != "serve" && command != "init" && command != "recovery-checksum" && command != "recover" && command != "recovery-unseal-coordinator" {
+		fmt.Fprintf(stderr, "unknown command %q; use serve, init, recovery-checksum, recover, or recovery-unseal-coordinator\n", command)
 		return 2
 	}
 
@@ -65,6 +65,8 @@ func run(logger *slog.Logger, args []string, stdout, stderr io.Writer) int {
 		return runRecoveryChecksum(ctx, logger, cfg, args, stdout, stderr)
 	case "recover":
 		return runRecover(ctx, logger, cfg, args, stdout, stderr)
+	case "recovery-unseal-coordinator":
+		return runRecoveryUnsealCoordinator(ctx, logger, cfg, args, stdout, stderr)
 	default:
 		if len(args) != 0 {
 			fmt.Fprintln(stderr, "serve does not accept arguments")
@@ -166,10 +168,48 @@ func runRecover(ctx context.Context, logger *slog.Logger, cfg config.Config, arg
 		return 1
 	}
 	return writeJSON(stdout, logger, map[string]any{
-		"status":          "recovered",
-		"installation_id": manifest.InstallationID,
-		"network":         manifest.Network,
-		"mapping_sha256":  *expectedChecksum,
+		"status":                 "recovered",
+		"installation_id":        manifest.InstallationID,
+		"network":                manifest.Network,
+		"mapping_sha256":         *expectedChecksum,
+		"coordinator_automation": "sealed",
+	})
+}
+
+func runRecoveryUnsealCoordinator(ctx context.Context, logger *slog.Logger, cfg config.Config, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("recovery-unseal-coordinator", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	acknowledgement := flags.String("acknowledge", "", "required exact prior-attempt reconciliation acknowledgement")
+	expectedInstallationID := flags.String("installation-id", "", "exact installation ID emitted by the recover command")
+	reconciliationReference := flags.String("reconciliation-reference", "", "required non-secret change, incident, or recovery record reference")
+	if err := flags.Parse(args); err != nil {
+		return flagExitCode(err)
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "recovery-unseal-coordinator does not accept positional arguments")
+		return 2
+	}
+	store, err := storage.Open(ctx, cfg.StateDSN)
+	if err != nil {
+		logger.Error("state_open_failed", "error", err.Error())
+		return 1
+	}
+	defer store.Close()
+	reference := strings.TrimSpace(*reconciliationReference)
+	manifest, unsealed, err := lifecycle.UnsealCoordinatorRecovery(ctx, cfg, store, *acknowledgement, *expectedInstallationID, reference)
+	if err != nil {
+		logger.Error("coordinator_recovery_unseal_failed", "error", err.Error())
+		return 1
+	}
+	status := "coordinator_automation_unsealed"
+	if !unsealed {
+		status = "coordinator_automation_already_unsealed"
+	}
+	return writeJSON(stdout, logger, map[string]any{
+		"status":                   status,
+		"installation_id":          manifest.InstallationID,
+		"network":                  manifest.Network,
+		"reconciliation_reference": reference,
 	})
 }
 

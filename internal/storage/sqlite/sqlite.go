@@ -702,6 +702,14 @@ func (s *Store) BeginInstallationRecovery(ctx context.Context, installationID st
 }
 
 func (s *Store) BindInstallation(ctx context.Context, installationID string) error {
+	return s.bindInstallation(ctx, installationID, false)
+}
+
+func (s *Store) BindRecoveredInstallation(ctx context.Context, installationID string) error {
+	return s.bindInstallation(ctx, installationID, true)
+}
+
+func (s *Store) bindInstallation(ctx context.Context, installationID string, sealCoordinator bool) error {
 	if err := validateInstallationID(installationID); err != nil {
 		return err
 	}
@@ -736,6 +744,11 @@ func (s *Store) BindInstallation(ctx context.Context, installationID string) err
 	if _, err := tx.ExecContext(ctx, `INSERT INTO metadata(key,value) VALUES('installation_id',?)`, []byte(installationID)); err != nil {
 		return fmt.Errorf("store gateway installation binding: %w", err)
 	}
+	if sealCoordinator {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO metadata(key,value) VALUES('coordinator_recovery_seal',?)`, []byte(installationID)); err != nil {
+			return fmt.Errorf("seal coordinator after gateway recovery: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM metadata WHERE key='recovery_installation_id'`); err != nil {
 		return fmt.Errorf("clear installation recovery marker: %w", err)
 	}
@@ -743,6 +756,81 @@ func (s *Store) BindInstallation(ctx context.Context, installationID string) err
 		return fmt.Errorf("commit gateway installation binding: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) CoordinatorRecoverySealed(ctx context.Context) (bool, error) {
+	var seal []byte
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='coordinator_recovery_seal'`).Scan(&seal)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read coordinator recovery seal: %w", err)
+	}
+	var installationID []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='installation_id'`).Scan(&installationID); err != nil {
+		return false, fmt.Errorf("read installation binding for coordinator recovery seal: %w", err)
+	}
+	if string(seal) != string(installationID) {
+		return false, errors.New("coordinator recovery seal does not match the gateway installation")
+	}
+	return true, nil
+}
+
+func (s *Store) UnsealCoordinatorRecovery(ctx context.Context, installationID, reconciliationReference string, at time.Time) (bool, error) {
+	if err := validateInstallationID(installationID); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin coordinator recovery unseal: %w", err)
+	}
+	defer tx.Rollback()
+	var bound []byte
+	if err := tx.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='installation_id'`).Scan(&bound); err != nil {
+		return false, fmt.Errorf("read gateway installation binding: %w", err)
+	}
+	if string(bound) != installationID {
+		return false, fmt.Errorf("gateway database belongs to installation %q, not %q", string(bound), installationID)
+	}
+	var seal []byte
+	err = tx.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='coordinator_recovery_seal'`).Scan(&seal)
+	if errors.Is(err, sql.ErrNoRows) {
+		var prior []byte
+		if auditErr := tx.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='coordinator_recovery_reconciliation_reference'`).Scan(&prior); auditErr != nil {
+			if errors.Is(auditErr, sql.ErrNoRows) {
+				return false, errors.New("coordinator automation is not sealed by a database recovery")
+			}
+			return false, fmt.Errorf("read coordinator recovery unseal audit: %w", auditErr)
+		}
+		if string(prior) != reconciliationReference {
+			return false, fmt.Errorf("coordinator recovery was already unsealed with reconciliation reference %q", string(prior))
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read coordinator recovery seal: %w", err)
+	}
+	if string(seal) != installationID {
+		return false, errors.New("coordinator recovery seal does not match the gateway installation")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM metadata WHERE key='coordinator_recovery_seal'`); err != nil {
+		return false, fmt.Errorf("clear coordinator recovery seal: %w", err)
+	}
+	for key, value := range map[string][]byte{
+		"coordinator_recovery_reconciliation_reference": []byte(reconciliationReference),
+		"coordinator_recovery_unsealed_at":              []byte(at.UTC().Format(time.RFC3339Nano)),
+	} {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
+			return false, fmt.Errorf("store coordinator recovery unseal audit: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit coordinator recovery unseal: %w", err)
+	}
+	return true, nil
 }
 
 func validateInstallationID(installationID string) error {

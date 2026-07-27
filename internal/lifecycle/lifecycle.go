@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/junocash-tools/juno-exchange-gateway/internal/config"
 	"github.com/junocash-tools/juno-exchange-gateway/internal/installation"
@@ -17,8 +18,9 @@ import (
 )
 
 const (
-	InitAcknowledgement    = "I_UNDERSTAND_THIS_CREATES_A_NEW_JUNO_INSTALLATION"
-	RecoverAcknowledgement = "I_UNDERSTAND_RECOVERY_REBUILDS_JUNO_ADDRESS_STATE"
+	InitAcknowledgement                      = "I_UNDERSTAND_THIS_CREATES_A_NEW_JUNO_INSTALLATION"
+	RecoverAcknowledgement                   = "I_UNDERSTAND_RECOVERY_REBUILDS_JUNO_ADDRESS_STATE"
+	CoordinatorRecoveryUnsealAcknowledgement = "I_HAVE_RECONCILED_ALL_PRIOR_JUNO_TRANSACTION_ATTEMPTS"
 )
 
 type InstallationStore interface {
@@ -27,6 +29,8 @@ type InstallationStore interface {
 	InstallationID(context.Context) (string, bool, error)
 	BeginInstallationRecovery(context.Context, string) error
 	BindInstallation(context.Context, string) error
+	BindRecoveredInstallation(context.Context, string) error
+	UnsealCoordinatorRecovery(context.Context, string, string, time.Time) (bool, error)
 	AllocateAddressAt(context.Context, string, uint32, string, storage.DeriveFunc) (storage.Address, error)
 	AddressIndices(context.Context, string) ([]uint32, error)
 }
@@ -232,10 +236,60 @@ func Recover(ctx context.Context, cfg config.Config, store InstallationStore, de
 			return installation.Manifest{}, err
 		}
 	}
-	if err := store.BindInstallation(ctx, manifest.InstallationID); err != nil {
+	if err := store.BindRecoveredInstallation(ctx, manifest.InstallationID); err != nil {
 		return installation.Manifest{}, fmt.Errorf("complete recovered database binding: %w", err)
 	}
 	return manifest, nil
+}
+
+func UnsealCoordinatorRecovery(ctx context.Context, cfg config.Config, store InstallationStore, acknowledgement, expectedInstallationID, reconciliationReference string) (installation.Manifest, bool, error) {
+	if acknowledgement != CoordinatorRecoveryUnsealAcknowledgement {
+		return installation.Manifest{}, false, fmt.Errorf("recovery-unseal-coordinator requires exact acknowledgement %q", CoordinatorRecoveryUnsealAcknowledgement)
+	}
+	reconciliationReference = strings.TrimSpace(reconciliationReference)
+	if !validReconciliationReference(reconciliationReference) {
+		return installation.Manifest{}, false, errors.New("recovery-unseal-coordinator requires a 1-128 character non-secret --reconciliation-reference using letters, digits, '.', '_', ':', '/', '@', '+', or '-'")
+	}
+	_, manifest, err := installation.Open(cfg.InstallationStatePath, Identity(cfg))
+	if err != nil {
+		return installation.Manifest{}, false, err
+	}
+	expectedInstallationID = strings.TrimSpace(expectedInstallationID)
+	decodedID, decodeErr := hex.DecodeString(expectedInstallationID)
+	if decodeErr != nil || len(decodedID) != sha256.Size || expectedInstallationID != strings.ToLower(expectedInstallationID) {
+		return installation.Manifest{}, false, errors.New("recovery-unseal-coordinator requires the exact 64-character lowercase --installation-id emitted by recover")
+	}
+	if expectedInstallationID != manifest.InstallationID {
+		return installation.Manifest{}, false, fmt.Errorf("recovery unseal installation mismatch: expected=%q manifest=%q", expectedInstallationID, manifest.InstallationID)
+	}
+	boundID, ok, err := store.InstallationID(ctx)
+	if err != nil {
+		return installation.Manifest{}, false, err
+	}
+	if !ok {
+		return installation.Manifest{}, false, errors.New("gateway database is not bound to this installation; complete audited recovery first")
+	}
+	if boundID != manifest.InstallationID {
+		return installation.Manifest{}, false, fmt.Errorf("gateway database installation mismatch: database=%q manifest=%q", boundID, manifest.InstallationID)
+	}
+	unsealed, err := store.UnsealCoordinatorRecovery(ctx, manifest.InstallationID, reconciliationReference, time.Now().UTC())
+	if err != nil {
+		return installation.Manifest{}, false, err
+	}
+	return manifest, unsealed, nil
+}
+
+func validReconciliationReference(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || strings.ContainsRune("._:/@+-", char) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validateConfiguredWallets(ctx context.Context, cfg config.Config, deriver Deriver) error {

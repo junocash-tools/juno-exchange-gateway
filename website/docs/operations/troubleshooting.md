@@ -22,6 +22,7 @@ docker compose -f compose.yaml -f compose.automation.yaml logs --since=15m gatew
 | `401` / `403` | Token, scope, wallet grant | Reload the exact least-privilege credential |
 | Readiness `503` | Error code, node sync, scanner lag/backfill, `pending_spends_ready` | Keep financial traffic closed; after restart or reorg, wait for the scanner's current-tip mempool reconciliation; otherwise repair the named dependency |
 | Coordinator readiness `503` | Gateway state, planner executable, signer socket/journal | Stop new attempts; keep polling existing IDs after the dependency is restored |
+| Coordinator says recovery is sealed | Recent gateway database reconstruction and pre-loss withdrawal ledger | Reconcile every old attempt/note, run `recovery-unseal-coordinator` with the recovered installation ID and audit reference, then wait for private readiness |
 | Balance `404` | Wallet and allocation record | Query only gateway-allocated addresses under that wallet |
 | Deposit not final | Confirmations and chain height | Wait for the configured threshold; default `100` |
 | Deposit unconfirmed/orphaned | Lifecycle event | Apply the compensating ledger action |

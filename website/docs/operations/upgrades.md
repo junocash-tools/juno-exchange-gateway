@@ -20,3 +20,5 @@ For automated withdrawals, use `-f compose.yaml -f compose.automation.yaml` for 
 Do not mix networks or reuse data volumes during an upgrade test.
 
 For rollback, restore the previous image set and its compatible gateway/coordinator state snapshot together. Never roll the immutable signer journal backward or discard entries newer than the database snapshot. A newer database migration may not be readable by an older binary. Recheck scanner lag, recover every outstanding attempt, and reconcile cursors before reopening traffic.
+
+Do not roll a reconstructed, still-sealed database back to a release that predates the coordinator recovery seal: the older binary will not enforce it. Keep the coordinator disabled or complete reconciliation and the audited unseal on the current release first.

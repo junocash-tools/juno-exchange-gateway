@@ -77,6 +77,9 @@ func (s *Service) Start(ctx context.Context) {
 }
 
 func (s *Service) Create(ctx context.Context, principal, idempotencyKey string, request CreateRequest) (Attempt, bool, error) {
+	if err := s.requireAutomationUnsealed(ctx); err != nil {
+		return Attempt{}, false, err
+	}
 	if !idempotencyRE.MatchString(idempotencyKey) {
 		return Attempt{}, false, opError("invalid_request", "a valid Idempotency-Key header is required", false)
 	}
@@ -168,12 +171,26 @@ func (s *Service) Ready(ctx context.Context) error {
 	if err := s.store.Ping(ctx); err != nil {
 		return errors.New("coordinator state is unavailable")
 	}
+	if err := s.requireAutomationUnsealed(ctx); err != nil {
+		return errors.New(err.Error())
+	}
 	info, err := os.Stat(s.cfg.CoordinatorTxbuildPath)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
 		return errors.New("transaction planner is unavailable")
 	}
 	if err := s.signer.Health(ctx); err != nil {
 		return errors.New("transaction signer is unavailable")
+	}
+	return nil
+}
+
+func (s *Service) requireAutomationUnsealed(ctx context.Context) error {
+	sealed, err := s.store.CoordinatorRecoverySealed(ctx)
+	if err != nil {
+		return opError("recovery_gate_unavailable", "coordinator recovery state could not be verified", true)
+	}
+	if sealed {
+		return opError("coordinator_recovery_sealed", "transaction automation is sealed after gateway database recovery; reconcile all prior transaction attempts and run recovery-unseal-coordinator", false)
 	}
 	return nil
 }
@@ -193,6 +210,9 @@ func (s *Service) recoverLoop(ctx context.Context) {
 }
 
 func (s *Service) scheduleRecoverable(ctx context.Context) {
+	if err := s.requireAutomationUnsealed(ctx); err != nil {
+		return
+	}
 	s.recoveryMu.Lock()
 	defer s.recoveryMu.Unlock()
 	available := cap(s.queue) - len(s.queue)
@@ -273,6 +293,9 @@ func (s *Service) endAttempt(attemptID string) {
 }
 
 func (s *Service) process(ctx context.Context, attemptID string) {
+	if err := s.requireAutomationUnsealed(ctx); err != nil {
+		return
+	}
 	for transitions := 0; transitions < 3 && ctx.Err() == nil; transitions++ {
 		attempt, found, err := s.store.Attempt(ctx, attemptID)
 		if err != nil || !found {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -122,6 +123,9 @@ func TestInstallationBindingAndInitializableGuard(t *testing.T) {
 	if err := s.BindInstallation(ctx, id); err != nil {
 		t.Fatal(err)
 	}
+	if sealed, err := s.CoordinatorRecoverySealed(ctx); err != nil || sealed {
+		t.Fatalf("new installation coordinator seal=%v err=%v", sealed, err)
+	}
 	got, ok, err := s.InstallationID(ctx)
 	if err != nil || !ok || got != id {
 		t.Fatalf("installation binding=%q ok=%v err=%v", got, ok, err)
@@ -134,6 +138,57 @@ func TestInstallationBindingAndInitializableGuard(t *testing.T) {
 	}
 	if err := s.AssertInitializable(ctx); err == nil {
 		t.Fatal("bound database must not be initializable")
+	}
+}
+
+func TestRecoveredInstallationCoordinatorSealAndUnsealAudit(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	id := fmt.Sprintf("%064x", 21)
+	if err := s.BeginInstallationRecovery(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureWallet(ctx, "hot", "regtest", fingerprint("recovered-hot"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindRecoveredInstallation(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if sealed, err := s.CoordinatorRecoverySealed(ctx); err != nil || !sealed {
+		t.Fatalf("recovered installation coordinator seal=%v err=%v", sealed, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE metadata SET value=? WHERE key='coordinator_recovery_seal'`, []byte(fmt.Sprintf("%064x", 22))); err != nil {
+		t.Fatal(err)
+	}
+	if sealed, err := s.CoordinatorRecoverySealed(ctx); err == nil || sealed || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched coordinator seal=%v err=%v", sealed, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE metadata SET value=? WHERE key='coordinator_recovery_seal'`, []byte(id)); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 7, 27, 8, 30, 0, 0, time.UTC)
+	unsealed, err := s.UnsealCoordinatorRecovery(ctx, id, "INC-1842", at)
+	if err != nil || !unsealed {
+		t.Fatalf("unsealed=%v err=%v", unsealed, err)
+	}
+	if sealed, err := s.CoordinatorRecoverySealed(ctx); err != nil || sealed {
+		t.Fatalf("post-unseal coordinator seal=%v err=%v", sealed, err)
+	}
+	var reference, timestamp string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='coordinator_recovery_reconciliation_reference'`).Scan(&reference); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='coordinator_recovery_unsealed_at'`).Scan(&timestamp); err != nil {
+		t.Fatal(err)
+	}
+	if reference != "INC-1842" || timestamp != at.Format(time.RFC3339Nano) {
+		t.Fatalf("unseal audit reference=%q timestamp=%q", reference, timestamp)
+	}
+	if replayed, err := s.UnsealCoordinatorRecovery(ctx, id, "INC-1842", at.Add(time.Hour)); err != nil || replayed {
+		t.Fatalf("unseal replay=%v err=%v", replayed, err)
+	}
+	if _, err := s.UnsealCoordinatorRecovery(ctx, id, "INC-OTHER", at); err == nil || !strings.Contains(err.Error(), "already unsealed") {
+		t.Fatalf("different-reference replay error=%v", err)
 	}
 }
 

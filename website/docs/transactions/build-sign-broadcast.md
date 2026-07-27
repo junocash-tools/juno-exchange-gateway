@@ -68,6 +68,8 @@ const signed = await coordinator.createRawTransaction({
 
 `createRawTransaction` creates one attempt and polls until signed material is durable. An idempotent replay returns that material in `signed`, `broadcast`, `mined`, `orphaned`, or `final`. It rejects `expired_pending_reconciliation`, `released`, `failed_unsigned`, and `cancelled`, because those states are not safe instructions to submit old bytes. Its default wait is 10 minutes with one-second polling. A local timeout does **not** cancel the server attempt; save the attempt ID from the lower-level flow or retry the same creation key and payload.
 
+After a gateway database reconstruction, the SDK reports `coordinator_recovery_sealed` and no attempt is created. Reconcile the pre-loss withdrawal ledger and selected notes, complete the [audited coordinator unseal](../operations/recovery.md#gatewaycoordinator-database-recovery), then retry the same key and request.
+
 Start from the SDK's runnable [`create-raw-transaction.mjs`](https://github.com/junocash-tools/juno-exchange-sdk/blob/main/examples/create-raw-transaction.mjs) example. It emits a JSON record containing the wallet, approval reference, state, selected note IDs, and signed transaction material for your withdrawal store.
 
 Use `walletId`, not `addressFrom`. A shielded transaction consumes notes controlled by the registered wallet UFVK. It does not debit a visible source address. The coordinator chooses inputs and a registered same-wallet change address.

@@ -306,6 +306,54 @@ func TestCoordinatorHTTPRequiresPlanCredentialAndUsesStableEnvelope(t *testing.T
 	}
 }
 
+func TestRecoveredDatabaseSealBlocksCoordinatorReadinessAndCreation(t *testing.T) {
+	cfg, baseStore := coordinatorTestConfig(t)
+	token := "regtest-recovery-seal-token-123456"
+	cfg.Credentials = []config.Credential{{Name: "exchange", TokenHash: sha256.Sum256([]byte(token)), Scopes: []string{"plan"}, Wallets: []string{"hot"}}}
+	planner := &fakePlanner{notes: []string{fmt.Sprintf("%064x:0", 45)}}
+	signer := &fakeSigner{}
+	store := recoveryGateStore{Store: baseStore, sealed: true}
+	service := newCoordinatorTestService(t, cfg, store, planner, signer)
+
+	if err := service.Ready(context.Background()); err == nil || !strings.Contains(err.Error(), "sealed after gateway database recovery") {
+		t.Fatalf("ready error=%v", err)
+	}
+	if _, _, err := service.Create(context.Background(), "exchange", "withdrawal-sealed-attempt-1", coordinatorRequest("450000")); !hasOperationCode(err, "coordinator_recovery_sealed") {
+		t.Fatalf("create error=%v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service.Start(ctx)
+	time.Sleep(20 * time.Millisecond)
+	if planner.calls() != 0 || signer.calls() != 0 {
+		t.Fatalf("sealed coordinator planner_calls=%d signer_calls=%d", planner.calls(), signer.calls())
+	}
+	attempts, err := baseStore.RecoverableAttempts(context.Background(), "", 10)
+	if err != nil || len(attempts) != 0 {
+		t.Fatalf("sealed coordinator attempts=%v err=%v", attempts, err)
+	}
+
+	handler, err := NewHandler(cfg, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"wallet_id":"hot","approval_reference":"withdrawal:sealed","outputs":[{"to_address":"jregtest1destination","amount_zat":"450000"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/transaction-attempts", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "withdrawal-sealed-attempt-1")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"code":"coordinator_recovery_sealed"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	unavailable := newCoordinatorTestService(t, cfg, recoveryGateStore{Store: baseStore, err: errors.New("corrupt gate")}, planner, signer)
+	if _, _, err := unavailable.Create(context.Background(), "exchange", "withdrawal-gate-unavailable-1", coordinatorRequest("450000")); !hasOperationCode(err, "recovery_gate_unavailable") {
+		t.Fatalf("unavailable gate create error=%v", err)
+	}
+}
+
 func TestCoordinatorHTTPForbiddenCancelDoesNotReleaseReservation(t *testing.T) {
 	cfg, store := coordinatorTestConfig(t)
 	token := "regtest-revoked-wallet-token-123456"
@@ -390,6 +438,16 @@ func TestValidateSignerResultRejectsActionIndicesOutsideOrchardBundle(t *testing
 }
 
 func pointerTo[T any](value T) *T { return &value }
+
+type recoveryGateStore struct {
+	storage.Store
+	sealed bool
+	err    error
+}
+
+func (s recoveryGateStore) CoordinatorRecoverySealed(context.Context) (bool, error) {
+	return s.sealed, s.err
+}
 
 func coordinatorTestConfig(t *testing.T) (config.Config, *sqlitestore.Store) {
 	t.Helper()

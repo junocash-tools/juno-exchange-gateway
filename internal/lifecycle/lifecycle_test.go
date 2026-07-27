@@ -127,9 +127,27 @@ func TestInitServeLossAndAuditedRecovery(t *testing.T) {
 	if _, err := Recover(ctx, cfg, store, testDeriver{}, RecoverAcknowledgement, checksum, nil); err != nil {
 		t.Fatal(err)
 	}
+	if sealed, err := store.CoordinatorRecoverySealed(ctx); err != nil || !sealed {
+		t.Fatalf("recovered coordinator seal=%v err=%v", sealed, err)
+	}
 	guardedStore, _, err = OpenForServe(ctx, cfg, store)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, _, err := UnsealCoordinatorRecovery(ctx, cfg, store, "wrong", manifest.InstallationID, "INC-1842"); err == nil || !strings.Contains(err.Error(), "exact acknowledgement") {
+		t.Fatalf("wrong unseal acknowledgement error=%v", err)
+	}
+	if _, _, err := UnsealCoordinatorRecovery(ctx, cfg, store, CoordinatorRecoveryUnsealAcknowledgement, fmt.Sprintf("%064x", 99), "INC-1842"); err == nil || !strings.Contains(err.Error(), "installation mismatch") {
+		t.Fatalf("wrong unseal installation error=%v", err)
+	}
+	if _, _, err := UnsealCoordinatorRecovery(ctx, cfg, store, CoordinatorRecoveryUnsealAcknowledgement, manifest.InstallationID, "contains spaces"); err == nil || !strings.Contains(err.Error(), "reconciliation-reference") {
+		t.Fatalf("invalid unseal reference error=%v", err)
+	}
+	if _, unsealed, err := UnsealCoordinatorRecovery(ctx, cfg, store, CoordinatorRecoveryUnsealAcknowledgement, manifest.InstallationID, "INC-1842"); err != nil || !unsealed {
+		t.Fatalf("unsealed=%v err=%v", unsealed, err)
+	}
+	if sealed, err := store.CoordinatorRecoverySealed(ctx); err != nil || sealed {
+		t.Fatalf("post-unseal coordinator seal=%v err=%v", sealed, err)
 	}
 	got, err := guardedStore.AllocateAddress(ctx, "hot", "", func(index uint32) (string, error) {
 		return testDeriver{}.Derive(ctx, cfg.Wallets[0].UFVK, index)
