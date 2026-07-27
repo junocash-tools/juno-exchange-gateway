@@ -116,13 +116,13 @@ Only `planning` or `reserved` can become `cancelled`. This proves signing did no
 | `planning` | Poll. A retryable attempt-level `error` may explain a dependency delay. |
 | `reserved` | Notes and exact plan are durable; poll and do not create a competing spend. |
 | `signing` | Poll. Cancellation is forbidden. |
-| `signing_unknown` | Keep polling the same ID. A completed signer-journal entry replays the original result; an unresolved pending entry stays locked for operator recovery. Never replan or release its notes. |
+| `signing_unknown` | Keep polling the same ID. Background journal replay is capped at once per minute per attempt. A completed journal entry replays the original result; a busy, rejected, or unresolved retry remains locked for operator recovery. Never replan or release its notes. |
 | `signed` | Persist every returned field, then submit `raw_tx_hex` and `txid` to the public broadcast API. |
 | `broadcast` | Transaction is in the node mempool; keep monitoring. |
 | `mined` | Mined below the configured finality threshold; keep the withdrawal provisional. |
 | `final` | Reached finality, default 100 confirmations. Terminal success. |
 | `orphaned` | Keep locked. The same bytes may still be valid before expiry. |
-| `expired_pending_reconciliation` | Expiry was observed, but release proof is incomplete. Keep locked. |
+| `expired_pending_reconciliation` | The healthy canonical tip passed expiry for an absent, mempool-only, or orphaned transaction, but release proof is incomplete. Raw bytes are no longer returned as broadcastable; keep notes locked. |
 | `released` | Post-expiry node/scanner proof showed every selected note unspent. A new attempt is allowed. |
 | `failed_unsigned` | Signing provably did not begin; reservations were released. Fix the cause and use a new key. |
 | `cancelled` | Provably unsigned cancellation; terminal. |

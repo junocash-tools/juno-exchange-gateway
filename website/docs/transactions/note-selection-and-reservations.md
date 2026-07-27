@@ -64,13 +64,15 @@ The scanner's `pending` state is additional chain evidence, not the reservation 
 | `released` | Every selected note was proven unspent at the required stable tip; replacement is allowed. |
 | `failed_unsigned` / `cancelled` | Signing provably did not begin; active reservations are removed. |
 
-`signing_unknown` is deliberately not a failure. The isolated signer keeps a durable journal keyed by attempt ID and plan digest. The coordinator repeats only that exact request. A completed journal entry replays the original result; an unresolved pending entry stays locked and requires operator recovery. The coordinator never replans or releases notes merely because a signer call timed out.
+`signing_unknown` is deliberately not a failure. The isolated signer keeps a durable journal keyed by attempt ID and plan digest. The coordinator repeats only that exact request. A completed journal entry replays the original result; an unresolved pending entry stays locked and requires operator recovery. Background replay is limited to once per minute per unknown attempt; an idempotent client replay may prompt the same journal lookup sooner. The coordinator never replans or releases notes merely because a signer call timed out or a later replay is busy or rejected.
 
 ## Expiry and pending spends
 
 The default transaction expiry is the planning tip plus one block plus `JUNO_COORDINATOR_EXPIRY_OFFSET=40`. Always use the returned `expiry_height`; it is fixed in the signed transaction, and blocks may advance before broadcast.
 
 At `chain_height == expiry_height`, the transaction is still valid and every note stays locked. The scanner clears a never-mined known-expiry pending marker only after `chain_height > expiry_height`.
+
+After a healthy canonical node tip passes `expiry_height`, an absent, mempool-only, or orphaned attempt becomes `expired_pending_reconciliation`. The SDK no longer returns its raw bytes as broadcastable. This state change does not release notes.
 
 The coordinator is stricter. Automatic release requires all of the following:
 

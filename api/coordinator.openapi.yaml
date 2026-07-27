@@ -452,12 +452,14 @@ components:
           description: Signed transaction bytes ready for the public broadcast endpoint.
         orchard_output_action_indices:
           type: array
-          items: { type: integer, minimum: 0, maximum: 4294967295 }
+          maxItems: 199
+          uniqueItems: true
+          items: { type: integer, minimum: 0, maximum: 199 }
           description: Aligned to creation-request output order.
         orchard_change_action_index:
           type: integer
           minimum: 0
-          maximum: 4294967295
+          maximum: 199
         error:
           allOf:
             - $ref: "#/components/schemas/Error"
