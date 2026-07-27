@@ -28,7 +28,7 @@ JSON requests also require `Content-Type: application/json`. Parameters such as 
 | `GET` | `/v1/transactions/{txid}` | `read`; add `withdrawal` + wallet grant for `wallet_id`, and `raw` for raw hex |
 | `POST` | `/v1/transactions/broadcast` | `broadcast` + wallet grant + `Idempotency-Key` |
 
-There are no public build, approve, or sign routes. Use the private `juno-txbuild` CLI and isolated `juno-txsign`; see [build, sign, and broadcast](../transactions/build-sign-broadcast.md). A future planner service must meet the [private planner criteria](../transactions/note-selection-and-reservations.md#criteria-for-a-private-planner-service).
+There are no build, approve, or sign routes on this public listener. Automated creation uses the separately bound [private coordinator API](./coordinator-http.md), normally through the Node.js SDK. The exchange then submits only its signed result to the public broadcast route. See [build, sign, and broadcast](../transactions/build-sign-broadcast.md).
 
 ## Envelopes
 
@@ -74,4 +74,4 @@ Use `error.retryable`, not the status alone. Preserve a valid `X-Request-ID` or 
 
 An `internal` error deliberately has `retryable: false`: the exchange must not loop blindly while gateway state may be unhealthy. Preserve the current deposit cursor or broadcast idempotency key, diagnose readiness and storage, then follow the capability-specific reconciliation procedure. Never manufacture a new cursor, signed attempt, or idempotency key to bypass a `500`.
 
-The OpenAPI document is served with the source repository at `api/openapi.yaml`.
+The public OpenAPI document is served as `openapi.yaml`. The separate private contract is `coordinator.openapi.yaml`.

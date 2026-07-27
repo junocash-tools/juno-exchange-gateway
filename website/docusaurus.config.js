@@ -13,6 +13,7 @@ function normalizedBaseUrl() {
 const docsURL = process.env.DOCS_URL || `https://${organizationName}.github.io`;
 const baseUrl = normalizedBaseUrl();
 const openAPIURL = new URL(`${baseUrl}openapi.yaml`, docsURL).toString();
+const coordinatorOpenAPIURL = new URL(`${baseUrl}coordinator.openapi.yaml`, docsURL).toString();
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
@@ -54,7 +55,8 @@ const config = {
       items: [
         {type: 'docSidebar', sidebarId: 'gatewaySidebar', position: 'left', label: 'Guide'},
         {to: '/operations/configuration', label: 'Configuration', position: 'left'},
-        {href: openAPIURL, label: 'OpenAPI', position: 'left'},
+        {href: openAPIURL, label: 'Public OpenAPI', position: 'left'},
+        {href: coordinatorOpenAPIURL, label: 'Coordinator OpenAPI', position: 'left'},
         {
           href: `https://github.com/${repository}`,
           label: 'GitHub',
@@ -77,7 +79,9 @@ const config = {
           title: 'Reference',
           items: [
             {label: 'HTTP API', to: '/reference/http'},
-            {label: 'OpenAPI YAML', href: openAPIURL},
+            {label: 'Private coordinator API', to: '/reference/coordinator-http'},
+            {label: 'Public OpenAPI YAML', href: openAPIURL},
+            {label: 'Coordinator OpenAPI YAML', href: coordinatorOpenAPIURL},
             {label: 'Configuration', to: '/operations/configuration'},
             {label: 'Security', to: '/operations/security'},
           ],

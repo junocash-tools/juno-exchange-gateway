@@ -44,7 +44,12 @@ module.exports = {
         'operations/troubleshooting',
       ],
     },
-    'reference/http',
+    {
+      type: 'category',
+      label: 'API reference',
+      collapsed: false,
+      items: ['reference/http', 'reference/coordinator-http'],
+    },
     'best-practices',
   ],
 };

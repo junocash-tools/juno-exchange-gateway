@@ -2,22 +2,22 @@
 title: Best practices
 ---
 
-- Expose only the gateway through HTTPS or mTLS. Keep the node, scanner, planner, and databases private.
-- Keep seeds and spending keys offline. Export only an approved signed raw transaction and expected txid.
-- Keep build and sign outside the public API. A planner service needs durable atomic reservations and approval-bound plans first.
+- Expose only the public gateway to the general exchange API network. Put the coordinator behind private HTTPS/mTLS and keep the node, scanner, planner, signer socket, and databases private.
+- Keep seeds and spending keys inside the network-disabled signer. Export only an approved signed raw transaction and expected txid.
+- Authorize before calling the private creation API; use separate `plan` and `broadcast` credentials with explicit wallet grants.
 - Use one registered UFVK and durable address mapping per wallet policy.
 - Initialize once. Back up the installation manifest after allocations and never replace it with an empty directory.
 - Use the default `100` confirmations and process unconfirmation and orphan events.
 - Poll the complete deposit stream, deduplicate by stable identity, and commit cursor and ledger changes atomically.
-- Allow only one complete plan-to-outcome lifecycle per wallet, or atomically reserve every selected `notes[].note_id`.
-- For a never-mined attempt, release after canonical height is strictly greater than `expiry_height` only when lookup/effects reconcile and the complete selected-ID batch is `unspent`. If it was ever mined or orphaned, also wait through `orphaned_at_height + configured_confirmations`, or require manual chain evidence when that height is unavailable.
+- Use the coordinator's atomic selected-note reservations. Never run independent active coordinator databases or bypass a reservation with the CLI.
+- Release an expired coordinator attempt only after height is at least `expiry_height + configured_confirmations`, node/scanner tips match, history and pending spends are ready, and the complete selected-ID batch is `unspent`.
 - Bind withdrawal, attempt, plan digest, txid, raw-transaction hash, and idempotency key before broadcast.
-- Use a fresh owner-only signer attempt directory and durable file outputs for every signing attempt. Never overwrite a result or clear an uncertain pending marker to force a retry.
+- Preserve signer journal state. For `signing_unknown`, retry only the same attempt/digest; never clear a journal marker or create a replacement.
 - Retry uncertain broadcasts with the same wallet ID, principal, key, expected txid, and bytes. Never rebuild first.
 - After a completed broadcast later becomes orphaned or absent while height is strictly below expiry, keep reservations and use a fresh operation key only to rebroadcast the identical signed bytes.
 - There is no RBF or CPFP path for the pinned Orchard transaction flow. Set the fee before approval; do not sign a competing fee-bump while prior bytes remain valid.
 - Use registered internal change under the spending UFVK; never credit change as a customer deposit.
-- Keep planner defaults at `--minconf 100` and `--fee-multiplier 20` unless a reviewed policy says otherwise.
+- Keep coordinator defaults at 100 confirmations, expiry offset 40, and fee multiplier 20 unless a reviewed policy says otherwise.
 - Consolidate only when note count, signing time, or input limits justify its fee and privacy cost.
 - Keep scanner witness mode on `auto`; monitor readiness, lag, shard-cache progress, note inventory, and outstanding reservations.
 - Pin component images by digest and test deposits, withdrawals, expiry, reorgs, consolidation, recovery, and rollback on regtest before release.

@@ -6,7 +6,7 @@
     "clear": "docusaurus clear",
     "start": "docusaurus start",
     "build": "docusaurus build",
-    "lint:openapi": "redocly lint ../api/openapi.yaml --config ../redocly.yaml",
+    "lint:openapi": "redocly lint ../api/openapi.yaml ../api/coordinator.openapi.yaml --config ../redocly.yaml",
     "serve": "docusaurus serve",
     "typecheck": "tsc --noEmit"
   },

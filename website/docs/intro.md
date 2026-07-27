@@ -19,7 +19,7 @@ Prepare:
 The online appliance never needs a seed or spending key.
 
 :::warning Initialize once
-`init` seals the complete wallet set, wallet IDs, UFVK fingerprints, birthdays, and network into the installation manifest. Decide every wallet before initialization; later wallet additions or identity changes are rejected at startup.
+`init` seals the complete wallet set, wallet IDs, UFVK fingerprints, birthdays, accounts, and network into the installation manifest. Decide every wallet before initialization; later wallet additions or identity changes are rejected at startup.
 :::
 
 ## Configure a wallet
@@ -32,7 +32,8 @@ Create `wallets.json` with mode `0600`:
     {
       "wallet_id": "hot",
       "ufvk": "jviewregtest1...",
-      "birthday_height": 0
+      "birthday_height": 0,
+      "account": 0
     }
   ]
 }
@@ -46,14 +47,14 @@ Create `auth.json` with mode `0600`. Mainnet and testnet require at least one cr
     {
       "name": "exchange-api",
       "token_sha256": "<64-lowercase-hex-sha256>",
-      "scopes": ["read", "address", "treasury", "broadcast", "withdrawal"],
+      "scopes": ["read", "address", "treasury", "plan", "broadcast", "withdrawal"],
       "wallets": ["hot"]
     }
   ]
 }
 ```
 
-This combined credential keeps the first regtest walkthrough short. Split it into the least-privilege service credentials shown in [Wallet and authentication setup](getting-started/wallet-and-auth.md) before production. An isolated anonymous regtest may use `{"credentials":[]}`. The file is still required by Compose.
+This combined credential keeps the first regtest walkthrough short. Split it into least-privilege private coordinator, broadcast, deposit, and address credentials before production. An isolated anonymous regtest may use `{"credentials":[]}` only while the coordinator is disabled; enabling it always requires `plan` or `admin`. The file is still required by Compose.
 
 Generate the hash without storing the token in shell history:
 
@@ -104,6 +105,8 @@ docker compose -f compose.yaml -f compose.dev.yaml run --no-deps --rm gateway in
 docker compose -f compose.yaml -f compose.dev.yaml up -d
 ```
 
+The base stack is watch-only. For automated withdrawals, first prepare the owner-only seed and exact signer bindings, then apply `compose.automation.yaml` as described in [Docker operations](operations/docker.md#automated-withdrawal-overlay). The private coordinator always requires the `plan` credential shown above.
+
 Use immutable image digests in production. See [Docker operations](operations/docker.md).
 
 ## Check readiness
@@ -153,12 +156,12 @@ Example:
 }
 ```
 
-Regtest permits anonymous access only when no credentials are configured. Keep authentication enabled whenever the port is reachable by another host.
+Regtest permits anonymous public-gateway access only when no credentials are configured and the coordinator is disabled. Keep authentication enabled whenever another host can reach a listener.
 
 ## First exchange flow
 
 1. [Allocate a deposit address](capabilities/address-allocation.md) and durably map it to the customer.
 2. [Poll the unfiltered deposit stream](capabilities/deposits.md) and atomically checkpoint its cursor with ledger changes.
-3. For withdrawals, plan online, reserve every selected `note_id`, sign in the isolated custody boundary, submit only approved raw bytes, and use [selected-note status](capabilities/selected-note-status.md) for exact post-expiry or conflicting-spend reconciliation.
+3. For withdrawals, use the [Node.js SDK and private coordinator](transactions/build-sign-broadcast.md) to create signed raw hex, persist the attempt, then broadcast the exact bytes through the public gateway.
 
 Use `100` confirmations unless the exchange has an explicit, tested risk policy for another value.

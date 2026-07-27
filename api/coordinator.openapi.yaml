@@ -1,0 +1,474 @@
+openapi: 3.1.0
+info:
+  title: Juno Private Transaction Coordinator API
+  version: 1.0.0
+  description: |
+    Private API that creates a durable withdrawal attempt, selects and reserves
+    Orchard notes, and returns signed raw transaction hex. It is not a public
+    gateway API and it never broadcasts. Use the public Juno Exchange Gateway
+    API to broadcast and look up the returned transaction.
+servers:
+  - url: https://juno-coordinator.internal.example.com
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+    description: Private coordinator liveness and dependency readiness.
+  - name: Transaction attempts
+    description: Durable creation, signing-result polling, and provably unsigned cancellation.
+paths:
+  /v1/health/live:
+    get:
+      operationId: getCoordinatorLive
+      tags: [Health]
+      summary: Process liveness
+      description: Does not check the planner, signer, scanner, node, or state database. This is the only unauthenticated route.
+      security: []
+      responses:
+        "200":
+          description: The coordinator HTTP process is live.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+              example: { status: ok, data: { service: transaction-coordinator, status: live }, request_id: req_018f }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+  /v1/health/ready:
+    get:
+      operationId: getCoordinatorReady
+      tags: [Health]
+      summary: Coordinator readiness
+      x-required-scope: plan
+      description: Checks durable coordinator state, the configured planner executable, and the isolated signer service.
+      responses:
+        "200":
+          description: New transaction attempts can be processed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+              example: { status: ok, data: { service: transaction-coordinator, status: ready }, request_id: req_018f }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/NotReady" }
+  /v1/transaction-attempts:
+    post:
+      operationId: createTransactionAttempt
+      tags: [Transaction attempts]
+      summary: Create or replay a transaction attempt
+      x-required-scope: plan
+      description: |
+        Creates one durable attempt for an approved withdrawal or batch. The
+        credential must also grant the requested wallet. `wallet_id` identifies
+        the registered spending UFVK; there is no `addressFrom` field because a
+        shielded transaction spends wallet-owned notes, not a visible source
+        address. The coordinator allocates registered change, selects eligible
+        notes, reserves every selected note ID atomically, and invokes the
+        isolated signer. It does not broadcast.
+
+        The idempotency key is scoped to the authenticated credential name. A
+        replay with the same normalized payload returns the same attempt and
+        adds `Idempotency-Replayed: true`; a different payload returns `409`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/RequestID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAttemptRequest" }
+            example:
+              wallet_id: hot
+              approval_reference: withdrawal:1842
+              outputs:
+                - { to_address: j1example, amount_zat: "250000" }
+                - { to_address: j1second, amount_zat: "400000", memo_hex: "6869" }
+      responses:
+        "202":
+          description: New or recoverable attempt accepted for processing.
+          headers:
+            Idempotency-Replayed:
+              description: Present with value `true` when this is an idempotent replay.
+              schema: { type: string, const: "true" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttemptResponse" }
+              example:
+                status: ok
+                data:
+                  attempt_id: txn_0123456789abcdef0123456789abcdef
+                  state: planning
+                  wallet_id: hot
+                  approval_reference: withdrawal:1842
+                  created_at: "2026-07-27T12:00:00Z"
+                  updated_at: "2026-07-27T12:00:00Z"
+                request_id: req_018f
+        "200":
+          description: Idempotent replay of a terminal attempt.
+          headers:
+            Idempotency-Replayed:
+              schema: { type: string, const: "true" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttemptResponse" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+  /v1/transaction-attempts/{attempt_id}:
+    get:
+      operationId: getTransactionAttempt
+      tags: [Transaction attempts]
+      summary: Get a transaction attempt
+      x-required-scope: plan
+      description: Returns the durable current state. Only the credential principal that created the attempt, with a grant for its wallet, can read it.
+      parameters:
+        - $ref: "#/components/parameters/AttemptID"
+        - $ref: "#/components/parameters/RequestID"
+      responses:
+        "200":
+          description: Current attempt state. A successful envelope can contain an attempt-level `error` from asynchronous processing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttemptResponse" }
+              example:
+                status: ok
+                data:
+                  attempt_id: txn_0123456789abcdef0123456789abcdef
+                  state: signed
+                  wallet_id: hot
+                  approval_reference: withdrawal:1842
+                  change_address: j1change
+                  plan_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+                  fee_zat: "200000"
+                  expiry_height: 920041
+                  selected_note_ids:
+                    - bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:0
+                  txid: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+                  raw_tx_hex: "00aa"
+                  orchard_output_action_indices: [0]
+                  orchard_change_action_index: 1
+                  created_at: "2026-07-27T12:00:00Z"
+                  updated_at: "2026-07-27T12:00:02Z"
+                request_id: req_018f
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+  /v1/transaction-attempts/{attempt_id}/cancel:
+    post:
+      operationId: cancelTransactionAttempt
+      tags: [Transaction attempts]
+      summary: Cancel a provably unsigned attempt
+      x-required-scope: plan
+      description: |
+        Cancels only `planning` or `reserved`. The body may be empty or `{}`.
+        Cancellation releases any reservation only while signing is proven not
+        to have started. `signing`, `signing_unknown`, and every later state
+        return `409`; never create a replacement transaction for those states.
+      parameters:
+        - $ref: "#/components/parameters/AttemptID"
+        - $ref: "#/components/parameters/RequestID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              maxProperties: 0
+      responses:
+        "200":
+          description: Attempt is cancelled, including an idempotent replay of an earlier cancellation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttemptResponse" }
+              example:
+                status: ok
+                data:
+                  attempt_id: txn_0123456789abcdef0123456789abcdef
+                  state: cancelled
+                  wallet_id: hot
+                  approval_reference: withdrawal:1842
+                  created_at: "2026-07-27T12:00:00Z"
+                  updated_at: "2026-07-27T12:00:01Z"
+                request_id: req_018f
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "409": { $ref: "#/components/responses/NotCancellable" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  parameters:
+    AttemptID:
+      name: attempt_id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/AttemptID" }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Stable key for one immutable creation request. Reuse it for every uncertain retry.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
+  responses:
+    InvalidRequest:
+      description: Request body, header, or attempt ID is invalid.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: invalid_request, message: invalid request JSON, retryable: false }, request_id: req_018f }
+    Unauthorized:
+      description: Bearer credential is missing or invalid.
+      headers: { WWW-Authenticate: { schema: { type: string }, example: Bearer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: unauthorized, message: a valid bearer credential is required, retryable: false }, request_id: req_018f }
+    Forbidden:
+      description: Credential lacks `plan` or `admin` scope, wallet authorization, or ownership of the attempt.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: forbidden, message: credential lacks the plan scope, retryable: false }, request_id: req_018f }
+    NotFound:
+      description: Wallet or transaction attempt is unknown.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: not_found, message: transaction attempt not found, retryable: false }, request_id: req_018f }
+    Conflict:
+      description: The idempotency key was already used with a different normalized request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: idempotency_conflict, message: idempotency key was used with a different payload, retryable: false }, request_id: req_018f }
+    NotCancellable:
+      description: Signing may have started or the attempt is otherwise not cancellable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: attempt_not_cancellable, message: only a provably unsigned planning or reserved attempt can be cancelled, retryable: false }, request_id: req_018f }
+    PayloadTooLarge:
+      description: Body exceeds `JUNO_COORDINATOR_MAX_BODY_BYTES`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: invalid_request, message: request body exceeds the configured limit, retryable: false }, request_id: req_018f }
+    UnsupportedMediaType:
+      description: Request has an unsupported Content-Type.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: unsupported_media_type, message: Content-Type must be application/json, retryable: false }, request_id: req_018f }
+    MethodNotAllowed:
+      description: Method is not allowed for this route.
+      headers: { Allow: { schema: { type: string } } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: method_not_allowed, message: method not allowed, retryable: false }, request_id: req_018f }
+    RateLimited:
+      description: Per-principal coordinator bucket is exhausted.
+      headers: { Retry-After: { schema: { type: integer }, example: 1 } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: rate_limited, message: request rate limit exceeded, retryable: true }, request_id: req_018f }
+    Internal:
+      description: Durable coordinator state failed. Preserve the same attempt or idempotency key and stop blind retries.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: internal, message: internal coordinator error, retryable: false }, request_id: req_018f }
+    NotReady:
+      description: Durable state, planner, or signer is unavailable.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { status: error, error: { code: coordinator_not_ready, message: transaction signer is unavailable, retryable: true }, request_id: req_018f }
+  schemas:
+    AttemptID:
+      type: string
+      pattern: "^txn_[0-9a-f]{32}$"
+    WalletID:
+      type: string
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    TxID:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    NoteID:
+      type: string
+      pattern: "^[0-9a-f]{64}:(0|[1-9][0-9]*)$"
+      description: Canonical Orchard source outpoint `lowercase_txid:action_index`.
+    Zatoshi:
+      type: string
+      pattern: "^(0|[1-9][0-9]*)$"
+      maxLength: 20
+      description: Canonical base-10 zatoshi amount. Creation output amounts must be positive.
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        retryable: { type: boolean }
+        details: { type: object, additionalProperties: true }
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [status, error, request_id]
+      properties:
+        status: { const: error }
+        error: { $ref: "#/components/schemas/Error" }
+        request_id: { type: string }
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, data, request_id]
+      properties:
+        status: { const: ok }
+        data:
+          type: object
+          additionalProperties: false
+          required: [service, status]
+          properties:
+            service: { const: transaction-coordinator }
+            status: { type: string, enum: [live, ready] }
+        request_id: { type: string }
+    TransactionOutput:
+      type: object
+      additionalProperties: false
+      required: [to_address, amount_zat]
+      properties:
+        to_address:
+          type: string
+          minLength: 1
+          description: Unified address for the configured mainnet, testnet, or regtest network.
+        amount_zat:
+          allOf:
+            - $ref: "#/components/schemas/Zatoshi"
+            - pattern: "^[1-9][0-9]*$"
+        memo_hex:
+          type: string
+          pattern: "^(?:[0-9a-f]{2})*$"
+          maxLength: 1024
+          description: Optional lowercase hex encoding of at most 512 bytes.
+    CreateAttemptRequest:
+      type: object
+      additionalProperties: false
+      required: [wallet_id, approval_reference, outputs]
+      properties:
+        wallet_id:
+          allOf:
+            - $ref: "#/components/schemas/WalletID"
+          description: Registered spending wallet/UFVK. This is the source identity; no `addressFrom` is accepted.
+        approval_reference:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Stable exchange approval or withdrawal reference.
+        outputs:
+          type: array
+          minItems: 1
+          maxItems: 199
+          items: { $ref: "#/components/schemas/TransactionOutput" }
+    AttemptState:
+      type: string
+      enum:
+        - planning
+        - reserved
+        - signing
+        - signing_unknown
+        - signed
+        - broadcast
+        - mined
+        - expired_pending_reconciliation
+        - orphaned
+        - final
+        - released
+        - failed_unsigned
+        - cancelled
+    TransactionAttempt:
+      type: object
+      additionalProperties: false
+      required: [attempt_id, state, wallet_id, approval_reference, created_at, updated_at]
+      properties:
+        attempt_id: { $ref: "#/components/schemas/AttemptID" }
+        state: { $ref: "#/components/schemas/AttemptState" }
+        wallet_id: { $ref: "#/components/schemas/WalletID" }
+        approval_reference: { type: string, minLength: 1, maxLength: 128 }
+        change_address:
+          type: string
+          description: Coordinator-allocated registered change address under the source UFVK.
+        plan_digest:
+          type: string
+          pattern: "^sha256:[0-9a-f]{64}$"
+          description: SHA-256 of the exact immutable TxPlan bytes sent to the signer.
+        fee_zat: { $ref: "#/components/schemas/Zatoshi" }
+        expiry_height: { type: integer, format: int64, minimum: 1 }
+        selected_note_ids:
+          type: array
+          minItems: 1
+          maxItems: 200
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/NoteID" }
+        txid: { $ref: "#/components/schemas/TxID" }
+        raw_tx_hex:
+          type: string
+          pattern: "^(?:[0-9a-f]{2})+$"
+          description: Signed transaction bytes ready for the public broadcast endpoint.
+        orchard_output_action_indices:
+          type: array
+          items: { type: integer, minimum: 0, maximum: 4294967295 }
+          description: Aligned to creation-request output order.
+        orchard_change_action_index:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        error:
+          allOf:
+            - $ref: "#/components/schemas/Error"
+          description: Last asynchronous attempt error. This may appear inside an HTTP success envelope.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AttemptResponse:
+      type: object
+      additionalProperties: false
+      required: [status, data, request_id]
+      properties:
+        status: { const: ok }
+        data: { $ref: "#/components/schemas/TransactionAttempt" }
+        request_id: { type: string }

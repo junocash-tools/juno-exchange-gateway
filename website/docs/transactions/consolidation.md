@@ -4,7 +4,13 @@ title: Consolidation and sweeping
 
 Consolidation reduces note count. It is an operator maintenance action, not a free fee optimization.
 
-## Commands
+## Automation boundary
+
+The private coordinator API currently creates explicit-output withdrawal transactions. It does not expose `sweep`, `consolidate`, or `rebalance`, because maintenance needs operator-controlled treasury destinations and a separately approved economic/privacy policy.
+
+Run the commands below only as an operator fallback. Pause new coordinator creation for the source wallet and wait until every coordinator attempt is `final`, `released`, `failed_unsigned`, or `cancelled`. Do not run a CLI maintenance plan beside active coordinator reservations, and do not disguise a sweep as a customer withdrawal request.
+
+## Operator commands
 
 | Command | Inputs | Output |
 | --- | --- | --- |
@@ -96,7 +102,7 @@ For `consolidate` and `sweep`, use a gateway-allocated destination under the sam
 
 The scanner classifies transaction origin once across all wallets registered in the installation. For a registered source-to-registered-target rebalance, it stores the target note as internal and emits no external deposit lifecycle. This suppression depends on both wallet registrations, not on the address label. If a target is outside the installation, the gateway cannot monitor or reconcile its receipt; use a separate documented custody flow instead of this rebalance procedure.
 
-After any `consolidate`, `sweep`, or `rebalance` plan, use the same offline direct-signing or external-signing flow, note-ID reservation policy, signed-raw broadcast API, and txid reconciliation described in [build, sign, and broadcast](./build-sign-broadcast.md).
+After any `consolidate`, `sweep`, or `rebalance` plan, use the operator-fallback controls, signed-raw broadcast API, and txid reconciliation described in [build, sign, and broadcast](./build-sign-broadcast.md). Keep automated creation paused until the maintenance attempt is final or passes the strict post-expiry release proof.
 
 ## Economics
 
@@ -133,7 +139,7 @@ Do not broadcast consolidation on a blind cron. Evaluate the [note summary](../c
 
 Aim for at most `30` spendable notes after maintenance. These are operational defaults, not protocol rules; tune them from withdrawal size, note distribution, proof latency, and fee budget.
 
-Without a durable exchange reservation ledger, run only one plan lifecycle per wallet and wait for finality or the strict post-expiry release rule before planning another. With atomic note-ID reservations, a later disjoint batch may begin after the scanner marks every prior input pending-spent; waiting for one confirmation is safer. In both cases, keep every earlier reservation until that transaction is final or safely released after expiry. Refresh the summary before each batch and repeat only while the threshold and fee policy still justify it. Do not immediately consolidate each customer deposit: batching at an off-peak, jittered time reduces cost and timing correlation.
+For ordinary withdrawals, the coordinator can safely run disjoint attempts because it atomically reserves selected note IDs. The operator CLI cannot join that reservation transaction, so maintenance requires the exclusive wallet window above. Refresh the summary before each batch and repeat only while the threshold and fee policy still justify it. Do not immediately consolidate each customer deposit: batching at an off-peak, jittered time reduces cost and timing correlation.
 
 ## Privacy and operations
 
