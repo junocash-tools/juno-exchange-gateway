@@ -192,6 +192,27 @@ func TestRecoveredInstallationCoordinatorSealAndUnsealAudit(t *testing.T) {
 	}
 }
 
+func TestRecoveredBindingSealsAnAlreadyBoundInstallation(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	id := fmt.Sprintf("%064x", 23)
+	if err := s.BeginInstallationRecovery(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindInstallation(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if sealed, err := s.CoordinatorRecoverySealed(ctx); err != nil || sealed {
+		t.Fatalf("ordinary binding seal=%v err=%v", sealed, err)
+	}
+	if err := s.BindRecoveredInstallation(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if sealed, err := s.CoordinatorRecoverySealed(ctx); err != nil || !sealed {
+		t.Fatalf("recovered rebinding seal=%v err=%v", sealed, err)
+	}
+}
+
 func TestRecoveryRejectsUnmarkedNonemptyDatabase(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

@@ -726,6 +726,21 @@ func (s *Store) bindInstallation(ctx context.Context, installationID string, sea
 		if string(existing) != installationID {
 			return fmt.Errorf("gateway database is already bound to installation %q", string(existing))
 		}
+		if sealCoordinator {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO metadata(key,value) VALUES('coordinator_recovery_seal',?) ON CONFLICT(key) DO NOTHING`, []byte(installationID)); err != nil {
+				return fmt.Errorf("seal already-bound coordinator after gateway recovery: %w", err)
+			}
+			var seal []byte
+			if err := tx.QueryRowContext(ctx, `SELECT value FROM metadata WHERE key='coordinator_recovery_seal'`).Scan(&seal); err != nil {
+				return fmt.Errorf("verify already-bound coordinator recovery seal: %w", err)
+			}
+			if string(seal) != installationID {
+				return errors.New("coordinator recovery seal does not match the gateway installation")
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit already-bound coordinator recovery seal: %w", err)
+			}
+		}
 		return nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
