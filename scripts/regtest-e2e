@@ -1273,6 +1273,91 @@ wait_note_status "$run_dir/expiry-note-status-request.json" "$run_dir/expiry-not
   "selected notes did not return to unspent after strict expiry"
 assert_no_deposit "$expiry_txid" "$run_dir/expiry-change-still-not-deposit.json"
 
+log "Coordinator expiry: hold reservations through the full post-expiry finality window"
+coordinator_expiry_creation_key="coordinator-expiry-create-$(openssl rand -hex 8)"
+JUNO_COORDINATOR_URL="$coordinator_url" \
+JUNO_COORDINATOR_TOKEN="$coordinator_token" \
+JUNO_NETWORK=regtest \
+JUNO_WALLET_ID="$wallet_id" \
+JUNO_IDEMPOTENCY_KEY="$coordinator_expiry_creation_key" \
+  node "$workspace_root/juno-exchange-sdk/examples/create-raw-transaction.mjs" \
+    withdrawal:e2e-expiry \
+    "$expiry_destination_address" \
+    500000 >"$run_dir/coordinator-expiry-signed.json"
+assert_jq "$run_dir/coordinator-expiry-signed.json" \
+  '.state == "signed"
+    and (.attemptId | test("^txn_[0-9a-f]{32}$"))
+    and (.txid | test("^[0-9a-f]{64}$"))
+    and (.rawTxHex | test("^[0-9a-f]+$") and (length % 2 == 0))
+    and (.selectedNoteIds | length) > 0' \
+  "coordinator did not create the expiry-test transaction"
+coordinator_expiry_attempt_id="$(jq -er '.attemptId' "$run_dir/coordinator-expiry-signed.json")"
+coordinator_expiry_txid="$(jq -er '.txid' "$run_dir/coordinator-expiry-signed.json")"
+coordinator_expiry_height="$(jq -er '.expiryHeight' "$run_dir/coordinator-expiry-signed.json")"
+jq '{note_ids:.selectedNoteIds}' "$run_dir/coordinator-expiry-signed.json" \
+  >"$run_dir/coordinator-expiry-note-status-request.json"
+
+coordinator_expiry_broadcast_key="coordinator-expiry-broadcast-$(openssl rand -hex 8)"
+JUNO_GATEWAY_URL="$base_url" \
+JUNO_GATEWAY_TOKEN="$broadcast_token" \
+JUNO_WALLET_ID="$wallet_id" \
+JUNO_BROADCAST_IDEMPOTENCY_KEY="$coordinator_expiry_broadcast_key" \
+  node "$workspace_root/juno-exchange-sdk/examples/broadcast-raw-transaction.mjs" \
+    "$run_dir/coordinator-expiry-signed.json" >"$run_dir/coordinator-expiry-broadcast.json"
+assert_jq "$run_dir/coordinator-expiry-broadcast.json" \
+  --arg txid "$coordinator_expiry_txid" \
+  '.txid == $txid and .accepted == true' \
+  "coordinator expiry transaction was not accepted for broadcast"
+wait_coordinator_state "$coordinator_expiry_attempt_id" broadcast \
+  "$run_dir/coordinator-expiry-state-broadcast.json" \
+  || fail "coordinator did not observe the expiry-test broadcast"
+
+"${compose[@]}" restart junocashd >/dev/null
+wait_node
+node_cli getrawmempool >"$run_dir/coordinator-expiry-mempool-after-restart.json"
+assert_jq "$run_dir/coordinator-expiry-mempool-after-restart.json" \
+  --arg txid "$coordinator_expiry_txid" \
+  'index($txid) == null' \
+  "persistmempool=0 restart did not drop the coordinator expiry transaction"
+
+tip_height="$(node_cli getblockcount | jq -er '.')"
+if (( tip_height > coordinator_expiry_height + 1 )); then
+  fail "node passed the coordinator transaction expiry before its boundary check"
+fi
+blocks_after_expiry=$((coordinator_expiry_height + 1 - tip_height))
+if (( blocks_after_expiry > 0 )); then
+  node_cli generate "$blocks_after_expiry" >"$run_dir/coordinator-expiry-boundary-blocks.json"
+fi
+wait_ready "$run_dir/ready-after-coordinator-expiry.json"
+code="$(coordinator_api_status GET "/v1/transaction-attempts/$coordinator_expiry_attempt_id" "$run_dir/coordinator-expiry-state-pending.json")"
+[[ "$code" == "200" ]] || fail "post-expiry coordinator lookup returned HTTP $code"
+assert_jq "$run_dir/coordinator-expiry-state-pending.json" \
+  '.data.state == "expired_pending_reconciliation"' \
+  "coordinator did not keep the expired attempt locked for reconciliation"
+
+tip_height="$(node_cli getblockcount | jq -er '.')"
+release_guard_height=$((coordinator_expiry_height + 99))
+if (( tip_height < release_guard_height )); then
+  node_cli generate "$((release_guard_height - tip_height))" \
+    >"$run_dir/coordinator-expiry-release-guard-blocks.json"
+fi
+wait_ready "$run_dir/ready-before-coordinator-release.json"
+code="$(coordinator_api_status GET "/v1/transaction-attempts/$coordinator_expiry_attempt_id" "$run_dir/coordinator-expiry-before-release.json")"
+[[ "$code" == "200" ]] || fail "pre-release coordinator lookup returned HTTP $code"
+assert_jq "$run_dir/coordinator-expiry-before-release.json" \
+  '.data.state == "expired_pending_reconciliation"' \
+  "coordinator released notes before expiry plus 100 confirmations"
+
+node_cli generate 1 >"$run_dir/coordinator-expiry-release-block.json"
+wait_ready "$run_dir/ready-at-coordinator-release.json"
+wait_coordinator_state "$coordinator_expiry_attempt_id" released \
+  "$run_dir/coordinator-expiry-state-released.json" \
+  || fail "coordinator did not release the proven-unspent notes at the strict boundary"
+wait_note_status "$run_dir/coordinator-expiry-note-status-request.json" \
+  "$run_dir/coordinator-expiry-notes-released.json" \
+  '.data.statuses | all(.state == "unspent")' \
+  "coordinator released its reservation without all selected notes being unspent"
+
 log "Integration: exclude a real deposit sent to an unallocated UFVK address"
 "$workspace_root/juno-addrgen/bin/juno-addrgen" derive \
   --ufvk "$ufvk" \
@@ -1457,6 +1542,7 @@ jq -n \
   --arg cold_deposit_txid "$cold_deposit_txid" \
   --arg withdrawal_txid "$withdrawal_txid" \
   --arg expiry_txid "$expiry_txid" \
+  --arg coordinator_expiry_txid "$coordinator_expiry_txid" \
   --arg post_recovery_txid "$post_recovery_txid" \
   --arg addrgen_ref "$JUNO_ADDRGEN_REF" \
   --arg gateway_ref "$JUNO_GATEWAY_REVISION" \
@@ -1465,7 +1551,7 @@ jq -n \
   --arg txbuild_ref "$JUNO_TXBUILD_REF" \
   --arg txsign_ref "$JUNO_TXSIGN_REF" \
   --arg sdk_ref "$JUNO_SDK_REF" \
-  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref,"juno-exchange-sdk":$sdk_ref},checks:["clean source provenance","one-time installation init","separate loopback public and private ports","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege public and coordinator authentication","wallet isolation","network-disabled UDS signer","mandatory seed-to-UFVK binding","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","Node SDK programmatic create","coordinator durable attempt","selected-note reservation","selected-note unspent reconciliation","selected-note unknown and wallet isolation","signed raw hex return","SDK programmatic broadcast","prevalidated raw broadcast","idempotent create and broadcast replay","same-key payload conflict","outgoing wallet effects","registered coordinator change scope","coordinator broadcast, mined, and final lifecycle","selected-note pending and spent lifecycle","mined pending-spend release","withdrawal expiry and drop","selected-note strict expiry boundary","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
+  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,coordinator_expiry_txid:$coordinator_expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref,"juno-exchange-sdk":$sdk_ref},checks:["clean source provenance","one-time installation init","separate loopback public and private ports","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege public and coordinator authentication","wallet isolation","network-disabled UDS signer","mandatory seed-to-UFVK binding","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","Node SDK programmatic create","coordinator durable attempt","selected-note reservation","selected-note unspent reconciliation","selected-note unknown and wallet isolation","signed raw hex return","SDK programmatic broadcast","prevalidated raw broadcast","idempotent create and broadcast replay","same-key payload conflict","outgoing wallet effects","registered coordinator change scope","coordinator broadcast, mined, and final lifecycle","selected-note pending and spent lifecycle","mined pending-spend release","withdrawal expiry and drop","selected-note strict expiry boundary","coordinator expired-material rejection","coordinator post-expiry finality hold","coordinator proven-unspent release","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg","joint database-loss guard","audited registry recovery","explicit high-water recovery"]}' \
   >"$run_dir/summary.json"
 
 log "PASS"
