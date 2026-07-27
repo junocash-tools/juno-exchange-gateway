@@ -15,9 +15,9 @@ jq -e '
   .api.http_version == "v1" and
   .api.openapi_version == "3.1.0" and
   .api.contract_version == "1.0.0" and
-  .api.installation_manifest_version == 1 and
+  .api.installation_manifest_version == 2 and
   .api.release_provenance_version == 1 and
-  .state_schemas.gateway_sqlite == 3 and
+  .state_schemas.gateway_sqlite == 4 and
   .state_schemas.scanner_migrations_through == "0016" and
   .supported_networks == ["mainnet", "testnet", "regtest"] and
   .supported_platforms.appliance_native == ["linux/amd64"] and
@@ -120,14 +120,28 @@ check_equal JUNO_TXBUILD_REF "$(workflow_value JUNO_TXBUILD_REF)" "$(jq -r '.com
 check_equal JUNO_TXSIGN_REPO "$(workflow_value JUNO_TXSIGN_REPO)" "$(jq -r '.components.txsign.repository' bundle.lock.json)"
 check_equal JUNO_TXSIGN_REF "$(workflow_value JUNO_TXSIGN_REF)" "$(jq -r '.components.txsign.revision' bundle.lock.json)"
 check_equal docker_gateway_JUNO_ADDRGEN_REF "$(docker_arg_value JUNO_ADDRGEN_REF docker/gateway/Dockerfile)" "$(jq -r '.components.addrgen.revision' bundle.lock.json)"
+check_equal docker_gateway_JUNO_TXBUILD_REF "$(docker_arg_value JUNO_TXBUILD_REF docker/gateway/Dockerfile)" "$(jq -r '.components.txbuild.revision' bundle.lock.json)"
 check_equal docker_txbuild_JUNO_TXBUILD_REF "$(docker_arg_value JUNO_TXBUILD_REF docker/txbuild/Dockerfile)" "$(jq -r '.components.txbuild.revision' bundle.lock.json)"
 check_equal docker_txsign_JUNO_TXSIGN_REF "$(docker_arg_value JUNO_TXSIGN_REF docker/txsign/Dockerfile)" "$(jq -r '.components.txsign.revision' bundle.lock.json)"
+check_equal env_JUNO_TXBUILD_REPO "$(env_value JUNO_TXBUILD_REPO)" "$(jq -r '.components.txbuild.repository' bundle.lock.json)"
+check_equal env_JUNO_TXSIGN_REPO "$(env_value JUNO_TXSIGN_REPO)" "$(jq -r '.components.txsign.repository' bundle.lock.json)"
+
+grep -Fq 'COPY --from=txbuild-go /out/juno-txbuild /usr/local/bin/juno-txbuild' docker/gateway/Dockerfile
+grep -Fq 'COPY --from=txbuild-rust /src/rust/txbuild/target/release/libjuno_txbuild.so /usr/local/lib/libjuno_txbuild.so' docker/gateway/Dockerfile
+[[ "$(grep -c '^RUN ldconfig$' docker/gateway/Dockerfile)" -eq 1 ]]
+[[ "$(grep -c '^RUN ldconfig$' docker/txbuild/Dockerfile)" -eq 1 ]]
+[[ "$(grep -c '^RUN ldconfig$' docker/txsign/Dockerfile)" -eq 1 ]]
+grep -Fq 'USER 10001:10001' docker/txsign/Dockerfile
+grep -Fq 'install -d -o 10001 -g 10001 -m 0700 /run/juno-signer' docker/txsign/Dockerfile
+grep -Fq 'COPY --chmod=0755 docker/txsign/entrypoint.sh /usr/local/bin/juno-txsign-container-entrypoint' docker/txsign/Dockerfile
+git check-ignore -q config/seed.b64
+git check-ignore -q config/signer-bindings.json
 
 for component_ref in \
   'JUNO_ADDRGEN_REF:addrgen:2' \
   'JUNO_SCAN_REF:scanner:1' \
-  'JUNO_TXBUILD_REF:txbuild:2' \
-  'JUNO_TXSIGN_REF:txsign:1'; do
+  'JUNO_TXBUILD_REF:txbuild:3' \
+  'JUNO_TXSIGN_REF:txsign:2'; do
   IFS=: read -r key component compose_count <<<"$component_ref"
   expected="$(jq -r ".components.$component.revision" bundle.lock.json)"
   check_equal "env_${key}" "$(env_value "$key")" "$expected"

@@ -1,0 +1,11 @@
+{
+  "version": "v1",
+  "bindings": [
+    {
+      "wallet_id": "exchange-hot",
+      "account": 0,
+      "network": "regtest",
+      "ufvk": "jviewregtest1replace-with-the-exact-wallet-ufvk"
+    }
+  ]
+}

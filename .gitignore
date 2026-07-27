@@ -4,6 +4,8 @@
 .env
 config/auth.json
 config/wallets.json
+config/seed.b64
+config/signer-bindings.json
 *.db
 *.db-shm
 *.db-wal

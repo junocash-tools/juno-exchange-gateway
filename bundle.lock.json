@@ -8,11 +8,11 @@
     "http_version": "v1",
     "openapi_version": "3.1.0",
     "contract_version": "1.0.0",
-    "installation_manifest_version": 1,
+    "installation_manifest_version": 2,
     "release_provenance_version": 1
   },
   "state_schemas": {
-    "gateway_sqlite": 3,
+    "gateway_sqlite": 4,
     "scanner_migrations_through": "0016"
   },
   "supported_networks": [
@@ -60,11 +60,11 @@
     },
     "txbuild": {
       "repository": "https://github.com/junocash-tools/juno-txbuild.git",
-      "revision": "40a185c38d8e0767fa5d98bf1967c7e64e544984"
+      "revision": "05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a"
     },
     "txsign": {
       "repository": "https://github.com/junocash-tools/juno-txsign.git",
-      "revision": "4459cd827062c8d317970e48e7ed5e2e4d0f5c6b"
+      "revision": "121ef749383e27fb82c302e96cd55b70611817fc"
     }
   },
   "node_artifact": {

@@ -32,6 +32,8 @@ for network in regtest testnet mainnet; do
     and (.services.gateway.ports | length) == 1
     and .services.gateway.ports[0].target == 8080
     and .services.gateway.ports[0].host_ip == "127.0.0.1"
+    and ((.services.gateway.environment.JUNO_COORDINATOR_ENABLED // "false") == "false")
+    and (.services | has("txsign") | not)
     and ((.services["juno-scan"].ports // []) | length) == 0
     and ((.services.junocashd.ports // []) | length) == 0
     and .networks.backend.internal == true
@@ -40,6 +42,51 @@ for network in regtest testnet mainnet; do
     and .networks.ingress.driver_opts["com.docker.network.bridge.enable_ip_masquerade"] == "false"
     and .networks.ingress.driver_opts["com.docker.network.bridge.enable_icc"] == "false"
   ' "tmp/compose-${network}.json" >/dev/null
+
+  JUNO_NETWORK="$network" docker compose \
+    -f compose.yaml \
+    -f compose.automation.yaml \
+    config >"tmp/compose-${network}-automation.yaml"
+  JUNO_NETWORK="$network" docker compose \
+    -f compose.yaml \
+    -f compose.automation.yaml \
+    config --format json >"tmp/compose-${network}-automation.json"
+  jq -e --arg network "$network" '
+    (.services.gateway.networks | keys | sort) == ["backend", "ingress"]
+    and .services.gateway.environment.JUNO_GATEWAY_NETWORK == $network
+    and .services.gateway.environment.JUNO_COORDINATOR_ENABLED == "true"
+    and .services.gateway.environment.JUNO_COORDINATOR_LISTEN == "0.0.0.0:8081"
+    and .services.gateway.environment.JUNO_COORDINATOR_TXBUILD_PATH == "/usr/local/bin/juno-txbuild"
+    and .services.gateway.environment.JUNO_COORDINATOR_SIGNER_SOCKET == "/run/juno-signer/signer.sock"
+    and (.services.gateway.ports | length) == 2
+    and ([.services.gateway.ports[].target] | sort) == [8080, 8081]
+    and all(.services.gateway.ports[]; .host_ip == "127.0.0.1")
+    and .services.gateway.depends_on.txsign.condition == "service_healthy"
+    and ([.services.gateway.volumes[] | select(.target == "/run/juno-signer") | .source] == ["signer-socket"])
+    and ([.services.gateway.volumes[] | select(.target | startswith("/run/juno-txsign-secrets") or startswith("/var/lib/juno-txsign"))] | length) == 0
+    and .services.txsign.network_mode == "none"
+    and (((.services.txsign.networks // {}) | length) == 0)
+    and (((.services.txsign.ports // []) | length) == 0)
+    and (((.services.txsign.expose // []) | length) == 0)
+    and .services.txsign.read_only == true
+    and ((.services.txsign.init // false) == false)
+    and .services.txsign.user == "0:0"
+    and .services.txsign.entrypoint == ["/usr/local/bin/juno-txsign-container-entrypoint"]
+    and ([.services.txsign.cap_drop[]] == ["ALL"])
+    and ([.services.txsign.cap_add[]] | sort) == ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]
+    and ([.services.txsign.volumes[] | .target] | sort) == [
+      "/run/host-secrets/bindings.json",
+      "/run/host-secrets/seed.b64",
+      "/run/juno-signer",
+      "/var/lib/juno-txsign/results"
+    ]
+    and all(.services.txsign.volumes[] | select(.type == "bind"); .read_only == true)
+    and (.services.txsign.command | index("serve-txplan")) != null
+    and (.services.txsign.command | index("--bindings-file")) != null
+    and (.services.txsign.command | index("--seed-file")) != null
+    and (.services.txsign.healthcheck.test | index("--unix-socket")) != null
+    and (.services.txsign.healthcheck.test | index("/run/juno-signer/signer.sock")) != null
+  ' "tmp/compose-${network}-automation.json" >/dev/null
 done
 
 JUNO_NETWORK=mainnet docker compose \
@@ -60,4 +107,16 @@ JUNO_NETWORK=regtest docker compose \
 jq -e '(.services.txbuild.networks | keys) == ["backend"]' \
   tmp/compose-regtest-operator.json >/dev/null
 
-echo "compose config: regtest, testnet, mainnet, Postgres, and operator profile passed"
+JUNO_NETWORK=regtest docker compose \
+  --profile automation \
+  -f compose.yaml \
+  -f compose.automation.yaml \
+  -f compose.dev.yaml \
+  config --format json >tmp/compose-regtest-automation-dev.json
+jq -e '
+  .services.gateway.build.dockerfile == "docker/gateway/Dockerfile"
+  and .services.txsign.build.dockerfile == "docker/txsign/Dockerfile"
+  and .services.txsign.image == "juno-exchange-gateway/txsign:dev"
+' tmp/compose-regtest-automation-dev.json >/dev/null
+
+echo "compose config: regtest, testnet, mainnet, automation, Postgres, and operator profile passed"

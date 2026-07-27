@@ -29,6 +29,12 @@
       "token_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
       "scopes": ["read", "withdrawal"],
       "wallets": ["exchange-hot"]
+    },
+    {
+      "name": "withdrawal-planner",
+      "token_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "scopes": ["plan"],
+      "wallets": ["exchange-hot"]
     }
   ]
 }

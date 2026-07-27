@@ -21,11 +21,13 @@ services:
       dockerfile: docker/gateway/Dockerfile
       args:
         JUNO_ADDRGEN_REF: ${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}
+        JUNO_TXBUILD_REPO: ${JUNO_TXBUILD_REPO:-https://github.com/junocash-tools/juno-txbuild.git}
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a}
         VERSION: ${JUNO_GATEWAY_VERSION:-dev}
         REVISION: ${JUNO_GATEWAY_REVISION:-local}
         BUILD_TIME: ${JUNO_GATEWAY_BUILD_TIME:-}
         COMPONENTS_JSON: >-
-          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-3f6009fe16d15faa0da5a8962e0f5dad30307135}","juno-txbuild":"${JUNO_TXBUILD_REF:-40a185c38d8e0767fa5d98bf1967c7e64e544984}","juno-txsign":"${JUNO_TXSIGN_REF:-4459cd827062c8d317970e48e7ed5e2e4d0f5c6b}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
+          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-3f6009fe16d15faa0da5a8962e0f5dad30307135}","juno-txbuild":"${JUNO_TXBUILD_REF:-05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a}","juno-txsign":"${JUNO_TXSIGN_REF:-121ef749383e27fb82c302e96cd55b70611817fc}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
 
   txbuild:
     image: juno-exchange-gateway/txbuild:dev
@@ -33,4 +35,15 @@ services:
       context: .
       dockerfile: docker/txbuild/Dockerfile
       args:
-        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-40a185c38d8e0767fa5d98bf1967c7e64e544984}
+        JUNO_TXBUILD_REPO: ${JUNO_TXBUILD_REPO:-https://github.com/junocash-tools/juno-txbuild.git}
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a}
+
+  txsign:
+    profiles: ["automation"]
+    image: juno-exchange-gateway/txsign:dev
+    build:
+      context: .
+      dockerfile: docker/txsign/Dockerfile
+      args:
+        JUNO_TXSIGN_REPO: ${JUNO_TXSIGN_REPO:-https://github.com/junocash-tools/juno-txsign.git}
+        JUNO_TXSIGN_REF: ${JUNO_TXSIGN_REF:-121ef749383e27fb82c302e96cd55b70611817fc}

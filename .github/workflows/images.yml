@@ -25,9 +25,9 @@ env:
   JUNO_ADDRGEN_REPO: https://github.com/junocash-tools/juno-addrgen.git
   JUNO_ADDRGEN_REF: 4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834
   JUNO_TXBUILD_REPO: https://github.com/junocash-tools/juno-txbuild.git
-  JUNO_TXBUILD_REF: 40a185c38d8e0767fa5d98bf1967c7e64e544984
+  JUNO_TXBUILD_REF: 05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a
   JUNO_TXSIGN_REPO: https://github.com/junocash-tools/juno-txsign.git
-  JUNO_TXSIGN_REF: 4459cd827062c8d317970e48e7ed5e2e4d0f5c6b
+  JUNO_TXSIGN_REF: 121ef749383e27fb82c302e96cd55b70611817fc
   JUNOCASH_VERSION: 0.9.12
   JUNOCASH_LINUX64_SHA256: 41f74d61feb9a4284a4200b1fc163ecd072da3314a25db7222522f2e548ec386
 
@@ -347,7 +347,7 @@ jobs:
             -e "s|^JUNO_NODE_IMAGE=.*|JUNO_NODE_IMAGE=$(image_ref node)|" \
             -e "s|^JUNO_SCAN_REF=.*|JUNO_SCAN_REF=${JUNO_SCAN_REF}|" \
             "$bundle_dir/release.env"
-          cp compose.yaml compose.postgres.yaml bundle.lock.json "$bundle_dir/"
+          cp compose.yaml compose.automation.yaml compose.postgres.yaml bundle.lock.json "$bundle_dir/"
           cp config/*.example.json "$bundle_dir/config/"
           (
             cd release
@@ -355,7 +355,7 @@ jobs:
           )
           archive="release/juno-exchange-gateway-${version}.tar.gz"
           [[ "$(tar -tzf "$archive" | cut -d/ -f1 | sort -u)" == "juno-exchange-gateway-${version}" ]]
-          for required in compose.yaml compose.postgres.yaml release.env bundle.lock.json config/auth.example.json config/wallets.example.json; do
+          for required in compose.yaml compose.automation.yaml compose.postgres.yaml release.env bundle.lock.json config/auth.example.json config/signer-bindings.example.json config/wallets.example.json; do
             tar -tzf "$archive" "juno-exchange-gateway-${version}/${required}" >/dev/null
           done
           rm -rf "$bundle_dir"

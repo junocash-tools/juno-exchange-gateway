@@ -1,0 +1,94 @@
+services:
+  gateway:
+    depends_on:
+      txsign:
+        condition: service_healthy
+    environment:
+      JUNO_COORDINATOR_ENABLED: ${JUNO_COORDINATOR_ENABLED:-true}
+      JUNO_COORDINATOR_LISTEN: 0.0.0.0:8081
+      JUNO_COORDINATOR_TXBUILD_PATH: /usr/local/bin/juno-txbuild
+      JUNO_COORDINATOR_SIGNER_SOCKET: /run/juno-signer/signer.sock
+      JUNO_COORDINATOR_WORK_DIR: /var/lib/juno-gateway/coordinator-work
+      JUNO_COORDINATOR_PLAN_TIMEOUT: ${JUNO_COORDINATOR_PLAN_TIMEOUT:-2m}
+      JUNO_COORDINATOR_SIGN_TIMEOUT: ${JUNO_COORDINATOR_SIGN_TIMEOUT:-10m}
+      JUNO_COORDINATOR_MAX_BODY_BYTES: ${JUNO_COORDINATOR_MAX_BODY_BYTES:-1048576}
+      JUNO_COORDINATOR_MAX_OUTPUTS: ${JUNO_COORDINATOR_MAX_OUTPUTS:-199}
+      JUNO_COORDINATOR_MAX_AMOUNT_ZAT: ${JUNO_COORDINATOR_MAX_AMOUNT_ZAT:-2100000000000000}
+      JUNO_COORDINATOR_EXPIRY_OFFSET: ${JUNO_COORDINATOR_EXPIRY_OFFSET:-40}
+      JUNO_COORDINATOR_FEE_MULTIPLIER: ${JUNO_COORDINATOR_FEE_MULTIPLIER:-20}
+      JUNO_COORDINATOR_FEE_ADD_ZAT: ${JUNO_COORDINATOR_FEE_ADD_ZAT:-0}
+      JUNO_COORDINATOR_MIN_NOTE_ZAT: ${JUNO_COORDINATOR_MIN_NOTE_ZAT:-0}
+      JUNO_COORDINATOR_MIN_CHANGE_ZAT: ${JUNO_COORDINATOR_MIN_CHANGE_ZAT:-0}
+      JUNO_COORDINATOR_MAX_REPLANS: ${JUNO_COORDINATOR_MAX_REPLANS:-3}
+      JUNO_COORDINATOR_RATE_RPS: ${JUNO_COORDINATOR_RATE_RPS:-5}
+      JUNO_COORDINATOR_RATE_BURST: ${JUNO_COORDINATOR_RATE_BURST:-10}
+    ports:
+      - "${JUNO_COORDINATOR_BIND:-127.0.0.1}:${JUNO_COORDINATOR_PORT:-8081}:8081"
+    volumes:
+      - signer-socket:/run/juno-signer
+
+  txsign:
+    image: ${JUNO_TXSIGN_IMAGE:-ghcr.io/junocash-tools/juno-exchange-gateway-txsign:main}
+    restart: unless-stopped
+    stop_grace_period: 11m
+    network_mode: none
+    user: "0:0"
+    entrypoint:
+      - /usr/local/bin/juno-txsign-container-entrypoint
+    command:
+      - serve-txplan
+      - --socket
+      - /run/juno-signer/signer.sock
+      - --journal-dir
+      - /var/lib/juno-txsign/results
+      - --seed-file
+      - /run/juno-txsign-secrets/seed.b64
+      - --bindings-file
+      - /run/juno-txsign-secrets/bindings.json
+      - --max-concurrency
+      - ${JUNO_TXSIGN_MAX_CONCURRENCY:-1}
+      - --max-body-bytes
+      - ${JUNO_TXSIGN_MAX_BODY_BYTES:-5242880}
+      - --max-plan-bytes
+      - ${JUNO_TXSIGN_MAX_PLAN_BYTES:-3145728}
+      - --shutdown-timeout
+      - ${JUNO_TXSIGN_SHUTDOWN_TIMEOUT:-10m}
+    volumes:
+      - signer-socket:/run/juno-signer
+      - signer-journal:/var/lib/juno-txsign/results
+      - type: bind
+        source: ${JUNO_TXSIGN_SEED_FILE:-./config/seed.b64}
+        target: /run/host-secrets/seed.b64
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${JUNO_TXSIGN_BINDINGS_FILE:-./config/signer-bindings.json}
+        target: /run/host-secrets/bindings.json
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/juno-txsign-secrets:size=64k,mode=0700
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--unix-socket", "/run/juno-signer/signer.sock", "http://localhost/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
+
+volumes:
+  signer-socket: {}
+  signer-journal: {}
