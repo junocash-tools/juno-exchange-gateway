@@ -11,6 +11,7 @@ repositories=(
   "txbuild:$workspace_root/juno-txbuild"
   "txsign:$workspace_root/juno-txsign"
   "keys:$workspace_root/juno-keys"
+  "sdk:$workspace_root/juno-exchange-sdk"
 )
 
 failed=0
