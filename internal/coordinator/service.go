@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	workerCount       = 4
-	recoveryBatchSize = 1000
-	recoveryInterval  = 5 * time.Second
+	workerCount                 = 4
+	recoveryBatchSize           = 1000
+	recoveryInterval            = 5 * time.Second
+	signingUnknownRetryInterval = time.Minute
 )
 
 type AddressAllocator func(context.Context, string, string) (storage.Address, error)
@@ -210,15 +211,22 @@ func (s *Service) scheduleRecoverable(ctx context.Context) {
 		s.recoveryAfter = ""
 		return
 	}
-	enqueued := 0
+	processed := 0
 	for _, value := range values {
+		previousAfter := s.recoveryAfter
+		if value.State == "signing_unknown" && time.Since(value.UpdatedAt) < signingUnknownRetryInterval {
+			s.recoveryAfter = value.AttemptID
+			processed++
+			continue
+		}
 		if !s.enqueue(value.AttemptID) {
+			s.recoveryAfter = previousAfter
 			break
 		}
 		s.recoveryAfter = value.AttemptID
-		enqueued++
+		processed++
 	}
-	if enqueued == len(values) && len(values) < limit {
+	if processed == len(values) && len(values) < limit {
 		s.recoveryAfter = ""
 	}
 }
@@ -354,6 +362,7 @@ func (s *Service) planAttempt(ctx context.Context, initial storage.TransactionAt
 }
 
 func (s *Service) signAttempt(ctx context.Context, initial storage.TransactionAttempt) bool {
+	uncertainBeforeCall := initial.State == "signing" || initial.State == "signing_unknown"
 	request, wallet, err := s.decodeRequest(initial)
 	if err != nil {
 		s.markSigningUnknown(ctx, initial.AttemptID, "stored_request_invalid", err.Error(), false)
@@ -380,6 +389,10 @@ func (s *Service) signAttempt(ctx context.Context, initial storage.TransactionAt
 		var operation *operationError
 		if !errors.As(signErr, &operation) {
 			operation = &operationError{Code: "signer_unavailable", Message: "signer result is unknown; notes remain reserved", Retryable: true, OutcomeUnknown: true}
+		}
+		if uncertainBeforeCall {
+			s.markSigningUnknown(ctx, signing.AttemptID, operation.Code, operation.Message, operation.Retryable)
+			return false
 		}
 		if operation.OutcomeUnknown {
 			s.markSigningUnknown(ctx, signing.AttemptID, operation.Code, operation.Message, operation.Retryable)
@@ -413,6 +426,11 @@ func (s *Service) reconcileAttempt(ctx context.Context, attempt storage.Transact
 	if found {
 		switch tx.State {
 		case "mempool":
+			if s.pastExpiry(ctx, attempt) {
+				s.transition(ctx, attempt, "expired_pending_reconciliation", false)
+				attempt.State = "expired_pending_reconciliation"
+				break
+			}
 			s.transition(ctx, attempt, "broadcast", false)
 			return
 		case "confirmed":
@@ -425,18 +443,31 @@ func (s *Service) reconcileAttempt(ctx context.Context, attempt storage.Transact
 		case "orphaned":
 			s.transition(ctx, attempt, "orphaned", false)
 			attempt.State = "orphaned"
+			if s.pastExpiry(ctx, attempt) {
+				s.transition(ctx, attempt, "expired_pending_reconciliation", false)
+				attempt.State = "expired_pending_reconciliation"
+			}
 		case "expired":
 			s.transition(ctx, attempt, "expired_pending_reconciliation", false)
 			attempt.State = "expired_pending_reconciliation"
 		default:
 			return
 		}
-	}
-	if attempt.State == "signed" || attempt.State == "broadcast" || attempt.State == "mined" {
-		// Absence alone never releases notes. It only becomes actionable after
-		// the exact expiry window and finality depth have passed.
+	} else if s.pastExpiry(ctx, attempt) {
+		s.transition(ctx, attempt, "expired_pending_reconciliation", false)
+		attempt.State = "expired_pending_reconciliation"
 	}
 	s.reconcileExpired(ctx, attempt)
+}
+
+func (s *Service) pastExpiry(ctx context.Context, attempt storage.TransactionAttempt) bool {
+	if attempt.ExpiryHeight <= 0 || attempt.ExpiryHeight > int64(^uint32(0)) {
+		return false
+	}
+	tipCtx, cancel := context.WithTimeout(ctx, s.cfg.UpstreamTimeout)
+	defer cancel()
+	tip, err := s.node.Tip(tipCtx)
+	return err == nil && tip.Network == s.cfg.Network.NodeChain() && !tip.InitialBlockDownload && tip.Height > attempt.ExpiryHeight
 }
 
 func (s *Service) reconcileFinal(ctx context.Context, attempt storage.TransactionAttempt) {

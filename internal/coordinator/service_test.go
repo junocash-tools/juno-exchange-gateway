@@ -89,6 +89,68 @@ func TestServiceRecoversUnknownSigningOutcomeWithoutReplanning(t *testing.T) {
 	}
 }
 
+func TestServiceKeepsPriorSigningUncertaintySticky(t *testing.T) {
+	t.Run("unknown retry returns busy", func(t *testing.T) {
+		cfg, store := coordinatorTestConfig(t)
+		noteID := fmt.Sprintf("%064x:0", 31)
+		signer := &fakeSigner{signErrors: []error{
+			&operationError{Code: "signing_outcome_unknown", Message: "first response was lost", Retryable: true, OutcomeUnknown: true},
+			&operationError{Code: "signer_busy", Message: "journal is busy", Retryable: true},
+		}}
+		service := newCoordinatorTestService(t, cfg, store, &fakePlanner{notes: []string{noteID}}, signer)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		service.Start(ctx)
+
+		created, _, err := service.Create(ctx, "exchange", "withdrawal-31-attempt-1", coordinatorRequest("310000"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitAttemptState(t, service, "exchange", created.AttemptID, "signing_unknown")
+		service.enqueue(created.AttemptID)
+		waitSignerCallCount(t, signer, 2)
+		unknown := waitAttemptState(t, service, "exchange", created.AttemptID, "signing_unknown")
+		if unknown.Error == nil || unknown.Error.Code != "signer_busy" {
+			t.Fatalf("unknown attempt=%+v", unknown)
+		}
+		if active, _ := store.ActiveNoteIDs(ctx, "regtest", "hot"); len(active) != 1 || active[0] != noteID {
+			t.Fatalf("unknown reservations=%v", active)
+		}
+	})
+
+	t.Run("recovered signing returns plan rejection", func(t *testing.T) {
+		cfg, store := coordinatorTestConfig(t)
+		noteID := fmt.Sprintf("%064x:0", 32)
+		signer := &fakeSigner{signErrors: []error{
+			&operationError{Code: "plan_not_allowed", Message: "current retry rejected the plan", Retryable: false},
+		}}
+		service := newCoordinatorTestService(t, cfg, store, &fakePlanner{notes: []string{noteID}}, signer)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		created, _, err := service.Create(ctx, "exchange", "withdrawal-32-attempt-1", coordinatorRequest("320000"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, found, err := store.Attempt(ctx, created.AttemptID)
+		if err != nil || !found || !service.planAttempt(ctx, stored) {
+			t.Fatalf("planning attempt=%+v found=%v err=%v", stored, found, err)
+		}
+		if _, err := store.BeginAttemptSigning(ctx, created.AttemptID, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		service.Start(ctx)
+		waitSignerCallCount(t, signer, 1)
+		unknown := waitAttemptState(t, service, "exchange", created.AttemptID, "signing_unknown")
+		if unknown.Error == nil || unknown.Error.Code != "plan_not_allowed" {
+			t.Fatalf("unknown attempt=%+v", unknown)
+		}
+		if active, _ := store.ActiveNoteIDs(ctx, "regtest", "hot"); len(active) != 1 || active[0] != noteID {
+			t.Fatalf("unknown reservations=%v", active)
+		}
+	})
+}
+
 func TestServiceReleasesReservationsOnlyAfterFinalityOrExpiryProof(t *testing.T) {
 	t.Run("confirmed finality", func(t *testing.T) {
 		cfg, store := coordinatorTestConfig(t)
@@ -148,12 +210,44 @@ func TestServiceReleasesReservationsOnlyAfterFinalityOrExpiryProof(t *testing.T)
 			t.Fatal(err)
 		}
 		signed := waitAttemptState(t, service, "exchange", created.AttemptID, "signed")
-		hash := fmt.Sprintf("%064x", 240)
-		node.setTip(domain.NodeTip{Network: "regtest", Height: 240, Hash: hash})
+		boundaryHash := fmt.Sprintf("%064x", 140)
+		node.setTip(domain.NodeTip{Network: "regtest", Height: 140, Hash: boundaryHash})
+		service.enqueue(signed.AttemptID)
+		time.Sleep(50 * time.Millisecond)
+		if boundary, err := service.Attempt(ctx, "exchange", signed.AttemptID); err != nil || boundary.State != "signed" {
+			t.Fatalf("attempt expired at its valid boundary: attempt=%+v err=%v", boundary, err)
+		}
+		expiredHash := fmt.Sprintf("%064x", 141)
+		node.setTip(domain.NodeTip{Network: "regtest", Height: 141, Hash: expiredHash})
+		service.enqueue(signed.AttemptID)
+		waitAttemptState(t, service, "exchange", signed.AttemptID, "expired_pending_reconciliation")
+		if active, _ := store.ActiveNoteIDs(ctx, "regtest", "hot"); len(active) != 1 {
+			t.Fatalf("expired-pending reservations=%v", active)
+		}
+
+		hash := fmt.Sprintf("%064x", 239)
+		node.setTip(domain.NodeTip{Network: "regtest", Height: 239, Hash: hash})
 		ready, complete, pendingReady := true, true, true
 		confirmations := int64(100)
-		height := int64(240)
+		height := int64(239)
 		sourceHeight, value := int64(1), int64(700000)
+		scanner.setProof(domain.ScannerHealth{Status: "ok", Network: "regtest", UAHRP: "jregtest", Confirmations: &confirmations, Ready: &ready, HistoryComplete: &complete,
+			PendingSpendsReady: &pendingReady, ScannedHeight: &height, ScannedHash: hash}, domain.WalletNoteStatuses{
+			WalletID: "hot", EventEpoch: fmt.Sprintf("%064x", 1), AsOfScannerHeight: height, AsOfScannerHash: hash,
+			Statuses: []domain.NoteStatus{{NoteID: noteID, State: "unspent", SourceHeight: &sourceHeight, ValueZat: &value}},
+		})
+		service.enqueue(signed.AttemptID)
+		time.Sleep(50 * time.Millisecond)
+		if pending, err := service.Attempt(ctx, "exchange", signed.AttemptID); err != nil || pending.State != "expired_pending_reconciliation" {
+			t.Fatalf("attempt released before expiry finality: attempt=%+v err=%v", pending, err)
+		}
+		if active, _ := store.ActiveNoteIDs(ctx, "regtest", "hot"); len(active) != 1 {
+			t.Fatalf("pre-release reservations=%v", active)
+		}
+
+		hash = fmt.Sprintf("%064x", 240)
+		height = 240
+		node.setTip(domain.NodeTip{Network: "regtest", Height: height, Hash: hash})
 		scanner.setProof(domain.ScannerHealth{Status: "ok", Network: "regtest", UAHRP: "jregtest", Confirmations: &confirmations, Ready: &ready, HistoryComplete: &complete,
 			PendingSpendsReady: &pendingReady, ScannedHeight: &height, ScannedHash: hash}, domain.WalletNoteStatuses{
 			WalletID: "hot", EventEpoch: fmt.Sprintf("%064x", 1), AsOfScannerHeight: height, AsOfScannerHash: hash,
@@ -209,6 +303,53 @@ func TestCoordinatorHTTPRequiresPlanCredentialAndUsesStableEnvelope(t *testing.T
 	handler.ServeHTTP(getRecorder, get)
 	if getRecorder.Code != http.StatusOK || !strings.Contains(getRecorder.Body.String(), envelope.Data.AttemptID) {
 		t.Fatalf("get status=%d body=%s", getRecorder.Code, getRecorder.Body.String())
+	}
+}
+
+func TestCoordinatorHTTPForbiddenCancelDoesNotReleaseReservation(t *testing.T) {
+	cfg, store := coordinatorTestConfig(t)
+	token := "regtest-revoked-wallet-token-123456"
+	cfg.Credentials = []config.Credential{{Name: "exchange", TokenHash: sha256.Sum256([]byte(token)), Scopes: []string{"plan"}, Wallets: []string{"cold"}}}
+	service := newCoordinatorTestService(t, cfg, store, &fakePlanner{}, &fakeSigner{})
+	handler, err := NewHandler(cfg, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	attemptID := "txn_0123456789abcdef0123456789abcdef"
+	claim, err := store.ClaimAttempt(context.Background(), storage.TransactionAttempt{
+		AttemptID:            attemptID,
+		ScopedIdempotencyKey: "exchange\x00withdrawal-revoked-wallet-1",
+		RequestDigest:        "sha256:request",
+		PrincipalName:        "exchange",
+		WalletID:             "hot",
+		ApprovalReference:    "withdrawal:revoked-wallet",
+		RequestJSON:          []byte(`{"wallet_id":"hot"}`),
+		CreatedAt:            now,
+	})
+	if err != nil || claim.State != storage.ClaimAcquired {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	noteID := fmt.Sprintf("%064x:0", 44)
+	if err := store.ReserveAttemptPlan(context.Background(), attemptID, "regtest", []byte(`{"version":"v0"}`), "sha256:plan", "200000", 140, []string{noteID}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/transaction-attempts/"+attemptID+"/cancel", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	stored, found, err := store.Attempt(context.Background(), attemptID)
+	if err != nil || !found || stored.State != "reserved" {
+		t.Fatalf("attempt=%+v found=%v err=%v", stored, found, err)
+	}
+	active, err := store.ActiveNoteIDs(context.Background(), "regtest", "hot")
+	if err != nil || len(active) != 1 || active[0] != noteID {
+		t.Fatalf("active reservations=%v err=%v", active, err)
 	}
 }
 
@@ -341,12 +482,18 @@ type fakeSigner struct {
 	mu          sync.Mutex
 	callCount   int
 	unknownOnce bool
+	signErrors  []error
 }
 
 func (s *fakeSigner) Sign(_ context.Context, _ string, plan planResult) (signerResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.callCount++
+	if len(s.signErrors) > 0 {
+		err := s.signErrors[0]
+		s.signErrors = s.signErrors[1:]
+		return signerResult{}, err
+	}
 	if s.unknownOnce {
 		s.unknownOnce = false
 		return signerResult{}, &operationError{Code: "signing_outcome_unknown", Message: "test outcome unknown", Retryable: true, OutcomeUnknown: true}
@@ -360,6 +507,18 @@ func (s *fakeSigner) calls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.callCount
+}
+
+func waitSignerCallCount(t *testing.T, signer *fakeSigner, expected int) {
+	t.Helper()
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if signer.calls() >= expected {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("signer calls=%d, expected at least %d", signer.calls(), expected)
 }
 func uint32Pointer(value uint32) *uint32 { return &value }
 

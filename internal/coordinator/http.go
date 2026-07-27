@@ -182,13 +182,18 @@ func (h *Handler) handleCancel(w http.ResponseWriter, r *http.Request, requestID
 			return
 		}
 	}
-	attempt, err := h.service.Cancel(r.Context(), principal.name, attemptID)
+	attempt, err := h.service.Attempt(r.Context(), principal.name, attemptID)
 	if err != nil {
 		h.writeOperationError(w, requestID, err)
 		return
 	}
 	if !principal.hasWallet(attempt.WalletID) {
 		h.writeError(w, http.StatusForbidden, requestID, "forbidden", "credential is not authorized for this wallet", false)
+		return
+	}
+	attempt, err = h.service.Cancel(r.Context(), principal.name, attemptID)
+	if err != nil {
+		h.writeOperationError(w, requestID, err)
 		return
 	}
 	h.writeData(w, http.StatusOK, requestID, attempt)

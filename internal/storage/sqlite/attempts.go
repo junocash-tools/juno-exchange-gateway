@@ -215,9 +215,12 @@ func (s *Store) BeginAttemptSigning(ctx context.Context, attemptID string, now t
 		return storage.TransactionAttempt{}, err
 	}
 	switch attempt.State {
-	case "signing":
+	case "signing", "signing_unknown":
+		// A recovered request may already have reached the signer. Keep its
+		// uncertainty sticky while replaying the exact journal key; do not emit
+		// another state event for every recovery poll.
 		return attempt, nil
-	case "reserved", "signing_unknown":
+	case "reserved":
 	default:
 		return storage.TransactionAttempt{}, storage.ErrAttemptStateConflict
 	}
@@ -295,8 +298,9 @@ func (s *Store) MarkAttemptState(ctx context.Context, attemptID, state, code, me
 		return fmt.Errorf("begin transaction attempt transition: %w", err)
 	}
 	defer tx.Rollback()
-	var current string
-	if err := tx.QueryRowContext(ctx, `SELECT state FROM transaction_attempts WHERE attempt_id=?`, attemptID).Scan(&current); err != nil {
+	var current, currentCode, currentMessage string
+	var currentRetryable bool
+	if err := tx.QueryRowContext(ctx, `SELECT state,COALESCE(error_code,''),COALESCE(error_message,''),error_retryable FROM transaction_attempts WHERE attempt_id=?`, attemptID).Scan(&current, &currentCode, &currentMessage, &currentRetryable); err != nil {
 		return fmt.Errorf("read transaction attempt state: %w", err)
 	}
 	if !allowedAttemptTransition(current, state) {
@@ -306,6 +310,15 @@ func (s *Store) MarkAttemptState(ctx context.Context, attemptID, state, code, me
 		return storage.ErrAttemptStateConflict
 	}
 	stamp := now.UTC().Format(time.RFC3339Nano)
+	if current == state && currentCode == code && currentMessage == message && currentRetryable == retryable {
+		if _, err := tx.ExecContext(ctx, `UPDATE transaction_attempts SET updated_at=? WHERE attempt_id=?`, stamp, attemptID); err != nil {
+			return fmt.Errorf("refresh transaction attempt state: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit transaction attempt state refresh: %w", err)
+		}
+		return nil
+	}
 	if releaseReservations {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM active_note_reservations WHERE attempt_id=?`, attemptID); err != nil {
 			return fmt.Errorf("release transaction attempt notes: %w", err)

@@ -36,18 +36,64 @@ func TestRecoverableAttemptsUsesStableAttemptIDCursor(t *testing.T) {
 	ctx := context.Background()
 	ensureAttemptWallet(t, store)
 	now := time.Now().UTC()
-	for number := 1; number <= 3; number++ {
+	for number := 1; number <= 1001; number++ {
 		if claim, err := store.ClaimAttempt(ctx, testAttempt(number, fmt.Sprintf("scope-%d", number), fmt.Sprintf("digest-%d", number), now)); err != nil || claim.State != storage.ClaimAcquired {
 			t.Fatalf("claim %d=%+v err=%v", number, claim, err)
 		}
 	}
-	first, err := store.RecoverableAttempts(ctx, "", 2)
-	if err != nil || len(first) != 2 || first[0].AttemptID != testAttempt(1, "", "", now).AttemptID || first[1].AttemptID != testAttempt(2, "", "", now).AttemptID {
-		t.Fatalf("first page=%v err=%v", attemptIDs(first), err)
+	first, err := store.RecoverableAttempts(ctx, "", 1000)
+	if err != nil || len(first) != 1000 {
+		t.Fatalf("first page count=%d err=%v", len(first), err)
 	}
-	second, err := store.RecoverableAttempts(ctx, first[1].AttemptID, 2)
-	if err != nil || len(second) != 1 || second[0].AttemptID != testAttempt(3, "", "", now).AttemptID {
+	if first[0].AttemptID != testAttempt(1, "", "", now).AttemptID || first[999].AttemptID != testAttempt(1000, "", "", now).AttemptID {
+		t.Fatalf("first page first=%v last=%v", first[0].AttemptID, first[999].AttemptID)
+	}
+	second, err := store.RecoverableAttempts(ctx, first[999].AttemptID, 1000)
+	if err != nil || len(second) != 1 || second[0].AttemptID != testAttempt(1001, "", "", now).AttemptID {
 		t.Fatalf("second page=%v err=%v", attemptIDs(second), err)
+	}
+}
+
+func TestSigningUnknownRecoveryRefreshDoesNotGrowEvents(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	ensureAttemptWallet(t, store)
+	now := time.Now().UTC()
+	attempt := testAttempt(88, "scope-unknown", "digest-unknown", now)
+	if _, err := store.ClaimAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	noteID := fmt.Sprintf("%064x:0", 88)
+	if err := store.ReserveAttemptPlan(ctx, attempt.AttemptID, "regtest", []byte(`{"plan":88}`), "sha256:unknown", "200000", 140, []string{noteID}, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginAttemptSigning(ctx, attempt.AttemptID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAttemptState(ctx, attempt.AttemptID, "signing_unknown", "signer_busy", "journal is busy", true, false, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var before int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM transaction_attempt_events WHERE attempt_id=?`, attempt.AttemptID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if replay, err := store.BeginAttemptSigning(ctx, attempt.AttemptID, now.Add(3*time.Second)); err != nil || replay.State != "signing_unknown" {
+		t.Fatalf("unknown replay=%+v err=%v", replay, err)
+	}
+	refreshAt := now.Add(time.Minute)
+	if err := store.MarkAttemptState(ctx, attempt.AttemptID, "signing_unknown", "signer_busy", "journal is busy", true, false, refreshAt); err != nil {
+		t.Fatal(err)
+	}
+	var after int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM transaction_attempt_events WHERE attempt_id=?`, attempt.AttemptID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	stored, found, err := store.Attempt(ctx, attempt.AttemptID)
+	if err != nil || !found || !stored.UpdatedAt.Equal(refreshAt) {
+		t.Fatalf("stored=%+v found=%v err=%v", stored, found, err)
+	}
+	if after != before {
+		t.Fatalf("identical recovery grew events: before=%d after=%d", before, after)
 	}
 }
 
