@@ -30,6 +30,8 @@ JSON requests also require `Content-Type: application/json`. Parameters such as 
 
 There are no build, approve, or sign routes on this public listener. Automated creation uses the separately bound [private coordinator API](./coordinator-http.md), normally through the Node.js SDK. The exchange then submits only its signed result to the public broadcast route. See [build, sign, and broadcast](../transactions/build-sign-broadcast.md).
 
+`wallet_id` is an exact, case-sensitive identifier, not a wallet type. The value in a path, query, or JSON body must match a registered `wallets.json[].wallet_id`. The authenticated credential must grant that same ID or `"*"`. The examples use `exchange-hot`, matching the shipped config. `admin` satisfies operation scopes but does not bypass wallet grants. A request for `hot` therefore receives `403 credential is not authorized for this wallet` when only `exchange-hot` is granted.
+
 ## Envelopes
 
 Success:
@@ -62,7 +64,8 @@ Use `error.retryable`, not the status alone. Preserve a valid `X-Request-ID` or 
 | Status | Meaning |
 | --- | --- |
 | `400` | Invalid input |
-| `401` / `403` | Missing authentication or authorization |
+| `401` | Bearer credential is missing or invalid |
+| `403` | Credential lacks the required scope, or grants neither the requested wallet ID nor `"*"` |
 | `404` | Unknown resource |
 | `409` | Safe cursor/history reset or idempotency conflict/in progress |
 | `413` | JSON body exceeds `JUNO_GATEWAY_MAX_JSON_BODY_BYTES`, or broadcast exceeds `JUNO_GATEWAY_MAX_BROADCAST_BODY_BYTES` |

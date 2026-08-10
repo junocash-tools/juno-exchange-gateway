@@ -5,10 +5,11 @@ title: Read owned-address balances
 Balances are available only for addresses allocated by this gateway under the requested registered wallet. Required scope: `read`, with access to that wallet.
 
 ```bash
+WALLET_ID=exchange-hot
 ADDRESS='j1...'
 curl --fail-with-body \
   -H "Authorization: Bearer $GATEWAY_TOKEN" \
-  "$GATEWAY_URL/v1/wallets/hot/addresses/$ADDRESS/balance"
+  "$GATEWAY_URL/v1/wallets/$WALLET_ID/addresses/$ADDRESS/balance"
 ```
 
 The default is `min_confirmations=100`. Override it per request when needed:
@@ -16,7 +17,7 @@ The default is `min_confirmations=100`. Override it per request when needed:
 ```bash
 curl --fail-with-body \
   -H "Authorization: Bearer $GATEWAY_TOKEN" \
-  "$GATEWAY_URL/v1/wallets/hot/addresses/$ADDRESS/balance?min_confirmations=10"
+  "$GATEWAY_URL/v1/wallets/$WALLET_ID/addresses/$ADDRESS/balance?min_confirmations=10"
 ```
 
 The override can be `0` through `JUNO_GATEWAY_MAX_CONFIRMATIONS` (`10000` by default). Keep `100` unless the exchange has an explicit risk policy for a different threshold.
@@ -27,7 +28,7 @@ Example response:
 {
   "status": "ok",
   "data": {
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "address": "j1example",
     "balance": {
       "available_zat": 500000000,

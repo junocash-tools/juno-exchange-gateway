@@ -19,7 +19,9 @@ docker compose -f compose.yaml -f compose.automation.yaml logs --since=15m gatew
 | Symptom | Check | Action |
 | --- | --- | --- |
 | Startup rejects wallet | UFVK prefix and `JUNO_NETWORK` | Use the matching mainnet, testnet, or regtest wallet file |
-| `401` / `403` | Token, scope, wallet grant | Reload the exact least-privilege credential |
+| `401 unauthorized` | Missing, malformed, or unknown bearer token | Send the configured plaintext bearer token over TLS; do not send its SHA-256 value |
+| `403 credential lacks the required scope` | Credential scopes | Add only the operation scope the client needs, then recreate the gateway container because auth is loaded at startup |
+| `403 credential is not authorized for this wallet` | Requested wallet ID versus `wallets.json[].wallet_id` and the credential's `wallets` array | Use an exact, case-sensitive registered ID in the URL, query, or body, and grant that ID or `"*"`; `hot` does not match `exchange-hot`, and `admin` does not bypass wallet grants |
 | Readiness `503` | Error code, node sync, scanner lag/backfill, `pending_spends_ready` | Keep financial traffic closed; after restart or reorg, wait for the scanner's current-tip mempool reconciliation; otherwise repair the named dependency |
 | Coordinator readiness `503` | Gateway state, planner executable, signer socket/journal | Stop new attempts; keep polling existing IDs after the dependency is restored |
 | Coordinator says recovery is sealed | Recent gateway database reconstruction and pre-loss withdrawal ledger | Reconcile every old attempt/note, run `recovery-unseal-coordinator` with the recovered installation ID and audit reference, then wait for private readiness |

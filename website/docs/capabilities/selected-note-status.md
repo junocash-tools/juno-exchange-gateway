@@ -11,11 +11,12 @@ Required scope: `treasury`, with access to the wallet. Keep this route on the ex
 Copy `notes[].note_id` from the approved plan into the exchange withdrawal record before signing. Query those same IDs as one batch:
 
 ```bash
+WALLET_ID=exchange-hot
 curl -sS -X POST \
   -H "Authorization: Bearer $TREASURY_TOKEN" \
   -H "Accept: application/json" \
   -H "Content-Type: application/json" \
-  "$GATEWAY_URL/v1/wallets/hot/notes/status" \
+  "$GATEWAY_URL/v1/wallets/$WALLET_ID/notes/status" \
   -d '{
     "note_ids": [
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
@@ -34,7 +35,7 @@ Query one attempt's complete selected-note set at a time. Do not split it into s
 {
   "status": "ok",
   "data": {
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "event_epoch": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "as_of_node_height": 920109,
     "as_of_scanner_height": 920109,

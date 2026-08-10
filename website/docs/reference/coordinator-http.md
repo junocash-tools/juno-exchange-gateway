@@ -15,7 +15,7 @@ Authorization: Bearer <coordinator-token>
 Accept: application/json
 ```
 
-The credential needs `plan` or `admin` plus a grant for the source wallet. Only the credential `name` that created an attempt can read or cancel it. The private listener uses the same `auth.json` format as the public gateway, but it should have a separate token.
+The credential needs `plan` or `admin` plus either an exact, case-sensitive grant for the source wallet or `"*"`. `admin` does not bypass the wallet-grant check. Only the credential `name` that created an attempt can read or cancel it. The private listener uses the same `auth.json` format as the public gateway, but it should have a separate token.
 
 ## Create
 
@@ -27,7 +27,7 @@ Idempotency-Key: withdrawal-1842-attempt-1
 X-Request-ID: withdrawal-1842-create
 
 {
-  "wallet_id": "hot",
+  "wallet_id": "exchange-hot",
   "approval_reference": "withdrawal:1842",
   "outputs": [
     {
@@ -49,7 +49,7 @@ A new or active replay returns `202`:
   "data": {
     "attempt_id": "txn_0123456789abcdef0123456789abcdef",
     "state": "planning",
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "approval_reference": "withdrawal:1842",
     "created_at": "2026-07-27T12:00:00Z",
     "updated_at": "2026-07-27T12:00:00Z"
@@ -77,7 +77,7 @@ When `state` is `signed`, `data` contains the broadcast inputs and reconciliatio
   "data": {
     "attempt_id": "txn_0123456789abcdef0123456789abcdef",
     "state": "signed",
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "approval_reference": "withdrawal:1842",
     "change_address": "j1...",
     "plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

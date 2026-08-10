@@ -64,7 +64,7 @@ First calculate the deterministic registry checksum. The default target is each 
 
 ```bash
 docker compose run --no-deps --rm gateway recovery-checksum \
-  --next-index hot=125000
+  --next-index exchange-hot=125000
 ```
 
 Compare `mapping_sha256`, `installation_id`, network, wallet IDs, and next indices with the recovery record. Then run recovery with the exact checksum:
@@ -73,7 +73,7 @@ Compare `mapping_sha256`, `installation_id`, network, wallet IDs, and next indic
 docker compose run --no-deps --rm gateway recover \
   --acknowledge I_UNDERSTAND_RECOVERY_REBUILDS_JUNO_ADDRESS_STATE \
   --mapping-sha256 '<64-lowercase-hex>' \
-  --next-index hot=125000
+  --next-index exchange-hot=125000
 ```
 
 Omit `--next-index` to use manifest values. Overrides can only increase a high-water mark. Recovery derives and verifies every address, rebuilds the registry with empty labels, binds the database to the original installation ID, and returns `"coordinator_automation":"sealed"`. Customer labels and ownership must remain available in the exchange mapping. There is no gateway label import or update API, so recovered gateway responses keep empty labels; restore a verified gateway database backup instead when gateway-held labels are required.

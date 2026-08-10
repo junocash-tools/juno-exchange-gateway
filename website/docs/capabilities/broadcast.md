@@ -12,14 +12,14 @@ curl --fail-with-body -X POST \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: withdrawal-1842-attempt-1' \
   -d '{
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "raw_tx_hex": "<lowercase-hex>",
     "expected_txid": "<64-lowercase-hex>"
   }' \
   "$GATEWAY_URL/v1/transactions/broadcast"
 ```
 
-`wallet_id` must be registered and granted to the credential. It binds authorization, audit, and the idempotent request identity; the gateway does not infer which wallet a raw shielded transaction spends. The key is scoped to the authenticated principal. It must start with a letter or digit; the remaining 127 characters may also use `.`, `_`, `:`, `/`, or `-`. Unknown JSON fields are rejected.
+`wallet_id` must exactly match a registered wallet. The credential must grant that same case-sensitive ID or `"*"`. It binds authorization, audit, and the idempotent request identity; the gateway does not infer which wallet a raw shielded transaction spends. The key is scoped to the authenticated principal. It must start with a letter or digit; the remaining 127 characters may also use `.`, `_`, `:`, `/`, or `-`. Unknown JSON fields are rejected.
 
 ## Responses
 
@@ -29,7 +29,7 @@ A transaction newly accepted by the node returns `202`:
 {
   "status": "ok",
   "data": {
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "txid": "<64-lowercase-hex>",
     "state": "mempool",
     "accepted": true,

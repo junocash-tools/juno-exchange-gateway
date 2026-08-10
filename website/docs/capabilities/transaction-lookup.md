@@ -7,10 +7,11 @@ Node-only lookup requires `read`. Adding `wallet_id` requires both `read` and `w
 ## Request
 
 ```bash
+WALLET_ID=exchange-hot
 TXID='<64-lowercase-hex>'
 curl --fail-with-body \
   -H "Authorization: Bearer $GATEWAY_TOKEN" \
-  "$GATEWAY_URL/v1/transactions/$TXID?wallet_id=hot"
+  "$GATEWAY_URL/v1/transactions/$TXID?wallet_id=$WALLET_ID"
 ```
 
 Omit `wallet_id` for node-only state. An authorized wallet adds every sanitized scanner effect for that txid. Scanner nullifiers and raw payloads are never returned. Add `include_raw=true` only when raw bytes are needed; it disables scanner-only fallback.
@@ -32,14 +33,14 @@ Omit `wallet_id` for node-only state. An authorized wallet adds every sanitized 
       "serialized_size": 2048,
       "orchard_action_count": 2
     },
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "wallet_effects": [
       {
         "event_id": 91,
         "kind": "SpendConfirmed",
         "observed_height": 920000,
         "observed_at": "2026-07-21T12:00:00Z",
-        "wallet_id": "hot",
+        "wallet_id": "exchange-hot",
         "txid": "<64-lowercase-hex>",
         "state": "confirmed",
         "block_height": 919901,

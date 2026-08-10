@@ -115,7 +115,7 @@ paths:
       tags: [Wallets]
       summary: Allocate the next watch-only deposit address
       x-required-scope: address
-      description: Allocation and diversifier-index advancement commit atomically to gateway state. The UFVK is configured at bootstrap, bound immutably by its SHA-256 fingerprint, and never returned.
+      description: Allocation and diversifier-index advancement commit atomically to gateway state. The path wallet ID must exactly, including case, match a registered wallet; the credential must grant that ID or `"*"`. The UFVK is configured at bootstrap, bound immutably by its SHA-256 fingerprint, and never returned.
       parameters:
         - $ref: "#/components/parameters/WalletID"
       requestBody:
@@ -130,7 +130,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AddressResponse" }
-              example: { status: ok, data: { wallet_id: hot, address: j1example, diversifier_index: 42, label: customer-4815, created_at: "2026-07-21T12:00:00Z" }, request_id: req_018f }
+              example: { status: ok, data: { wallet_id: exchange-hot, address: j1example, diversifier_index: 42, label: customer-4815, created_at: "2026-07-21T12:00:00Z" }, request_id: req_018f }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
@@ -138,7 +138,13 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { status: error, error: { code: forbidden, message: credential lacks the required scope, retryable: false, details: {} }, request_id: req_018f }
+              examples:
+                scope:
+                  summary: Required operation scope is missing
+                  value: { status: error, error: { code: forbidden, message: credential lacks the required scope, retryable: false, details: {} }, request_id: req_018f }
+                wallet:
+                  summary: Credential grants neither the requested wallet ID nor the wildcard
+                  value: { status: error, error: { code: forbidden, message: credential is not authorized for this wallet, retryable: false, details: {} }, request_id: req_018f }
         "404": { $ref: "#/components/responses/NotFound" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -164,7 +170,7 @@ paths:
               example:
                 status: ok
                 data:
-                  wallet_id: hot
+                  wallet_id: exchange-hot
                   address: j1example
                   balance: { available_zat: 500000000, pending_incoming_zat: 100000000, pending_outgoing_zat: 0, total_unspent_zat: 600000000, min_confirmations: 100, as_of_node_height: 920000, as_of_scanner_height: 920000, scanner_lag: 0 }
                 request_id: req_018f
@@ -212,7 +218,7 @@ paths:
               example:
                 status: ok
                 data:
-                  wallet_id: hot
+                  wallet_id: exchange-hot
                   min_confirmations: 100
                   min_note_zat: 100001
                   as_of_node_height: 920000
@@ -284,7 +290,7 @@ paths:
               example:
                 status: ok
                 data:
-                  wallet_id: hot
+                  wallet_id: exchange-hot
                   event_epoch: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
                   as_of_node_height: 920109
                   as_of_scanner_height: 920109
@@ -355,8 +361,8 @@ paths:
                 status: ok
                 data:
                   deposits:
-                    - { deposit_id: "hot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0", event_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:81", wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, action_index: 0, address: j1example, diversifier_index: 42, amount_zat: 100000000, status: confirmed, block_height: 919901, confirmed_height: 920000, observed_at: "2026-07-21T12:00:00Z" }
-                  next_cursor: eyJ2IjoyLCJ3IjoiaG90IiwiZSI6ImJiYmIuLi4iLCJwIjo4MX0.signature
+                    - { deposit_id: "exchange-hot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0", event_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:81", wallet_id: exchange-hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, action_index: 0, address: j1example, diversifier_index: 42, amount_zat: 100000000, status: confirmed, block_height: 919901, confirmed_height: 920000, observed_at: "2026-07-21T12:00:00Z" }
+                  next_cursor: eyJ2IjoyLCJ3IjoiZXhjaGFuZ2UtaG90IiwiZSI6ImJiYmIuLi4iLCJwIjo4MX0.signature
                   delivery: at_least_once
                   event_epoch: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
                 request_id: req_018f
@@ -403,7 +409,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TransactionResponse" }
-              example: { status: ok, data: { transaction: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, confirmations: 101, block_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, block_height: 919900, block_time: 1784630000, expiry_height: 920100, serialized_size: 2048, orchard_action_count: 2 }, wallet_id: hot, wallet_effects: [{ event_id: 81, kind: OutgoingOutputConfirmed, observed_height: 920000, observed_at: "2026-07-21T12:00:00Z", wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, block_height: 919901, confirmations: 100, required_confirmations: 100, confirmed_height: 920000, action_index: 0, amount_zat: 100000000, address: j1recipient, ovk_scope: external, recipient_scope: external }] }, request_id: req_018f }
+              example: { status: ok, data: { transaction: { txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, confirmations: 101, block_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, block_height: 919900, block_time: 1784630000, expiry_height: 920100, serialized_size: 2048, orchard_action_count: 2 }, wallet_id: exchange-hot, wallet_effects: [{ event_id: 81, kind: OutgoingOutputConfirmed, observed_height: 920000, observed_at: "2026-07-21T12:00:00Z", wallet_id: exchange-hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, block_height: 919901, confirmations: 100, required_confirmations: 100, confirmed_height: 920000, action_index: 0, amount_zat: 100000000, address: j1recipient, ovk_scope: external, recipient_scope: external }] }, request_id: req_018f }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403":
@@ -440,23 +446,23 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/BroadcastRequest" }
-            example: { wallet_id: hot, raw_tx_hex: "0400008085202f8901", expected_txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa }
+            example: { wallet_id: exchange-hot, raw_tx_hex: "0400008085202f8901", expected_txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa }
       responses:
         "202":
           description: Newly accepted by the node.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BroadcastResponse" }
-              example: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: true, already_known: false }, request_id: req_018f }
+              example: { status: ok, data: { wallet_id: exchange-hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: true, already_known: false }, request_id: req_018f }
         "200":
           description: Idempotent replay or already-known transaction. A replay returns the stored operation result; use transaction lookup for current chain state.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BroadcastResponse" }
               examples:
-                replay: { summary: Idempotent replay of a previously accepted transaction, value: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: false, already_known: true }, request_id: req_018f } }
-                existing: { summary: Transaction found by the node, value: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, accepted: false, already_known: true }, request_id: req_018f } }
-                already_known: { summary: Node reports the transaction as known before a concrete state is available, value: { status: ok, data: { wallet_id: hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: known, accepted: false, already_known: true }, request_id: req_018f } }
+                replay: { summary: Idempotent replay of a previously accepted transaction, value: { status: ok, data: { wallet_id: exchange-hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: mempool, accepted: false, already_known: true }, request_id: req_018f } }
+                existing: { summary: Transaction found by the node, value: { status: ok, data: { wallet_id: exchange-hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: confirmed, accepted: false, already_known: true }, request_id: req_018f } }
+                already_known: { summary: Node reports the transaction as known before a concrete state is available, value: { status: ok, data: { wallet_id: exchange-hot, txid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, state: known, accepted: false, already_known: true }, request_id: req_018f } }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -502,6 +508,7 @@ components:
       name: wallet_id
       in: path
       required: true
+      description: Exact, case-sensitive registered wallet ID. The authenticated credential must grant this ID or `"*"`.
       schema: { $ref: "#/components/schemas/WalletID" }
     Address:
       name: address
@@ -526,8 +533,15 @@ components:
       headers: { WWW-Authenticate: { schema: { type: string }, example: Bearer } }
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: unauthorized, message: a valid bearer credential is required, retryable: false, details: {} }, request_id: req_018f } } }
     Forbidden:
-      description: Credential lacks the required scope or wallet authorization.
-      content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: forbidden, message: credential lacks the required scope, retryable: false, details: {} }, request_id: req_018f } } }
+      description: Credential lacks the required scope or grants neither the exact, case-sensitive wallet ID nor `"*"`. Admin satisfies operation scopes but does not bypass wallet grants.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          examples:
+            scope:
+              value: { status: error, error: { code: forbidden, message: credential lacks the required scope, retryable: false, details: {} }, request_id: req_018f }
+            wallet:
+              value: { status: error, error: { code: forbidden, message: credential is not authorized for this wallet, retryable: false, details: {} }, request_id: req_018f }
     NotFound:
       description: Wallet, registered address, or transaction is unknown.
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: not_found, message: resource not found, retryable: false, details: {} }, request_id: req_018f } } }
@@ -554,7 +568,7 @@ components:
       description: Unexpected gateway error with no secret detail.
       content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" }, example: { status: error, error: { code: internal, message: an internal error occurred, retryable: false, details: {} }, request_id: req_018f } } }
   schemas:
-    WalletID: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }
+    WalletID: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", example: exchange-hot, description: Exact case-sensitive wallet identifier registered in wallets.json. }
     TxID: { type: string, pattern: "^[0-9a-f]{64}$" }
     Error:
       type: object

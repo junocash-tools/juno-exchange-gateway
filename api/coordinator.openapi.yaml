@@ -59,7 +59,8 @@ paths:
       x-required-scope: plan
       description: |
         Creates one durable attempt for an approved withdrawal or batch. The
-        credential must also grant the requested wallet. `wallet_id` identifies
+        credential must also grant the requested wallet by exact, case-sensitive
+        wallet ID or `"*"`. `admin` does not bypass the wallet-grant check. `wallet_id` identifies
         the registered spending UFVK; there is no `addressFrom` field because a
         shielded transaction spends wallet-owned notes, not a visible source
         address. The coordinator allocates registered change, selects eligible
@@ -78,7 +79,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/CreateAttemptRequest" }
             example:
-              wallet_id: hot
+              wallet_id: exchange-hot
               approval_reference: withdrawal:1842
               outputs:
                 - { to_address: j1example, amount_zat: "250000" }
@@ -98,7 +99,7 @@ paths:
                 data:
                   attempt_id: txn_0123456789abcdef0123456789abcdef
                   state: planning
-                  wallet_id: hot
+                  wallet_id: exchange-hot
                   approval_reference: withdrawal:1842
                   created_at: "2026-07-27T12:00:00Z"
                   updated_at: "2026-07-27T12:00:00Z"
@@ -143,7 +144,7 @@ paths:
                 data:
                   attempt_id: txn_0123456789abcdef0123456789abcdef
                   state: signed
-                  wallet_id: hot
+                  wallet_id: exchange-hot
                   approval_reference: withdrawal:1842
                   change_address: j1change
                   plan_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -199,7 +200,7 @@ paths:
                 data:
                   attempt_id: txn_0123456789abcdef0123456789abcdef
                   state: cancelled
-                  wallet_id: hot
+                  wallet_id: exchange-hot
                   approval_reference: withdrawal:1842
                   created_at: "2026-07-27T12:00:00Z"
                   updated_at: "2026-07-27T12:00:01Z"
@@ -259,11 +260,15 @@ components:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
           example: { status: error, error: { code: unauthorized, message: a valid bearer credential is required, retryable: false }, request_id: req_018f }
     Forbidden:
-      description: Credential lacks `plan` or `admin` scope, wallet authorization, or ownership of the attempt.
+      description: Credential lacks `plan` or `admin` scope, grants neither the exact case-sensitive wallet ID nor `"*"`, or does not own the attempt. Admin does not bypass wallet grants.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
-          example: { status: error, error: { code: forbidden, message: credential lacks the plan scope, retryable: false }, request_id: req_018f }
+          examples:
+            scope:
+              value: { status: error, error: { code: forbidden, message: credential lacks the plan scope, retryable: false }, request_id: req_018f }
+            wallet:
+              value: { status: error, error: { code: forbidden, message: credential is not authorized for this wallet, retryable: false }, request_id: req_018f }
     NotFound:
       description: Wallet or transaction attempt is unknown.
       content:
@@ -339,6 +344,8 @@ components:
     WalletID:
       type: string
       pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+      example: exchange-hot
+      description: Exact case-sensitive wallet identifier registered in wallets.json. The credential must grant this ID or `"*"`.
     TxID:
       type: string
       pattern: "^[0-9a-f]{64}$"

@@ -78,7 +78,7 @@ Create `wallets.json`:
 {
   "wallets": [
     {
-      "wallet_id": "hot",
+      "wallet_id": "exchange-hot",
       "ufvk": "jview1...",
       "birthday_height": 910000,
       "account": 0
@@ -87,7 +87,7 @@ Create `wallets.json`:
 }
 ```
 
-Wallet IDs and UFVKs must be unique. Use a network-matching UFVK, a non-negative birthday, and the exact account used when deriving the UFVK/spending authority. `account` defaults to `0`, must be below `2147483648`, and is immutable after `init`. A legacy v1 installation must remain on account `0`; do not edit its manifest to introduce a nonzero account.
+Wallet IDs and UFVKs must be unique. The examples use `exchange-hot`, matching `config/wallets.example.json`. Wallet IDs are exact and case-sensitive; `hot`, `exchange-hot`, and `Exchange-Hot` are three different IDs. Use a network-matching UFVK, a non-negative birthday, and the exact account used when deriving the UFVK/spending authority. `account` defaults to `0`, must be below `2147483648`, and is immutable after `init`. A legacy v1 installation must remain on account `0`; do not edit its manifest to introduce a nonzero account.
 
 ## 4. Create least-privilege credentials
 
@@ -108,37 +108,37 @@ Example:
       "name": "deposit-reader",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["read"],
-      "wallets": ["hot"]
+      "wallets": ["exchange-hot"]
     },
     {
       "name": "address-allocator",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["address"],
-      "wallets": ["hot"]
+      "wallets": ["exchange-hot"]
     },
     {
       "name": "treasury-monitor",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["treasury"],
-      "wallets": ["hot"]
+      "wallets": ["exchange-hot"]
     },
     {
       "name": "withdrawal-planner",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["plan"],
-      "wallets": ["hot"]
+      "wallets": ["exchange-hot"]
     },
     {
       "name": "transaction-broadcaster",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["broadcast"],
-      "wallets": ["hot"]
+      "wallets": ["exchange-hot"]
     },
     {
       "name": "withdrawal-monitor",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["read", "withdrawal"],
-      "wallets": ["hot"]
+      "wallets": ["exchange-hot"]
     }
   ]
 }
@@ -157,7 +157,7 @@ Example:
 
 `plan`, `treasury`, and `withdrawal` are intentionally separate from ordinary reads. Give `plan` only to the approved withdrawal service and never send its token to the public gateway endpoint. Avoid `raw`, `plan`, `treasury`, `withdrawal`, and `admin` for ordinary deposit readers.
 
-Every credential needs a unique, stable `name`, one token or hash, at least one scope, and at least one wallet. Its bearer secret must also be unique across credential names. This applies to plaintext `token` values and to the effective SHA-256 values stored as `token_sha256`. Startup rejects duplicates because the credential name defines the authorization and broadcast-idempotency principal. Prefer explicit wallet IDs; reserve `"*"` for tightly controlled operations.
+Every credential needs a unique, stable `name`, one token or hash, at least one scope, and at least one wallet. Its bearer secret must also be unique across credential names. This applies to plaintext `token` values and to the effective SHA-256 values stored as `token_sha256`. Startup rejects duplicates because the credential name defines the authorization and broadcast-idempotency principal. Prefer explicit wallet IDs; reserve `"*"` for tightly controlled operations. The wallet named in a URL, query, or request body must exactly match a registered `wallets.json[].wallet_id`. The credential must authorize it with that same exact ID or `"*"`. `admin` satisfies operation scopes, but it does not bypass this wallet-grant check.
 
 Outside regtest, authentication is mandatory. An isolated regtest can set `{"credentials":[]}` only for the public gateway while the coordinator is disabled. The coordinator always requires `plan` or `admin`. Never use anonymous mode on a reachable port.
 
@@ -185,6 +185,7 @@ Wait for authenticated readiness, then allocate the first address:
 export GATEWAY_URL=https://juno-gateway.example.com
 export GATEWAY_READ_TOKEN='<deposit-reader-token>'
 export GATEWAY_ADDRESS_TOKEN='<address-allocator-token>'
+export WALLET_ID=exchange-hot
 
 curl --fail-with-body \
   -H "Authorization: Bearer $GATEWAY_READ_TOKEN" \
@@ -194,10 +195,12 @@ curl --fail-with-body -X POST \
   -H "Authorization: Bearer $GATEWAY_ADDRESS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"label":"customer-1842"}' \
-  "$GATEWAY_URL/v1/wallets/hot/addresses"
+  "$GATEWAY_URL/v1/wallets/$WALLET_ID/addresses"
 ```
 
 Persist the returned address, wallet ID, and diversifier index in the exchange ledger before giving the address to a customer.
+
+The request body's optional `label` is metadata only; it does not select or authorize a wallet. If this request returns `403` with `credential is not authorized for this wallet`, compare `$WALLET_ID` exactly with `wallets.json[].wallet_id` and confirm that the active credential grants that ID or `"*"`. A missing operation scope uses the different message `credential lacks the required scope`.
 
 ## Token rotation
 

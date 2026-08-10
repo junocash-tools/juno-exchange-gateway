@@ -5,12 +5,13 @@ title: Monitor wallet note liquidity
 Use the aggregate note summary to decide when a wallet is becoming fragmented. It exposes counts and values, not note IDs, nullifiers, memos, or addresses.
 
 ```bash
+WALLET_ID=exchange-hot
 curl -sS \
   -H "Authorization: Bearer $TREASURY_TOKEN" \
-  "$GATEWAY_URL/v1/wallets/hot/notes/summary?min_confirmations=100&min_note_zat=100001"
+  "$GATEWAY_URL/v1/wallets/$WALLET_ID/notes/summary?min_confirmations=100&min_note_zat=100001"
 ```
 
-Required scope: `treasury`, with access to `hot`.
+Required scope: `treasury`, with access to `exchange-hot`.
 
 `min_confirmations` defaults to `100` and may be `0` through `JUNO_GATEWAY_MAX_CONFIRMATIONS`. `min_note_zat` defaults to `0` and must be a non-negative integer. Use the same values as the planner policy when comparing this summary with a future plan.
 
@@ -18,7 +19,7 @@ Required scope: `treasury`, with access to `hot`.
 {
   "status": "ok",
   "data": {
-    "wallet_id": "hot",
+    "wallet_id": "exchange-hot",
     "min_confirmations": 100,
     "min_note_zat": 100001,
     "as_of_node_height": 920000,

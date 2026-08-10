@@ -174,7 +174,7 @@ Create `signer-bindings.json` from the exact watch-only wallet configuration:
   "version": "v1",
   "bindings": [
     {
-      "wallet_id": "hot",
+      "wallet_id": "exchange-hot",
       "account": 0,
       "network": "mainnet",
       "ufvk": "jview1..."

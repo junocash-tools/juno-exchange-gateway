@@ -5,9 +5,10 @@ title: Poll deposits
 The v1 integration is polling-based. Each wallet has an opaque, durable cursor. Required scope: `read`, with access to that wallet. Run one cursor owner per wallet, or serialize multiple workers through one durable checkpoint.
 
 ```bash
+WALLET_ID=exchange-hot
 curl --fail-with-body \
   -H "Authorization: Bearer $GATEWAY_TOKEN" \
-  "$GATEWAY_URL/v1/wallets/hot/deposits?limit=100"
+  "$GATEWAY_URL/v1/wallets/$WALLET_ID/deposits?limit=100"
 ```
 
 Example response:
@@ -18,9 +19,9 @@ Example response:
   "data": {
     "deposits": [
       {
-        "deposit_id": "hot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+        "deposit_id": "exchange-hot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
         "event_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:81",
-        "wallet_id": "hot",
+        "wallet_id": "exchange-hot",
         "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "action_index": 0,
         "address": "j1example",
@@ -32,7 +33,7 @@ Example response:
         "observed_at": "2026-07-21T12:00:00Z"
       }
     ],
-    "next_cursor": "eyJ2IjoyLCJ3IjoiaG90IiwiZSI6ImJiYiJ9.signature",
+    "next_cursor": "eyJ2IjoyLCJ3IjoiZXhjaGFuZ2UtaG90IiwiZSI6ImJiYiJ9.signature",
     "delivery": "at_least_once",
     "event_epoch": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
@@ -74,7 +75,7 @@ Maintain one unfiltered checkpoint per wallet:
 ```bash
 curl --fail-with-body \
   -H "Authorization: Bearer $GATEWAY_TOKEN" \
-  "$GATEWAY_URL/v1/wallets/hot/deposits?limit=100&cursor=$CURSOR"
+  "$GATEWAY_URL/v1/wallets/$WALLET_ID/deposits?limit=100&cursor=$CURSOR"
 ```
 
 There is no `has_more` field. Keep polling. An empty page can still advance `next_cursor` because the gateway safely skips scanner events that do not belong to allocated addresses. Persist every successful cursor, even when `deposits` is empty.

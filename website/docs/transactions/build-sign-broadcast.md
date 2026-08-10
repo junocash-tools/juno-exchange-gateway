@@ -58,7 +58,7 @@ const coordinator = new CoordinatorClient({
 
 const signed = await coordinator.createRawTransaction({
   idempotencyKey: 'withdrawal-1842-attempt-1',
-  walletId: 'hot',
+  walletId: 'exchange-hot',
   approvalReference: 'withdrawal:1842',
   toAddress: withdrawal.address,
   amountZat: withdrawal.amountZat,
@@ -159,7 +159,7 @@ For several recipients, or when the exchange owns the polling loop, use the lowe
 ```js
 const attempt = await coordinator.createAttempt({
   idempotencyKey: 'batch-2026-07-27-attempt-1',
-  walletId: 'hot',
+  walletId: 'exchange-hot',
   approvalReference: 'batch:2026-07-27',
   outputs: [
     {toAddress: first.address, amountZat: first.amountZat},

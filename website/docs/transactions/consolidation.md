@@ -33,7 +33,7 @@ ATTEMPT_DIR="$PWD/tmp/consolidation-1842-attempt-1"
 mkdir -m 0700 "$ATTEMPT_DIR"
 
 docker compose --profile operator run --rm txbuild consolidate \
-  --wallet-id hot \
+  --wallet-id exchange-hot \
   --coin-type 8133 \
   --account 0 \
   --to '<registered-treasury-address>' \
@@ -57,7 +57,7 @@ ATTEMPT_DIR="$PWD/tmp/sweep-1843-attempt-1"
 mkdir -m 0700 "$ATTEMPT_DIR"
 
 docker compose --profile operator run --rm -T txbuild sweep \
-  --wallet-id hot \
+  --wallet-id exchange-hot \
   --coin-type 8133 \
   --account 0 \
   --to '<registered-treasury-address>' \
@@ -86,7 +86,7 @@ jq -n '
 docker compose --profile operator run --rm -T \
   -v "$ATTEMPT_DIR/outputs.json:/work/outputs.json:ro" \
   txbuild rebalance \
-  --wallet-id hot \
+  --wallet-id exchange-hot \
   --coin-type 8133 \
   --account 0 \
   --outputs-file /work/outputs.json \

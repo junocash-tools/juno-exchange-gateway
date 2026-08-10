@@ -30,7 +30,7 @@ Create `wallets.json` with mode `0600`:
 {
   "wallets": [
     {
-      "wallet_id": "hot",
+      "wallet_id": "exchange-hot",
       "ufvk": "jviewregtest1...",
       "birthday_height": 0,
       "account": 0
@@ -48,13 +48,15 @@ Create `auth.json` with mode `0600`. Mainnet and testnet require at least one cr
       "name": "exchange-api",
       "token_sha256": "<64-lowercase-hex-sha256>",
       "scopes": ["read", "address", "treasury", "plan", "broadcast", "withdrawal"],
-      "wallets": ["hot"]
+      "wallets": ["exchange-hot"]
     }
   ]
 }
 ```
 
 This combined credential keeps the first regtest walkthrough short. Split it into least-privilege private coordinator, broadcast, deposit, and address credentials before production. An isolated anonymous regtest may use `{"credentials":[]}` only while the coordinator is disabled; enabling it always requires `plan` or `admin`. The file is still required by Compose.
+
+The examples use `exchange-hot`, matching the shipped config files. A wallet ID is exact and case-sensitive: use the same value in `wallets.json`, explicit credential grants, signer bindings, URL paths, and request bodies. A request for `hot` is not a request for `exchange-hot`. A tightly controlled credential may grant `"*"` instead of listing individual wallet IDs.
 
 Generate the hash without storing the token in shell history:
 
