@@ -1,4 +1,4 @@
-FROM rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 AS rust-build
+FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS rust-build
 
 ARG JUNO_TXSIGN_REPO=https://github.com/junocash-tools/juno-txsign.git
 ARG JUNO_TXSIGN_REF=121ef749383e27fb82c302e96cd55b70611817fc
