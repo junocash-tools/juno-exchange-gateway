@@ -11,7 +11,7 @@ mkdir -p "$run_dir/config"
 chmod 0700 "$run_dir"
 umask 077
 
-for command in cargo curl docker go jq make npm openssl python3; do
+for command in cargo curl docker go jq make node npm openssl python3; do
   command -v "$command" >/dev/null || {
     echo "missing required command: $command" >&2
     exit 1
@@ -868,6 +868,23 @@ assert_jq "$run_dir/note-summary-spendable.json" \
   '.data.total_unspent.note_count > 0 and .data.spendable.note_count > 0 and .data.spendable.value_zat > 0 and .data.min_confirmations == 100 and .data.min_note_zat == 1' \
   "note summary did not expose mature planner candidates"
 
+JUNO_GATEWAY_URL="$base_url" \
+JUNO_GATEWAY_TOKEN="$treasury_token" \
+JUNO_WALLET_ID="$wallet_id" \
+JUNO_MIN_CONFIRMATIONS=100 \
+JUNO_MIN_NOTE_ZAT=0 \
+  node "$workspace_root/juno-exchange-sdk/examples/get-wallet-balance.mjs" \
+    >"$run_dir/sdk-wallet-balance.json"
+assert_jq "$run_dir/sdk-wallet-balance.json" \
+  --arg wallet "$wallet_id" \
+  '.walletId == $wallet
+    and .minConfirmations == 100
+    and .minNoteZat == "0"
+    and (.totalUnspent.valueZat | test("^(0|[1-9][0-9]*)$"))
+    and ((.spendable.valueZat | tonumber) > 0)
+    and (.asOfScannerHash | test("^[0-9a-f]{64}$"))' \
+  "Node SDK wallet-wide balance response is invalid"
+
 code="$(api_status GET "/v1/wallets/$wallet_id/deposits?limit=1" "$run_dir/deposits-page-1.json")"
 [[ "$code" == "200" ]] || fail "first deposit page returned HTTP $code"
 cursor_page_1="$(jq -er '.data.next_cursor' "$run_dir/deposits-page-1.json")"
@@ -1625,7 +1642,7 @@ jq -n \
   --arg txsign_ref "$JUNO_TXSIGN_REF" \
   --arg sdk_ref "$JUNO_SDK_REF" \
   --argjson gateway_loss_checks "$gateway_loss_checks" \
-  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,coordinator_expiry_txid:$coordinator_expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref,"juno-exchange-sdk":$sdk_ref},checks:(["clean source provenance","one-time installation init","separate loopback public and private ports","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege public and coordinator authentication","wallet isolation","network-disabled UDS signer","mandatory seed-to-UFVK binding","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","Node SDK programmatic create","coordinator durable attempt","selected-note reservation","selected-note unspent reconciliation","selected-note unknown and wallet isolation","signed raw hex return","SDK programmatic broadcast","prevalidated raw broadcast","idempotent create and broadcast replay","same-key payload conflict","outgoing wallet effects","registered coordinator change scope","coordinator broadcast, mined, and final lifecycle","selected-note pending and spent lifecycle","mined pending-spend release","withdrawal expiry and drop","selected-note strict expiry boundary","coordinator expired-material rejection","coordinator post-expiry finality hold","coordinator proven-unspent release","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg"] + $gateway_loss_checks)}' \
+  '{status:"passed",network:"regtest",default_confirmations:100,project:$project,deposit_source:"mature_coinbase_shield",deposit_txid:$deposit_txid,cold_deposit_txid:$cold_deposit_txid,withdrawal_txid:$withdrawal_txid,expiry_txid:$expiry_txid,coordinator_expiry_txid:$coordinator_expiry_txid,post_recovery_deposit_txid:$post_recovery_txid,component_refs:{gateway:$gateway_ref,"juno-addrgen":$addrgen_ref,"juno-keys":$keys_ref,"juno-scan":$scanner_ref,"juno-txbuild":$txbuild_ref,"juno-txsign":$txsign_ref,"juno-exchange-sdk":$sdk_ref},checks:(["clean source provenance","one-time installation init","separate loopback public and private ports","Docker outbound masquerading disabled","chain tip","NU6.2 regtest signing branch","least-privilege public and coordinator authentication","wallet isolation","network-disabled UDS signer","mandatory seed-to-UFVK binding","mature owned coinbase deposit source","second-wallet deposit and effects","watch-only allocation","restart-safe address ledger","owned-address balances","wallet-wide SDK balance","100-confirmation deposit lifecycle","scanner restart cursor reset and replay","unallocated deposit exclusion","Node SDK programmatic create","coordinator durable attempt","selected-note reservation","selected-note unspent reconciliation","selected-note unknown and wallet isolation","signed raw hex return","SDK programmatic broadcast","prevalidated raw broadcast","idempotent create and broadcast replay","same-key payload conflict","outgoing wallet effects","registered coordinator change scope","coordinator broadcast, mined, and final lifecycle","selected-note pending and spent lifecycle","mined pending-spend release","withdrawal expiry and drop","selected-note strict expiry boundary","coordinator expired-material rejection","coordinator post-expiry finality hold","coordinator proven-unspent release","strict post-expiry pending-spend release","transaction lookup","change exclusion","scanner rebuild","cursor epoch reset","post-recovery delivery","confirmed-unconfirmed-orphaned reorg"] + $gateway_loss_checks)}' \
   >"$run_dir/summary.json"
 
 log "PASS"

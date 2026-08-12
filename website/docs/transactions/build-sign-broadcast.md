@@ -42,7 +42,7 @@ See [Wallet and authentication setup](../getting-started/wallet-and-auth.md) and
 Install the supported Node.js package:
 
 ```bash
-npm install https://github.com/junocash-tools/juno-exchange-sdk/releases/download/v0.1.0/junocash-tools-exchange-sdk-0.1.0.tgz
+npm install https://github.com/junocash-tools/juno-exchange-sdk/releases/download/v0.2.0/junocash-tools-exchange-sdk-0.2.0.tgz
 ```
 
 Node.js 20 or later is required. The versioned GitHub Release archive is the supported public distribution. Configure the SDK for the same `mainnet`, `testnet`, or `regtest` network as the coordinator.
@@ -77,6 +77,10 @@ Start from the SDK's runnable [`create-raw-transaction.mjs`](https://github.com/
 Use `walletId`, not `addressFrom`. A shielded transaction consumes notes controlled by the registered wallet UFVK. It does not debit a visible source address. The coordinator chooses inputs and a registered same-wallet change address.
 
 Amounts are zatoshis. Pass a canonical decimal string or JavaScript `bigint`; the SDK rejects `number` to avoid rounding. A memo is optional lowercase hex encoding of at most 512 bytes.
+
+For wallet-wide monitoring or a non-authoritative preflight, call `GatewayClient.getWalletBalance(walletId, {minConfirmations, minNoteZat})` with the same `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS` and `JUNO_COORDINATOR_MIN_NOTE_ZAT` used by the planner. It returns server-calculated totals across every address controlled by the wallet. See [wallet balance and liquidity](../capabilities/note-summary.md) for the response fields and caveats.
+
+Do not use that aggregate to authorize or reject a withdrawal by itself. Its `spendable` total does not subtract coordinator reservations, calculate the requested transaction's fee, or prove the selected value fits within the 200-input limit. `createRawTransaction` remains authoritative for exact availability.
 
 Calling create is the exchange's authorization to sign. Perform withdrawal approval, sanctions/risk controls, balance reservation, destination validation, limits, and dual control **before** this call. Store a stable approval identifier in `approvalReference`.
 

@@ -11,11 +11,11 @@ module.exports = {
       collapsed: false,
       items: [
         'capabilities/address-allocation',
-        'capabilities/address-balances',
+        'capabilities/deposits',
         'capabilities/note-summary',
+        'capabilities/address-balances',
         'capabilities/selected-note-status',
         'capabilities/chain-tip',
-        'capabilities/deposits',
         'capabilities/transaction-lookup',
         'capabilities/broadcast',
       ],

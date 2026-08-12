@@ -48,6 +48,8 @@ Only then show the address to a customer. Never reassign an address, even after 
 
 The gateway later serves balances and deposits only for allocations in its own state. Keep the exchange mapping for the life of the installation; there is no address list or lookup endpoint for rebuilding it.
 
+Each allocated address receives separate shielded notes and therefore has its own attributable balance. The notes remain controlled by the same wallet spending authority, so no per-customer sweep is required before a withdrawal. Use [wallet balance and liquidity](note-summary.md), not a client-side sum of [one-address balances](address-balances.md), to monitor the complete wallet.
+
 ## Change and treasury addresses
 
 Allocate operator-controlled addresses through the same endpoint, but use an explicit internal convention such as `internal_change:exchange-hot` or `treasury:consolidation-1`:

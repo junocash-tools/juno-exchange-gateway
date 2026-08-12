@@ -261,11 +261,11 @@ The tracked auth example separates reader, allocator, treasury, and broadcaster 
 
 | Scope | Access |
 | --- | --- |
-| `read` | readiness, version, tip, balances, deposits, and node-only transaction lookup |
+| `read` | readiness, version, tip, one-address balances, deposits, and node-only transaction lookup |
 | `address` | allocate deposit addresses |
 | `broadcast` | submit signed raw transactions |
 | `plan` | create, poll, and cancel private coordinator attempts |
-| `treasury` | aggregate note summary plus batch status for selected IDs already recorded in a withdrawal or consolidation attempt; no nullifiers, memos, addresses, or wallet-wide raw-note list |
+| `treasury` | wallet-wide balance and note liquidity plus batch status for selected IDs already recorded in a withdrawal or consolidation attempt; no nullifiers, memos, addresses, or wallet-wide raw-note list |
 | `withdrawal` | wallet-enriched transaction lookup and sanitized wallet effects; combine with `read` |
 | `raw` | include raw hex in transaction lookup |
 | `admin` | satisfies any endpoint scope; wallet restrictions still apply |

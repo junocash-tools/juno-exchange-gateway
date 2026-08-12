@@ -5,6 +5,8 @@ info:
   description: |
     Watch-only exchange API for Juno Cash. Wallet operations are limited to registered UFVKs.
     Address balances are limited further to addresses allocated and persisted by this gateway.
+    The wallet note summary is the server-calculated balance and liquidity view across all
+    addresses controlled by one registered wallet.
     Transaction planning and signing are outside this API; broadcast accepts signed raw bytes only.
 servers:
   - url: https://juno-gateway.example.com
@@ -16,7 +18,7 @@ tags:
   - name: Network
     description: Validated node and scanner chain state.
   - name: Wallets
-    description: Registered-wallet addresses, balances, aggregate note liquidity, and deposit events.
+    description: Registered-wallet addresses, one-address balances, wallet-wide balance and note liquidity, and deposit events.
   - name: Transactions
     description: Signed transaction broadcast and lifecycle lookup.
 paths:
@@ -156,7 +158,13 @@ paths:
       tags: [Wallets]
       summary: Balance of one allocated address
       x-required-scope: read
-      description: Returns an on-chain note view, not the exchange's customer ledger. Arbitrary shielded addresses are rejected before the scanner is called.
+      description: |
+        Returns value attributed to one allocated address, not the total controlled by the wallet
+        and not the exchange's customer ledger. Different addresses under the same wallet are
+        expected to return different values. Use `GET /v1/wallets/{wallet_id}/notes/summary`,
+        exposed as `GatewayClient.getWalletBalance` in the supported Node.js SDK, for the
+        server-calculated wallet-wide balance. Arbitrary shielded addresses are rejected before
+        the scanner is called.
       parameters:
         - $ref: "#/components/parameters/WalletID"
         - $ref: "#/components/parameters/Address"
@@ -190,24 +198,37 @@ paths:
     get:
       operationId: getWalletNoteSummary
       tags: [Wallets]
-      summary: Aggregate wallet note liquidity
+      summary: Wallet-wide balance and note liquidity
       x-required-scope: treasury
       description: |
-        Returns counts and zatoshi totals for unspent incoming notes without exposing note IDs,
-        nullifiers, memos, or recipient addresses. The five operational buckets partition
-        `total_unspent` without overlap. Each note enters the first matching bucket in this order:
-        `pending_spend`, `immature`, `witness_unavailable`, `below_min_note`, then `spendable`.
-        `spendable` means eligible for planner consideration at this
-        confirmation and minimum-note policy; it does not account for a requested amount, fee,
-        the 200-input signer ceiling, or an exchange-side reservation. Scanner pending state begins
-        only after a transaction is observed in the node mempool. Use this endpoint for liquidity
-        and consolidation monitoring, never as a note lock or withdrawal authorization.
+        Server-calculated balance and liquidity totals across every unspent note controlled by the
+        registered wallet, regardless of which wallet-controlled address received it. Clients do not need
+        to enumerate or sum per-address balances. This route is exposed as
+        `GatewayClient.getWalletBalance` in the supported Node.js SDK.
+
+        `total_unspent` is the complete wallet-controlled unspent value, including immature,
+        pending-spend, below-floor, and witness-unavailable notes. `spendable` is only the subset
+        eligible for planner consideration under this request's confirmation and minimum-note
+        policy. It does not subtract coordinator reservations, calculate the requested transaction's
+        fee, or prove that enough value fits within the 200-input signer ceiling. Transaction
+        planning remains authoritative.
+
+        For a planner-aligned view, pass the values configured in
+        `JUNO_GATEWAY_DEFAULT_CONFIRMATIONS` and `JUNO_COORDINATOR_MIN_NOTE_ZAT`; their shipped
+        defaults are `100` and `0`.
+
+        The five operational buckets partition `total_unspent` without overlap. Each note enters
+        the first matching bucket in this order: `pending_spend`, `immature`,
+        `witness_unavailable`, `below_min_note`, then `spendable`. Scanner pending state begins only
+        after a transaction is observed in the node mempool. The response exposes no note IDs,
+        nullifiers, memos, or recipient addresses. Use it for liquidity and consolidation
+        monitoring, never as a note lock, customer ledger, or withdrawal authorization.
       parameters:
         - $ref: "#/components/parameters/WalletID"
         - $ref: "#/components/parameters/MinConfirmations"
         - name: min_note_zat
           in: query
-          description: Mature, non-pending notes below this value are counted in `below_min_note`. Zero-value notes are always excluded from `spendable`.
+          description: Mature, non-pending notes below this value are counted in `below_min_note`. Zero-value notes are always excluded from `spendable`. Match `JUNO_COORDINATOR_MIN_NOTE_ZAT` when comparing the result with a future coordinator plan; the shipped planner default is `0`.
           schema: { type: integer, format: int64, minimum: 0, default: 0 }
       responses:
         "200":
@@ -220,16 +241,16 @@ paths:
                 data:
                   wallet_id: exchange-hot
                   min_confirmations: 100
-                  min_note_zat: 100001
+                  min_note_zat: 0
                   as_of_node_height: 920000
                   as_of_scanner_height: 920000
                   as_of_scanner_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
                   scanner_lag: 0
                   total_unspent: { note_count: 87, value_zat: 42000000000 }
-                  spendable: { note_count: 63, value_zat: 39000000000, smallest_note_zat: 150000, largest_note_zat: 4000000000 }
+                  spendable: { note_count: 75, value_zat: 39300000000, smallest_note_zat: 50000, largest_note_zat: 4000000000 }
                   immature: { note_count: 8, value_zat: 1200000000 }
                   pending_spend: { note_count: 4, value_zat: 1500000000, known_expiry_count: 4, next_expiry_height: 920035, last_expiry_height: 920039 }
-                  below_min_note: { note_count: 12, value_zat: 300000000 }
+                  below_min_note: { note_count: 0, value_zat: 0 }
                   witness_unavailable: { note_count: 0, value_zat: 0 }
                 request_id: req_018f
         "400": { $ref: "#/components/responses/InvalidRequest" }
@@ -523,6 +544,7 @@ components:
     MinConfirmations:
       name: min_confirmations
       in: query
+      description: Minimum confirmations used to classify value as available or spendable.
       schema: { type: integer, format: int64, minimum: 0, maximum: 10000, default: 100 }
   responses:
     InvalidRequest:
@@ -733,18 +755,30 @@ components:
       required: [wallet_id, min_confirmations, min_note_zat, as_of_node_height, as_of_scanner_height, as_of_scanner_hash, scanner_lag, total_unspent, spendable, immature, pending_spend, below_min_note, witness_unavailable]
       properties:
         wallet_id: { $ref: "#/components/schemas/WalletID" }
-        min_confirmations: { type: integer, format: int64, minimum: 0 }
-        min_note_zat: { type: integer, format: int64, minimum: 0 }
+        min_confirmations: { type: integer, format: int64, minimum: 0, description: Confirmation threshold used to build these buckets. }
+        min_note_zat: { type: integer, format: int64, minimum: 0, description: Minimum-note floor used to build these buckets. }
         as_of_node_height: { type: integer, format: int64, minimum: 0 }
         as_of_scanner_height: { type: integer, format: int64, minimum: 0 }
         as_of_scanner_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
         scanner_lag: { type: integer, format: int64, minimum: 0 }
-        total_unspent: { $ref: "#/components/schemas/NoteValueBucket" }
-        spendable: { $ref: "#/components/schemas/SpendableNoteBucket" }
-        immature: { $ref: "#/components/schemas/NoteValueBucket" }
-        pending_spend: { $ref: "#/components/schemas/PendingSpendBucket" }
-        below_min_note: { $ref: "#/components/schemas/NoteValueBucket" }
-        witness_unavailable: { $ref: "#/components/schemas/NoteValueBucket" }
+        total_unspent:
+          description: Complete unspent value controlled by the wallet; not the amount currently available for one withdrawal.
+          allOf: [{ $ref: "#/components/schemas/NoteValueBucket" }]
+        spendable:
+          description: Planner candidates under the requested policy before coordinator reservations, requested fee, and input-limit selection.
+          allOf: [{ $ref: "#/components/schemas/SpendableNoteBucket" }]
+        immature:
+          description: Non-pending notes below `min_confirmations`.
+          allOf: [{ $ref: "#/components/schemas/NoteValueBucket" }]
+        pending_spend:
+          description: Notes whose nullifiers the scanner has observed in mempool transactions.
+          allOf: [{ $ref: "#/components/schemas/PendingSpendBucket" }]
+        below_min_note:
+          description: Otherwise-eligible notes below `min_note_zat`, plus zero-value notes.
+          allOf: [{ $ref: "#/components/schemas/NoteValueBucket" }]
+        witness_unavailable:
+          description: Mature, non-pending notes without a spend position.
+          allOf: [{ $ref: "#/components/schemas/NoteValueBucket" }]
     NoteSummaryResponse:
       type: object
       required: [status, data, request_id]

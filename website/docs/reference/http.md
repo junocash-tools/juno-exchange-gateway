@@ -28,6 +28,8 @@ JSON requests also require `Content-Type: application/json`. Parameters such as 
 | `GET` | `/v1/transactions/{txid}` | `read`; add `withdrawal` + wallet grant for `wallet_id`, and `raw` for raw hex |
 | `POST` | `/v1/transactions/broadcast` | `broadcast` + wallet grant + `Idempotency-Key` |
 
+`GET /v1/wallets/{wallet_id}/notes/summary` is the server-calculated wallet-wide balance and liquidity view; the Node.js SDK exposes it as `GatewayClient.getWalletBalance`. It aggregates notes received across every address controlled by the wallet. The address-balance route covers one allocated address only and must not be summed client-side to determine withdrawal liquidity.
+
 There are no build, approve, or sign routes on this public listener. Automated creation uses the separately bound [private coordinator API](./coordinator-http.md), normally through the Node.js SDK. The exchange then submits only its signed result to the public broadcast route. See [build, sign, and broadcast](../transactions/build-sign-broadcast.md).
 
 `wallet_id` is an exact, case-sensitive identifier, not a wallet type. The value in a path, query, or JSON body must match a registered `wallets.json[].wallet_id`. The authenticated credential must grant that same ID or `"*"`. The examples use `exchange-hot`, matching the shipped config. `admin` satisfies operation scopes but does not bypass wallet grants. A request for `hot` therefore receives `403 credential is not authorized for this wallet` when only `exchange-hot` is granted.

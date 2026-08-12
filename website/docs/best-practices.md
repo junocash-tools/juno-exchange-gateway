@@ -9,6 +9,7 @@ title: Best practices
 - Initialize once. Back up the installation manifest after allocations and never replace it with an empty directory.
 - Use the default `100` confirmations and process unconfirmation and orphan events.
 - Poll the complete deposit stream, deduplicate by stable identity, and commit cursor and ledger changes atomically.
+- Use the wallet-wide balance endpoint or `GatewayClient.getWalletBalance` for liquidity monitoring. Match the planner's confirmation and minimum-note policy; never sum per-address balances or treat the aggregate as withdrawal authorization.
 - Use the coordinator's atomic selected-note reservations. Never run independent active coordinator databases or bypass a reservation with the CLI.
 - Release an expired coordinator attempt only after height is at least `expiry_height + configured_confirmations`, node/scanner tips match, history and pending spends are ready, and the complete selected-ID batch is `unspent`.
 - Bind withdrawal, attempt, plan digest, txid, raw-transaction hash, and idempotency key before broadcast.

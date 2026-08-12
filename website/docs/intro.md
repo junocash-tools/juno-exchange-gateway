@@ -164,6 +164,7 @@ Regtest permits anonymous public-gateway access only when no credentials are con
 
 1. [Allocate a deposit address](capabilities/address-allocation.md) and durably map it to the customer.
 2. [Poll the unfiltered deposit stream](capabilities/deposits.md) and atomically checkpoint its cursor with ledger changes.
-3. For withdrawals, use the [Node.js SDK and private coordinator](transactions/build-sign-broadcast.md) to create signed raw hex, persist the attempt, then broadcast the exact bytes through the public gateway.
+3. Monitor server-calculated [wallet balance and liquidity](capabilities/note-summary.md) across the complete registered wallet with the REST API or `GatewayClient.getWalletBalance`.
+4. For withdrawals, use the [Node.js SDK and private coordinator](transactions/build-sign-broadcast.md) to create signed raw hex, persist the attempt, then broadcast the exact bytes through the public gateway. Planning remains authoritative for exact available notes and fees.
 
 Use `100` confirmations unless the exchange has an explicit, tested risk policy for another value.

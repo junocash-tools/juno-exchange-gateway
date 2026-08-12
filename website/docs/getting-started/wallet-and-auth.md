@@ -146,11 +146,11 @@ Example:
 
 | Scope | Use |
 | --- | --- |
-| `read` | readiness, version, tip, owned-address balances, deposits, and node-only transaction lookup |
+| `read` | readiness, version, tip, one-address balances, deposits, and node-only transaction lookup |
 | `address` | allocate deposit addresses |
 | `broadcast` | submit a signed raw transaction |
 | `plan` | create, poll, and cancel attempts on the private coordinator listener |
-| `treasury` | call the [aggregate note summary](../capabilities/note-summary.md) and reconcile only the [selected note IDs](../capabilities/selected-note-status.md) recorded in an attempt; no nullifiers, memos, addresses, or wallet-wide raw-note list |
+| `treasury` | read [wallet balance and note liquidity](../capabilities/note-summary.md) and reconcile only the [selected note IDs](../capabilities/selected-note-status.md) recorded in an attempt; no nullifiers, memos, addresses, or wallet-wide raw-note list |
 | `withdrawal` | add a wallet ID and sanitized wallet effects to transaction lookup; must be combined with `read` |
 | `raw` | add raw transaction hex to transaction lookup |
 | `admin` | satisfy any operation scope; wallet restrictions still apply |
