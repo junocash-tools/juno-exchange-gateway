@@ -1,12 +1,12 @@
 services:
   junocashd:
-    image: juno-exchange-gateway/junocashd:0.9.12
+    image: juno-exchange-gateway/junocashd:0.9.13
     build:
       context: .
       dockerfile: docker/junocashd/Dockerfile
       args:
-        JUNOCASH_VERSION: ${JUNOCASH_VERSION:-0.9.12}
-        JUNOCASH_LINUX64_SHA256: ${JUNOCASH_LINUX64_SHA256:-41f74d61feb9a4284a4200b1fc163ecd072da3314a25db7222522f2e548ec386}
+        JUNOCASH_VERSION: ${JUNOCASH_VERSION:-0.9.13}
+        JUNOCASH_LINUX64_SHA256: ${JUNOCASH_LINUX64_SHA256:-7e83b8c888344f33129ece2160d8b6434bc91ffb9cd992665aadd2c02c904f11}
 
   juno-scan:
     image: juno-exchange-gateway/juno-scan:dev
@@ -22,12 +22,12 @@ services:
       args:
         JUNO_ADDRGEN_REF: ${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}
         JUNO_TXBUILD_REPO: ${JUNO_TXBUILD_REPO:-https://github.com/junocash-tools/juno-txbuild.git}
-        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a}
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-553a977038c7f0660fc361acc059df80ce3101f3}
         VERSION: ${JUNO_GATEWAY_VERSION:-dev}
         REVISION: ${JUNO_GATEWAY_REVISION:-local}
         BUILD_TIME: ${JUNO_GATEWAY_BUILD_TIME:-}
         COMPONENTS_JSON: >-
-          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-3f6009fe16d15faa0da5a8962e0f5dad30307135}","juno-txbuild":"${JUNO_TXBUILD_REF:-05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a}","juno-txsign":"${JUNO_TXSIGN_REF:-121ef749383e27fb82c302e96cd55b70611817fc}","junocashd":"v${JUNOCASH_VERSION:-0.9.12}"}
+          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-fcd02df03cf09b482f95be070b8fa9894d5c0222}","juno-txbuild":"${JUNO_TXBUILD_REF:-553a977038c7f0660fc361acc059df80ce3101f3}","juno-txsign":"${JUNO_TXSIGN_REF:-d33f925dc73ee929ac95073fdcd40a4f17dbb43d}","junocashd":"v${JUNOCASH_VERSION:-0.9.13}"}
 
   txbuild:
     image: juno-exchange-gateway/txbuild:dev
@@ -36,7 +36,7 @@ services:
       dockerfile: docker/txbuild/Dockerfile
       args:
         JUNO_TXBUILD_REPO: ${JUNO_TXBUILD_REPO:-https://github.com/junocash-tools/juno-txbuild.git}
-        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a}
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-553a977038c7f0660fc361acc059df80ce3101f3}
 
   txsign:
     profiles: ["automation"]
@@ -46,4 +46,4 @@ services:
       dockerfile: docker/txsign/Dockerfile
       args:
         JUNO_TXSIGN_REPO: ${JUNO_TXSIGN_REPO:-https://github.com/junocash-tools/juno-txsign.git}
-        JUNO_TXSIGN_REF: ${JUNO_TXSIGN_REF:-121ef749383e27fb82c302e96cd55b70611817fc}
+        JUNO_TXSIGN_REF: ${JUNO_TXSIGN_REF:-d33f925dc73ee929ac95073fdcd40a4f17dbb43d}

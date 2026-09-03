@@ -740,7 +740,7 @@ assert_jq "$run_dir/version.json" \
     and .data.build.components["juno-addrgen"] == $addrgen
     and .data.build.components["juno-txbuild"] == $txbuild
     and .data.build.components["juno-txsign"] == $txsign
-    and .data.build.components.junocashd == "v0.9.12"' \
+    and .data.build.components.junocashd == "v0.9.13"' \
   "version manifest is incomplete"
 
 log "API boundary: chain tip, authentication, scopes, and wallet isolation"
