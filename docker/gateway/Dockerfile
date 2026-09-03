@@ -1,4 +1,4 @@
-FROM rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 AS addrgen-rust
+FROM rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS addrgen-rust
 
 ARG JUNO_ADDRGEN_REPO=https://github.com/junocash-tools/juno-addrgen.git
 ARG JUNO_ADDRGEN_REF=4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834
@@ -17,7 +17,7 @@ WORKDIR /src
 COPY --from=addrgen-rust /src /src
 RUN go build -trimpath -ldflags "-s -w" -o /out/juno-addrgen ./cmd/juno-addrgen
 
-FROM rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 AS txbuild-rust
+FROM rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS txbuild-rust
 
 ARG JUNO_TXBUILD_REPO=https://github.com/junocash-tools/juno-txbuild.git
 ARG JUNO_TXBUILD_REF=553a977038c7f0660fc361acc059df80ce3101f3
