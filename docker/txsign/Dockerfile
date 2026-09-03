@@ -1,7 +1,7 @@
 FROM rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 AS rust-build
 
 ARG JUNO_TXSIGN_REPO=https://github.com/junocash-tools/juno-txsign.git
-ARG JUNO_TXSIGN_REF=121ef749383e27fb82c302e96cd55b70611817fc
+ARG JUNO_TXSIGN_REF=d33f925dc73ee929ac95073fdcd40a4f17dbb43d
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
   && rm -rf /var/lib/apt/lists/*

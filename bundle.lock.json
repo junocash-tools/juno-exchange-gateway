@@ -48,7 +48,7 @@
     "scanner": {
       "repository": "https://github.com/junocash-tools/juno-scan.git",
       "repository_slug": "junocash-tools/juno-scan",
-      "revision": "3f6009fe16d15faa0da5a8962e0f5dad30307135"
+      "revision": "fcd02df03cf09b482f95be070b8fa9894d5c0222"
     },
     "addrgen": {
       "repository": "https://github.com/junocash-tools/juno-addrgen.git",
@@ -60,17 +60,17 @@
     },
     "txbuild": {
       "repository": "https://github.com/junocash-tools/juno-txbuild.git",
-      "revision": "05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a"
+      "revision": "553a977038c7f0660fc361acc059df80ce3101f3"
     },
     "txsign": {
       "repository": "https://github.com/junocash-tools/juno-txsign.git",
-      "revision": "121ef749383e27fb82c302e96cd55b70611817fc"
+      "revision": "d33f925dc73ee929ac95073fdcd40a4f17dbb43d"
     }
   },
   "node_artifact": {
-    "version": "0.9.12",
-    "url": "https://github.com/juno-cash/junocash/releases/download/v0.9.12/junocash-0.9.12-linux64.tar.gz",
-    "sha256": "41f74d61feb9a4284a4200b1fc163ecd072da3314a25db7222522f2e548ec386",
+    "version": "0.9.13",
+    "url": "https://github.com/juno-cash/junocash/releases/download/v0.9.13/junocash-0.9.13-linux64.tar.gz",
+    "sha256": "7e83b8c888344f33129ece2160d8b6434bc91ffb9cd992665aadd2c02c904f11",
     "platform": "linux/amd64"
   },
   "toolchain_images": {
@@ -79,7 +79,7 @@
   },
   "runtime_base_images": {
     "debian": "debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818",
-    "ubuntu": "ubuntu:22.04@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982"
+    "ubuntu": "ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316"
   },
   "service_images": {
     "postgres": "public.ecr.aws/docker/library/postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777"

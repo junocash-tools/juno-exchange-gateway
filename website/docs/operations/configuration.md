@@ -30,7 +30,7 @@ Create an owner-only environment file with `install -m 0600 .env.example .env`. 
 
 Use digest-pinned image references in production.
 
-When `JUNO_NETWORK=regtest`, the bundled node entrypoint adds `-nuparams=5437f330:1` so the pinned 0.9.12 node reaches NU6.2 for Orchard PCZT proving. This flag is intentionally not configurable through Compose and is never passed for testnet or mainnet; their consensus activation schedules come from the node.
+When `JUNO_NETWORK=regtest`, the bundled node entrypoint adds `-nuparams=5437f330:1` so the pinned 0.9.13 node reaches NU6.2 for Orchard PCZT proving. This flag is intentionally not configurable through Compose and is never passed for testnet or mainnet; their consensus activation schedules come from the node.
 
 Keep `JUNO_NODE_PERSIST_MEMPOOL=1` in production. With `0`, a node restart can forget an accepted but unmined withdrawal even though its signed bytes remain valid. Do not release its selected note IDs: look up the txid, keep the original broadcast operation's uncertainty rules, and deliberately rebroadcast the identical bytes only when the original result is reconciled and canonical height remains below expiry. Release reservations only after the strict post-expiry checks in [Backups and recovery](./recovery.md). Use `0` only for disposable expiry tests or a documented recovery drill.
 
@@ -40,14 +40,14 @@ These settings identify local source builds and the documentation site. They are
 
 | Variable or build argument | Default | Purpose |
 | --- | --- | --- |
-| `JUNOCASH_VERSION` | `0.9.12` | Node release downloaded by the development image |
-| `JUNOCASH_LINUX64_SHA256` | `41f74d…ec386` | Verify the downloaded node archive |
+| `JUNOCASH_VERSION` | `0.9.13` | Node release downloaded by the development image |
+| `JUNOCASH_LINUX64_SHA256` | `7e83b8…04f11` | Verify the downloaded node archive |
 | `JUNO_ADDRGEN_REF` | `4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834` | Address-deriver source and version manifest |
 | `JUNO_ADDRGEN_REPO` | `junocash-tools/juno-addrgen` | Direct gateway-image build argument |
-| `JUNO_SCAN_REF` | `3f6009fe16d15faa0da5a8962e0f5dad30307135` | Scanner commit recorded in the version manifest |
-| `JUNO_TXBUILD_REF` | `05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a` | Planner source and version manifest |
+| `JUNO_SCAN_REF` | `fcd02df03cf09b482f95be070b8fa9894d5c0222` | Scanner commit recorded in the version manifest |
+| `JUNO_TXBUILD_REF` | `553a977038c7f0660fc361acc059df80ce3101f3` | Planner source and version manifest |
 | `JUNO_TXBUILD_REPO` | `junocash-tools/juno-txbuild` | Direct planner-image build argument |
-| `JUNO_TXSIGN_REF` | `121ef749383e27fb82c302e96cd55b70611817fc` | Offline signer source and published image |
+| `JUNO_TXSIGN_REF` | `d33f925dc73ee929ac95073fdcd40a4f17dbb43d` | Offline signer source and published image |
 | `JUNO_TXSIGN_REPO` | `junocash-tools/juno-txsign` | Offline signer-image build argument |
 | `JUNO_GATEWAY_VERSION` | `dev` | Gateway version recorded in the binary |
 | `JUNO_GATEWAY_REVISION` | `local` | Gateway commit recorded in the binary |

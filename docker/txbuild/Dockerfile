@@ -1,7 +1,7 @@
 FROM rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 AS rust-build
 
 ARG JUNO_TXBUILD_REPO=https://github.com/junocash-tools/juno-txbuild.git
-ARG JUNO_TXBUILD_REF=05fb761c92ccb9a5da1cafec1e56c3cdca7ca20a
+ARG JUNO_TXBUILD_REF=553a977038c7f0660fc361acc059df80ce3101f3
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
   && rm -rf /var/lib/apt/lists/*
