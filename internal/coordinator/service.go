@@ -154,6 +154,26 @@ func (s *Service) Attempt(ctx context.Context, principal, attemptID string) (Att
 	return view, err
 }
 
+func (s *Service) ActiveAttempts(ctx context.Context, principal, walletID string) ([]Attempt, error) {
+	if _, ok := s.wallets[walletID]; !ok {
+		return nil, opError("not_found", "wallet not found", false)
+	}
+	values, err := s.store.ActiveAttemptsByWallet(ctx, walletID, principal, 1000)
+	if errors.Is(err, storage.ErrAttemptListLimit) {
+		return nil, opError("attempt_list_limit_exceeded", "more than 1000 active attempts; contact the coordinator operator", false)
+	}
+	if err != nil {
+		return nil, opError("internal", "active transaction attempts could not be read", false)
+	}
+	attempts := make([]Attempt, 0, len(values))
+	for _, value := range values {
+		view := attemptView(value)
+		view.RawTxHex = "" // Diagnostics must never expose signed transaction material.
+		attempts = append(attempts, view)
+	}
+	return attempts, nil
+}
+
 func (s *Service) Cancel(ctx context.Context, principal, attemptID string) (Attempt, error) {
 	if !attemptIDRE.MatchString(attemptID) {
 		return Attempt{}, opError("invalid_request", "attempt_id is invalid", false)

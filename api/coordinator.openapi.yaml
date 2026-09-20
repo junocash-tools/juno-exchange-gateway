@@ -167,6 +167,53 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/SignedMaterialUnavailable" }
+  /v1/wallets/{wallet_id}/transaction-attempts/active:
+    get:
+      operationId: listActiveTransactionAttempts
+      tags: [Transaction attempts]
+      summary: Inspect the caller's active attempts for a wallet
+      x-required-scope: plan
+      description: |
+        On-demand diagnostics for a withdrawal that cannot select a note. Only
+        attempts created by this exact credential name and within its wallet
+        grant are returned. Includes reservations and attempt errors but never
+        signed raw transaction bytes. A complete list of up to 1000 is returned;
+        larger lists fail with 422 instead of silently truncating. Do not call
+        this as a prerequisite to every withdrawal.
+      parameters:
+        - name: wallet_id
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/WalletID" }
+        - $ref: "#/components/parameters/RequestID"
+      responses:
+        "200":
+          description: Complete list of the caller's active attempts for this wallet.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, data, request_id]
+                properties:
+                  status: { const: ok }
+                  request_id: { type: string }
+                  data:
+                    type: object
+                    required: [wallet_id, attempts]
+                    properties:
+                      wallet_id: { $ref: "#/components/schemas/WalletID" }
+                      attempts:
+                        type: array
+                        maxItems: 1000
+                        items: { $ref: "#/components/schemas/ActiveAttempt" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "422":
+          description: More than 1000 active attempts; contact the coordinator operator.
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500": { $ref: "#/components/responses/Internal" }
   /v1/transaction-attempts/{attempt_id}/cancel:
     post:
       operationId: cancelTransactionAttempt
@@ -485,6 +532,31 @@ components:
           allOf:
             - $ref: "#/components/schemas/Error"
           description: Last asynchronous attempt error. This may appear inside an HTTP success envelope.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ActiveAttempt:
+      type: object
+      additionalProperties: false
+      required: [attempt_id, state, wallet_id, approval_reference, created_at, updated_at]
+      properties:
+        attempt_id: { $ref: "#/components/schemas/AttemptID" }
+        state: { $ref: "#/components/schemas/AttemptState" }
+        wallet_id: { $ref: "#/components/schemas/WalletID" }
+        approval_reference: { type: string, minLength: 1, maxLength: 128 }
+        change_address: { type: string }
+        plan_digest: { type: string }
+        fee_zat: { $ref: "#/components/schemas/Zatoshi" }
+        expiry_height: { type: integer, format: int64, minimum: 1 }
+        selected_note_ids:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/NoteID" }
+        txid: { $ref: "#/components/schemas/TxID" }
+        orchard_output_action_indices:
+          type: array
+          items: { type: integer, minimum: 0, maximum: 199 }
+        orchard_change_action_index: { type: integer, minimum: 0, maximum: 199 }
+        error: { $ref: "#/components/schemas/Error" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     AttemptResponse:

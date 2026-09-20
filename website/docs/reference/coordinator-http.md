@@ -101,6 +101,15 @@ Persist `change_address` and verify outgoing and change effects against that reg
 
 For `signed`, `broadcast`, and `orphaned`, every POST replay and GET synchronously checks the healthy canonical node tip before returning raw hex. If the tip is past `expiry_height`, the response is `expired_pending_reconciliation` with raw hex omitted, even when the background row has not refreshed yet. If the tip cannot be verified, the API returns retryable `503 expiry_status_unavailable` and withholds raw material. Retry the same attempt; never substitute a new key because the existing notes remain reserved. `expired_pending_reconciliation` and `released` responses always omit raw hex.
 
+## Diagnose active attempts for a wallet
+
+```http
+GET /v1/wallets/exchange-hot/transaction-attempts/active
+Authorization: Bearer <coordinator-token>
+```
+
+The private coordinator returns the caller's complete active attempt list for a granted wallet. Each entry contains its `attempt_id`, approval reference, state, selected note IDs, txid/expiry when known, latest structured error, and timestamps. It never returns `raw_tx_hex`. Other credential names' attempts remain invisible even when they have access to the same wallet. A list over 1000 returns `422 attempt_list_limit_exceeded` rather than a partial result; ask the operator to investigate. This is an on-demand diagnostic for blocked liquidity, **not** a request the exchange must make before every withdrawal. If another credential owns a reservation, the coordinator operator must investigate its state.
+
 ## Cancel
 
 ```http

@@ -31,6 +31,7 @@ docker compose -f compose.yaml -f compose.automation.yaml logs --since=15m gatew
 | Cursor `409 cursor_reset_required` | Scanner event epoch changed | Restart without the cursor and replay idempotently by stable deposit identity |
 | Cursor `400` | Malformed, cross-wallet, wrong-key, or otherwise unauthenticated cursor | Fix the request; during audited key-loss recovery, discard it explicitly; never auto-reset on `400` |
 | Attempt stays `planning` | `data.error`, scanner/node readiness, balance, reservation conflicts | If retryable, keep the same attempt; otherwise wait for `failed_unsigned`, fix/reapprove, and use a new key |
+| Balance shows notes but planner says `no spendable notes` | Effective `min_confirmations` / `min_note_zat`, pending spends, and private coordinator `GET /v1/wallets/{wallet_id}/transaction-attempts/active` | Diagnose on demand; the scanner aggregate does not subtract coordinator reservations. An operator can inspect other credential owners if the caller's list is empty. Do not clear reservations or make this a per-withdrawal preflight. |
 | Attempt is `signing_unknown` | Signer health and journal permissions | Keep notes locked and poll the same ID; never replan, cancel, or delete journal state |
 | Cancel returns `409 attempt_not_cancellable` | Attempt state and signer journal | Signing may have started; keep polling and do not create a replacement |
 | SDK wait times out | Stored attempt ID or original create key/body | Poll the same ID, or replay the exact create request/key to recover it; timeout does not cancel |

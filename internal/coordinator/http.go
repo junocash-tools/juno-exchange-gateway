@@ -94,6 +94,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleCreate(w, r, requestID, principal)
 	default:
+		if walletID, matched := activeAttemptsPath(r.URL.Path); matched {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", http.MethodGet)
+				h.writeError(w, http.StatusMethodNotAllowed, requestID, "method_not_allowed", "method not allowed", false)
+				return
+			}
+			if !principal.hasWallet(walletID) {
+				h.writeError(w, http.StatusForbidden, requestID, "forbidden", "credential is not authorized for this wallet", false)
+				return
+			}
+			attempts, err := h.service.ActiveAttempts(r.Context(), principal.name, walletID)
+			if err != nil {
+				h.writeOperationError(w, requestID, err)
+				return
+			}
+			h.writeData(w, http.StatusOK, requestID, map[string]any{"wallet_id": walletID, "attempts": attempts})
+			return
+		}
 		attemptID, action, matched := attemptPath(r.URL.Path)
 		if !matched {
 			h.writeError(w, http.StatusNotFound, requestID, "not_found", "route not found", false)
@@ -259,6 +277,8 @@ func (h *Handler) writeOperationError(w http.ResponseWriter, requestID string, e
 		status = http.StatusServiceUnavailable
 	case "rate_limited":
 		status = http.StatusTooManyRequests
+	case "attempt_list_limit_exceeded":
+		status = http.StatusUnprocessableEntity
 	}
 	h.writeError(w, status, requestID, operation.Code, operation.Message, operation.Retryable)
 }
@@ -297,6 +317,14 @@ func attemptPath(path string) (string, string, bool) {
 		return segments[2], "cancel", true
 	}
 	return "", "", false
+}
+
+func activeAttemptsPath(path string) (string, bool) {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) == 5 && segments[0] == "v1" && segments[1] == "wallets" && segments[2] != "" && segments[3] == "transaction-attempts" && segments[4] == "active" {
+		return segments[2], true
+	}
+	return "", false
 }
 
 func jsonContentType(value string) bool {

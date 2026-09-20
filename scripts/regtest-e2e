@@ -951,6 +951,12 @@ assert_jq "$run_dir/withdrawal-signed.json" \
   "Node SDK did not return a complete signed raw transaction"
 withdrawal_attempt_id="$(jq -er '.attemptId' "$run_dir/withdrawal-signed.json")"
 withdrawal_txid="$(jq -er '.txid' "$run_dir/withdrawal-signed.json")"
+code="$(coordinator_api_status GET "/v1/wallets/$wallet_id/transaction-attempts/active" "$run_dir/withdrawal-active-attempts.json")"
+[[ "$code" == "200" ]] || fail "private active attempts returned HTTP $code"
+assert_jq "$run_dir/withdrawal-active-attempts.json" \
+  --arg attempt "$withdrawal_attempt_id" --arg txid "$withdrawal_txid" \
+  '(.data.attempts | any(.attempt_id == $attempt and .state == "signed" and .txid == $txid and (.selected_note_ids | length) > 0 and (has("raw_tx_hex") | not)))' \
+  "private active attempts did not expose the signed reservation safely"
 raw_tx="$(jq -er '.rawTxHex' "$run_dir/withdrawal-signed.json")"
 change_address="$(jq -er '.changeAddress' "$run_dir/withdrawal-signed.json")"
 withdrawal_expiry_height="$(jq -er '.expiryHeight' "$run_dir/withdrawal-signed.json")"
@@ -1142,6 +1148,11 @@ wait_note_status "$run_dir/withdrawal-note-status-request.json" "$run_dir/withdr
   --arg txid "$withdrawal_txid" --argjson height "$withdrawal_block_height"
 wait_coordinator_state "$withdrawal_attempt_id" final "$run_dir/withdrawal-coordinator-final.json" \
   || fail "coordinator did not finalize and release the confirmed note reservation"
+code="$(coordinator_api_status GET "/v1/wallets/$wallet_id/transaction-attempts/active" "$run_dir/withdrawal-active-after-final.json")"
+[[ "$code" == "200" ]] || fail "post-final active attempts returned HTTP $code"
+assert_jq "$run_dir/withdrawal-active-after-final.json" --arg attempt "$withdrawal_attempt_id" \
+  '(.data.attempts | any(.attempt_id == $attempt) | not)' \
+  "final attempt still appeared as active"
 
 log "Withdrawal expiry: payload conflict, dropped mempool transaction, and scanner expiry"
 "${compose[@]}" run --rm -T txbuild send \

@@ -52,6 +52,7 @@ type ClaimResult struct {
 var (
 	ErrAttemptStateConflict = errors.New("transaction attempt state conflict")
 	ErrNoteReservation      = errors.New("note reservation conflict")
+	ErrAttemptListLimit     = errors.New("active transaction attempt list exceeds the limit")
 )
 
 type TransactionAttempt struct {
@@ -99,6 +100,7 @@ type Store interface {
 	ClaimAttempt(context.Context, TransactionAttempt) (AttemptClaimResult, error)
 	Attempt(context.Context, string) (TransactionAttempt, bool, error)
 	RecoverableAttempts(context.Context, string, int) ([]TransactionAttempt, error)
+	ActiveAttemptsByWallet(context.Context, string, string, int) ([]TransactionAttempt, error)
 	SetAttemptChangeAddress(context.Context, string, string, time.Time) error
 	ActiveNoteIDs(context.Context, string, string) ([]string, error)
 	ReserveAttemptPlan(context.Context, string, string, []byte, string, string, int64, []string, time.Time) error

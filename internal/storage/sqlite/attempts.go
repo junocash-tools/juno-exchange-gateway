@@ -92,6 +92,35 @@ func (s *Store) RecoverableAttempts(ctx context.Context, afterAttemptID string, 
 	return out, nil
 }
 
+func (s *Store) ActiveAttemptsByWallet(ctx context.Context, walletID, principal string, limit int) ([]storage.TransactionAttempt, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, errors.New("active attempt limit must be between 1 and 1000")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+attemptColumns+` FROM transaction_attempts
+		WHERE wallet_id=? AND principal_name=?
+		AND state IN ('planning','reserved','signing','signing_unknown','signed','broadcast','mined','expired_pending_reconciliation','orphaned')
+		ORDER BY created_at,attempt_id LIMIT ?`, walletID, principal, limit+1)
+	if err != nil {
+		return nil, fmt.Errorf("list active transaction attempts: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.TransactionAttempt, 0)
+	for rows.Next() {
+		attempt, err := scanAttempt(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list active transaction attempts: %w", err)
+	}
+	if len(out) > limit {
+		return nil, storage.ErrAttemptListLimit
+	}
+	return out, nil
+}
+
 func (s *Store) SetAttemptChangeAddress(ctx context.Context, attemptID, address string, now time.Time) error {
 	address = strings.TrimSpace(address)
 	if address == "" {

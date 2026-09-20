@@ -31,6 +31,44 @@ func TestTransactionAttemptClaimReplayAndConflict(t *testing.T) {
 	}
 }
 
+func TestActiveAttemptsByWalletIsOwnedBoundedAndExcludesTerminalStates(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	ensureAttemptWallet(t, store)
+	now := time.Now().UTC()
+	for i := 1; i <= 3; i++ {
+		candidate := testAttempt(i, fmt.Sprintf("scope-%d", i), fmt.Sprintf("digest-%d", i), now)
+		if i == 2 {
+			candidate.PrincipalName = "another-exchange"
+		}
+		if _, err := store.ClaimAttempt(ctx, candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	terminal := testAttempt(3, "", "", now)
+	if _, err := store.CancelAttempt(ctx, terminal.AttemptID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.ActiveAttemptsByWallet(ctx, "hot", "exchange", 1)
+	if err != nil || len(active) != 1 || active[0].AttemptID != testAttempt(1, "", "", now).AttemptID {
+		t.Fatalf("active=%v err=%v", attemptIDs(active), err)
+	}
+	if active, err = store.ActiveAttemptsByWallet(ctx, "hot", "another-exchange", 1); err != nil || len(active) != 1 || active[0].AttemptID != testAttempt(2, "", "", now).AttemptID {
+		t.Fatalf("other active=%v err=%v", attemptIDs(active), err)
+	}
+	if active, err = store.ActiveAttemptsByWallet(ctx, "cold", "exchange", 1); err != nil || len(active) != 0 {
+		t.Fatalf("other wallet active=%v err=%v", attemptIDs(active), err)
+	}
+	for i := 4; i <= 5; i++ {
+		if _, err := store.ClaimAttempt(ctx, testAttempt(i, fmt.Sprintf("scope-%d", i), fmt.Sprintf("digest-%d", i), now)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if active, err = store.ActiveAttemptsByWallet(ctx, "hot", "exchange", 1); !errors.Is(err, storage.ErrAttemptListLimit) || active != nil {
+		t.Fatalf("truncated active=%v err=%v", attemptIDs(active), err)
+	}
+}
+
 func TestRecoverableAttemptsUsesStableAttemptIDCursor(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

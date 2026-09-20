@@ -353,6 +353,62 @@ func TestCoordinatorHTTPRequiresPlanCredentialAndUsesStableEnvelope(t *testing.T
 	}
 }
 
+func TestCoordinatorActiveAttemptsArePrivateAndNeverReturnRawHex(t *testing.T) {
+	cfg, store := coordinatorTestConfig(t)
+	ownerToken, otherToken := "owner-token-123456789", "other-token-123456789"
+	cfg.Credentials = []config.Credential{
+		{Name: "exchange", TokenHash: sha256.Sum256([]byte(ownerToken)), Scopes: []string{"plan"}, Wallets: []string{"hot"}},
+		{Name: "other", TokenHash: sha256.Sum256([]byte(otherToken)), Scopes: []string{"plan"}, Wallets: []string{"hot"}},
+	}
+	service := newCoordinatorTestService(t, cfg, store, &fakePlanner{}, &fakeSigner{})
+	handler, err := NewHandler(cfg, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := service.Create(context.Background(), "exchange", "owner-attempt-1", coordinatorRequest("100000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedNote := fmt.Sprintf("%064x:0", 42)
+	if err := store.ReserveAttemptPlan(context.Background(), owner.AttemptID, "regtest", []byte(`{"plan":1}`), "sha256:owner", "200000", 140, []string{ownedNote}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginAttemptSigning(context.Background(), owner.AttemptID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteAttemptSigning(context.Background(), owner.AttemptID, fmt.Sprintf("%064x", 43), "00ff", "200000", []uint32{0}, nil, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Create(context.Background(), "other", "other-attempt-1", coordinatorRequest("200000")); err != nil {
+		t.Fatal(err)
+	}
+	request := func(token, path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	w := request(ownerToken, "/v1/wallets/hot/transaction-attempts/active")
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "00ff") {
+		t.Fatalf("owner list status=%d body=%s", w.Code, w.Body.String())
+	}
+	var envelope struct {
+		Data struct {
+			Attempts []Attempt `json:"attempts"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil || len(envelope.Data.Attempts) != 1 || envelope.Data.Attempts[0].AttemptID != owner.AttemptID || len(envelope.Data.Attempts[0].SelectedNoteIDs) != 1 || envelope.Data.Attempts[0].SelectedNoteIDs[0] != ownedNote || envelope.Data.Attempts[0].RawTxHex != "" {
+		t.Fatalf("owner list=%+v err=%v", envelope, err)
+	}
+	if w = request(otherToken, "/v1/wallets/hot/transaction-attempts/active"); w.Code != http.StatusOK || strings.Contains(w.Body.String(), owner.AttemptID) {
+		t.Fatalf("other principal status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w = request(ownerToken, "/v1/wallets/cold/transaction-attempts/active"); w.Code != http.StatusForbidden {
+		t.Fatalf("wrong wallet status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestRecoveredDatabaseSealBlocksCoordinatorReadinessAndCreation(t *testing.T) {
 	cfg, baseStore := coordinatorTestConfig(t)
 	token := "regtest-recovery-seal-token-123456"
