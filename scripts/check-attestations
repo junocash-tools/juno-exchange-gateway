@@ -12,17 +12,27 @@ fi
 expected="$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')"
 
 jq -e --argjson expected "$expected" '
+  def platform_map:
+    if (type == "object" and has("SLSA")) then
+      if ($expected | length) == 1 then {($expected[0]): .} else {} end
+    else . end;
+  platform_map |
   (type == "object") and
   ((keys | sort) == $expected) and
   all(.[];
     ((.SLSA | type) == "object") and
-    ((.SLSA.buildType | type) == "string") and
-    ((.SLSA.buildType | length) > 0) and
-    ((.SLSA.materials | type) == "array") and
-    ((.SLSA.materials | length) > 0))
+    (((.SLSA.buildType // .SLSA.buildDefinition.buildType) | type) == "string") and
+    (((.SLSA.buildType // .SLSA.buildDefinition.buildType) | length) > 0) and
+    (((.SLSA.materials // .SLSA.buildDefinition.resolvedDependencies) | type) == "array") and
+    (((.SLSA.materials // .SLSA.buildDefinition.resolvedDependencies) | length) > 0))
 ' "$provenance" >/dev/null
 
 jq -e --argjson expected "$expected" '
+  def platform_map:
+    if (type == "object" and has("SPDX")) then
+      if ($expected | length) == 1 then {($expected[0]): .} else {} end
+    else . end;
+  platform_map |
   (type == "object") and
   ((keys | sort) == $expected) and
   all(.[];

@@ -1,0 +1,8 @@
+{
+  "SLSA": {
+    "buildDefinition": {
+      "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+      "resolvedDependencies": [{"uri": "pkg:docker/debian@bookworm"}]
+    }
+  }
+}
