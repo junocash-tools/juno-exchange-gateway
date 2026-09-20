@@ -42,7 +42,7 @@ See [Wallet and authentication setup](../getting-started/wallet-and-auth.md) and
 Install the supported Node.js package:
 
 ```bash
-npm install https://github.com/junocash-tools/juno-exchange-sdk/releases/download/v0.2.0/junocash-tools-exchange-sdk-0.2.0.tgz
+npm install https://github.com/junocash-tools/juno-exchange-sdk/releases/download/v0.3.0/junocash-tools-exchange-sdk-0.3.0.tgz
 ```
 
 Node.js 20 or later is required. The versioned GitHub Release archive is the supported public distribution. Configure the SDK for the same `mainnet`, `testnet`, or `regtest` network as the coordinator.
@@ -66,7 +66,7 @@ const signed = await coordinator.createRawTransaction({
 });
 ```
 
-`createRawTransaction` creates one attempt and polls until signed material is durable. An idempotent replay returns that material in `signed`, `broadcast`, `mined`, `orphaned`, or `final`. It rejects `expired_pending_reconciliation`, `released`, `failed_unsigned`, and `cancelled`, because those states are not safe instructions to submit old bytes. Its default wait is 10 minutes with one-second polling. A local timeout does **not** cancel the server attempt; save the attempt ID from the lower-level flow or retry the same creation key and payload.
+`createRawTransaction` creates one attempt and polls until signed material is durable. An idempotent replay returns that material in `signed`, `broadcast`, `mined`, `orphaned`, or `final`. It rejects `expired_pending_reconciliation`, `released`, `failed_unsigned`, and `cancelled`, because those states are not safe instructions to submit old bytes. Its default wait is two minutes with one-second polling. A local timeout does **not** cancel the server attempt; save the attempt ID from the lower-level flow or retry the same creation key and payload.
 
 For an exchange worker that must accept another withdrawal immediately, use the SDK's `JunoExchangeClient.submitWithdrawal({withdrawalId, walletId, toAddress, amountZat})`. It returns a durable attempt ID without waiting for signing. Follow with `advanceWithdrawal` in a job worker: it replays the same request, reports the current state/error, and broadcasts the exact signed bytes once available. The SDK derives the internal creation/broadcast idempotency keys and approval reference from one stable withdrawal ID. The exchange still owns its withdrawal ledger and must persist the ID; this method does not auto-run a durable worker after the process exits.
 
