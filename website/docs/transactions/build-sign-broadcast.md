@@ -42,7 +42,7 @@ See [Wallet and authentication setup](../getting-started/wallet-and-auth.md) and
 Install the supported Node.js package:
 
 ```bash
-npm install https://github.com/junocash-tools/juno-exchange-sdk/releases/download/v0.3.0/junocash-tools-exchange-sdk-0.3.0.tgz
+npm install https://github.com/junocash-tools/juno-exchange-sdk/releases/download/v0.3.1/junocash-tools-exchange-sdk-0.3.1.tgz
 ```
 
 Node.js 20 or later is required. The versioned GitHub Release archive is the supported public distribution. Configure the SDK for the same `mainnet`, `testnet`, or `regtest` network as the coordinator.

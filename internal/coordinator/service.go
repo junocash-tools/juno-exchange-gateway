@@ -167,9 +167,7 @@ func (s *Service) ActiveAttempts(ctx context.Context, principal, walletID string
 	}
 	attempts := make([]Attempt, 0, len(values))
 	for _, value := range values {
-		view := attemptView(value)
-		view.RawTxHex = "" // Diagnostics must never expose signed transaction material.
-		attempts = append(attempts, view)
+		attempts = append(attempts, activeAttemptView(value))
 	}
 	return attempts, nil
 }

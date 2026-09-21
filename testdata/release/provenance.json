@@ -1,14 +1,14 @@
 {
   "linux/amd64": {
     "SLSA": {
-      "buildType": "https://mobyproject.org/buildkit@v1",
-      "materials": [{"uri": "pkg:docker/debian@bookworm"}]
+      "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+      "materials": [{"uri": "pkg:docker/debian@bookworm", "digest": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
     }
   },
   "linux/arm64": {
     "SLSA": {
-      "buildType": "https://mobyproject.org/buildkit@v1",
-      "materials": [{"uri": "pkg:docker/debian@bookworm"}]
+      "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+      "materials": [{"uri": "pkg:docker/debian@bookworm", "digest": {"sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}]
     }
   }
 }

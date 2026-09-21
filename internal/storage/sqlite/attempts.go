@@ -15,6 +15,8 @@ import (
 
 const attemptColumns = `attempt_id,scoped_idempotency_key,request_digest,principal_name,wallet_id,approval_reference,request_json,state,change_address,plan_json,plan_digest,fee_zat,expiry_height,selected_note_ids_json,txid,raw_tx_hex,output_action_indices_json,change_action_index,error_code,error_message,error_retryable,created_at,updated_at`
 
+const activeAttemptColumns = `attempt_id,principal_name,wallet_id,approval_reference,state,change_address,plan_digest,fee_zat,expiry_height,selected_note_ids_json,txid,output_action_indices_json,change_action_index,error_code,error_message,error_retryable,created_at,updated_at`
+
 func (s *Store) ClaimAttempt(ctx context.Context, candidate storage.TransactionAttempt) (storage.AttemptClaimResult, error) {
 	if candidate.AttemptID == "" || candidate.ScopedIdempotencyKey == "" || candidate.RequestDigest == "" || candidate.PrincipalName == "" || candidate.WalletID == "" || candidate.ApprovalReference == "" || len(candidate.RequestJSON) == 0 {
 		return storage.AttemptClaimResult{}, errors.New("transaction attempt claim is incomplete")
@@ -92,11 +94,11 @@ func (s *Store) RecoverableAttempts(ctx context.Context, afterAttemptID string, 
 	return out, nil
 }
 
-func (s *Store) ActiveAttemptsByWallet(ctx context.Context, walletID, principal string, limit int) ([]storage.TransactionAttempt, error) {
+func (s *Store) ActiveAttemptsByWallet(ctx context.Context, walletID, principal string, limit int) ([]storage.ActiveAttempt, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, errors.New("active attempt limit must be between 1 and 1000")
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+attemptColumns+` FROM transaction_attempts
+	rows, err := s.db.QueryContext(ctx, `SELECT `+activeAttemptColumns+` FROM transaction_attempts
 		WHERE wallet_id=? AND principal_name=?
 		AND state IN ('planning','reserved','signing','signing_unknown','signed','broadcast','mined','expired_pending_reconciliation','orphaned')
 		ORDER BY created_at,attempt_id LIMIT ?`, walletID, principal, limit+1)
@@ -104,9 +106,9 @@ func (s *Store) ActiveAttemptsByWallet(ctx context.Context, walletID, principal 
 		return nil, fmt.Errorf("list active transaction attempts: %w", err)
 	}
 	defer rows.Close()
-	out := make([]storage.TransactionAttempt, 0)
+	out := make([]storage.ActiveAttempt, 0)
 	for rows.Next() {
-		attempt, err := scanAttempt(rows)
+		attempt, err := scanActiveAttempt(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -117,6 +119,54 @@ func (s *Store) ActiveAttemptsByWallet(ctx context.Context, walletID, principal 
 	}
 	if len(out) > limit {
 		return nil, storage.ErrAttemptListLimit
+	}
+	return out, nil
+}
+
+func scanActiveAttempt(row attemptRow) (storage.ActiveAttempt, error) {
+	var out storage.ActiveAttempt
+	var planDigest, feeZat, txid, errorCode, errorMessage sql.NullString
+	var noteIDsJSON, indicesJSON []byte
+	var expiry, changeIndex sql.NullInt64
+	var retryable int
+	var created, updated string
+	var changeAddress sql.NullString
+	if err := row.Scan(&out.AttemptID, &out.PrincipalName, &out.WalletID, &out.ApprovalReference, &out.State, &changeAddress,
+		&planDigest, &feeZat, &expiry, &noteIDsJSON, &txid, &indicesJSON, &changeIndex,
+		&errorCode, &errorMessage, &retryable, &created, &updated); err != nil {
+		return storage.ActiveAttempt{}, err
+	}
+	out.ChangeAddress = changeAddress.String
+	out.PlanDigest = planDigest.String
+	out.FeeZat = feeZat.String
+	if expiry.Valid {
+		out.ExpiryHeight = expiry.Int64
+	}
+	if len(noteIDsJSON) > 0 && json.Unmarshal(noteIDsJSON, &out.SelectedNoteIDs) != nil {
+		return storage.ActiveAttempt{}, errors.New("stored active attempt note IDs are invalid")
+	}
+	out.TxID = txid.String
+	if len(indicesJSON) > 0 && json.Unmarshal(indicesJSON, &out.OrchardOutputActionIndices) != nil {
+		return storage.ActiveAttempt{}, errors.New("stored active attempt output indices are invalid")
+	}
+	if changeIndex.Valid {
+		if changeIndex.Int64 < 0 || changeIndex.Int64 > int64(^uint32(0)) {
+			return storage.ActiveAttempt{}, errors.New("stored active attempt change action index is invalid")
+		}
+		value := uint32(changeIndex.Int64)
+		out.OrchardChangeActionIndex = &value
+	}
+	out.ErrorCode = errorCode.String
+	out.ErrorMessage = errorMessage.String
+	out.ErrorRetryable = retryable != 0
+	var err error
+	out.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+	if err != nil {
+		return storage.ActiveAttempt{}, errors.New("stored active attempt creation time is invalid")
+	}
+	out.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated)
+	if err != nil {
+		return storage.ActiveAttempt{}, errors.New("stored active attempt update time is invalid")
 	}
 	return out, nil
 }

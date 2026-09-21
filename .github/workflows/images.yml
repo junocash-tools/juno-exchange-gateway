@@ -320,6 +320,9 @@ jobs:
               --format '{{json .Provenance}}' > "release/${component}-provenance.json"
             docker buildx imagetools inspect "$image" \
               --format '{{json .SBOM}}' > "release/${component}-sbom.json"
+            ATTESTATION_REPOSITORY="$GITHUB_REPOSITORY" \
+            ATTESTATION_REVISION="$GITHUB_SHA" \
+            ATTESTATION_VERSION="$version" \
             ./scripts/check-attestations \
               "release/${component}-provenance.json" \
               "release/${component}-sbom.json" \
@@ -423,6 +426,9 @@ jobs:
             ./scripts/check-oci-index "/tmp/${component}-anonymous-oci-index.json" "${expected_platforms[@]}"
             docker buildx imagetools inspect "$image" --format '{{json .Provenance}}' > "/tmp/${component}-anonymous-provenance.json"
             docker buildx imagetools inspect "$image" --format '{{json .SBOM}}' > "/tmp/${component}-anonymous-sbom.json"
+            ATTESTATION_REPOSITORY="$GITHUB_REPOSITORY" \
+            ATTESTATION_REVISION="$GITHUB_SHA" \
+            ATTESTATION_VERSION="$(jq -er '.version' release/release-provenance.json)" \
             ./scripts/check-attestations \
               "/tmp/${component}-anonymous-provenance.json" \
               "/tmp/${component}-anonymous-sbom.json" \

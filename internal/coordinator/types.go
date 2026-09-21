@@ -219,6 +219,29 @@ func attemptView(value storage.TransactionAttempt) Attempt {
 	return out
 }
 
+func activeAttemptView(value storage.ActiveAttempt) Attempt {
+	out := Attempt{
+		AttemptID:                  value.AttemptID,
+		State:                      value.State,
+		WalletID:                   value.WalletID,
+		ApprovalReference:          value.ApprovalReference,
+		ChangeAddress:              value.ChangeAddress,
+		PlanDigest:                 value.PlanDigest,
+		FeeZat:                     value.FeeZat,
+		ExpiryHeight:               value.ExpiryHeight,
+		SelectedNoteIDs:            append([]string(nil), value.SelectedNoteIDs...),
+		TxID:                       value.TxID,
+		OrchardOutputActionIndices: append([]uint32(nil), value.OrchardOutputActionIndices...),
+		OrchardChangeActionIndex:   value.OrchardChangeActionIndex,
+		CreatedAt:                  value.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:                  value.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if value.ErrorCode != "" {
+		out.Error = &APIError{Code: value.ErrorCode, Message: value.ErrorMessage, Retryable: value.ErrorRetryable}
+	}
+	return out
+}
+
 func parseDecimalZat(raw string) (uint64, error) {
 	if raw == "" || (len(raw) > 1 && raw[0] == '0') {
 		return 0, errors.New("invalid decimal amount")

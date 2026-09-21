@@ -10,8 +10,15 @@ if [[ ! -f "$provenance" || ! -f "$sbom" || "$#" -eq 0 ]]; then
 fi
 
 expected="$(printf '%s\n' "$@" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique | sort')"
+expected_repository="${ATTESTATION_REPOSITORY:-}"
+expected_revision="${ATTESTATION_REVISION:-}"
+expected_version="${ATTESTATION_VERSION:-}"
 
-jq -e --argjson expected "$expected" '
+jq -e \
+  --argjson expected "$expected" \
+  --arg expected_repository "$expected_repository" \
+  --arg expected_revision "$expected_revision" \
+  --arg expected_version "$expected_version" '
   def platform_map:
     if (type == "object" and has("SLSA")) then
       if ($expected | length) == 1 then {($expected[0]): .} else {} end
@@ -22,9 +29,25 @@ jq -e --argjson expected "$expected" '
   all(.[];
     ((.SLSA | type) == "object") and
     (((.SLSA.buildType // .SLSA.buildDefinition.buildType) | type) == "string") and
-    (((.SLSA.buildType // .SLSA.buildDefinition.buildType) | length) > 0) and
+    ((.SLSA.buildType // .SLSA.buildDefinition.buildType) == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md") and
     (((.SLSA.materials // .SLSA.buildDefinition.resolvedDependencies) | type) == "array") and
-    (((.SLSA.materials // .SLSA.buildDefinition.resolvedDependencies) | length) > 0))
+    (((.SLSA.materials // .SLSA.buildDefinition.resolvedDependencies) | length) > 0) and
+    all((.SLSA.materials // .SLSA.buildDefinition.resolvedDependencies)[];
+      (type == "object") and
+      (.uri | type == "string") and
+      (.uri | length > 0) and
+      (.digest | type == "object") and
+      ((.digest | length) > 0)) and
+    ((.SLSA.buildDefinition // {}) as $definition |
+      ($definition.externalParameters.request.args // {}) as $args |
+      ($expected_repository == "" or
+        ($args["label:org.opencontainers.image.source"] == ("https://github.com/" + $expected_repository))) and
+      ($expected_revision == "" or
+        ($args["build-arg:REVISION"] == $expected_revision and
+         $args["label:org.opencontainers.image.revision"] == $expected_revision)) and
+      ($expected_version == "" or
+        ($args["build-arg:VERSION"] == $expected_version and
+         $args["label:org.opencontainers.image.version"] == $expected_version))))
 ' "$provenance" >/dev/null
 
 jq -e --argjson expected "$expected" '
@@ -40,5 +63,6 @@ jq -e --argjson expected "$expected" '
     ((.SPDX.spdxVersion | type) == "string") and
     (.SPDX.spdxVersion | test("^SPDX-[0-9]+(\\.[0-9]+)+$")) and
     ((.SPDX.packages | type) == "array") and
-    ((.SPDX.packages | length) > 0))
+    ((.SPDX.packages | length) > 0) and
+    all(.SPDX.packages[]; (type == "object") and (.name | type == "string") and (.name | length > 0)))
 ' "$sbom" >/dev/null

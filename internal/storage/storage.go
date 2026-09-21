@@ -81,6 +81,29 @@ type TransactionAttempt struct {
 	UpdatedAt                  time.Time
 }
 
+// ActiveAttempt is the bounded, non-sensitive projection used by diagnostics.
+// It deliberately has no request, plan, or signed transaction material.
+type ActiveAttempt struct {
+	AttemptID                  string
+	PrincipalName              string
+	WalletID                   string
+	ApprovalReference          string
+	State                      string
+	ChangeAddress              string
+	PlanDigest                 string
+	FeeZat                     string
+	ExpiryHeight               int64
+	SelectedNoteIDs            []string
+	TxID                       string
+	OrchardOutputActionIndices []uint32
+	OrchardChangeActionIndex   *uint32
+	ErrorCode                  string
+	ErrorMessage               string
+	ErrorRetryable             bool
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
+}
+
 type AttemptClaimResult struct {
 	State   ClaimState
 	Attempt TransactionAttempt
@@ -100,7 +123,7 @@ type Store interface {
 	ClaimAttempt(context.Context, TransactionAttempt) (AttemptClaimResult, error)
 	Attempt(context.Context, string) (TransactionAttempt, bool, error)
 	RecoverableAttempts(context.Context, string, int) ([]TransactionAttempt, error)
-	ActiveAttemptsByWallet(context.Context, string, string, int) ([]TransactionAttempt, error)
+	ActiveAttemptsByWallet(context.Context, string, string, int) ([]ActiveAttempt, error)
 	SetAttemptChangeAddress(context.Context, string, string, time.Time) error
 	ActiveNoteIDs(context.Context, string, string) ([]string, error)
 	ReserveAttemptPlan(context.Context, string, string, []byte, string, string, int64, []string, time.Time) error

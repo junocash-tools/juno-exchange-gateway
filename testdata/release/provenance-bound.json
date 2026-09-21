@@ -1,0 +1,31 @@
+{
+  "linux/amd64": {
+    "SLSA": {
+      "buildDefinition": {
+        "buildType": "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+        "externalParameters": {
+          "request": {
+            "args": {
+              "build-arg:REVISION": "0123456789abcdef0123456789abcdef01234567",
+              "build-arg:VERSION": "1.2.3",
+              "label:org.opencontainers.image.revision": "0123456789abcdef0123456789abcdef01234567",
+              "label:org.opencontainers.image.source": "https://github.com/junocash-tools/juno-exchange-gateway",
+              "label:org.opencontainers.image.version": "1.2.3"
+            }
+          }
+        },
+        "internalParameters": {
+          "github_ref": "refs/tags/v1.2.3",
+          "github_ref_type": "tag",
+          "github_repository": "junocash-tools/juno-exchange-gateway"
+        },
+        "resolvedDependencies": [
+          {
+            "uri": "pkg:docker/debian@bookworm",
+            "digest": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+          }
+        ]
+      }
+    }
+  }
+}

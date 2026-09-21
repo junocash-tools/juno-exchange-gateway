@@ -51,13 +51,13 @@ func TestActiveAttemptsByWalletIsOwnedBoundedAndExcludesTerminalStates(t *testin
 	}
 	active, err := store.ActiveAttemptsByWallet(ctx, "hot", "exchange", 1)
 	if err != nil || len(active) != 1 || active[0].AttemptID != testAttempt(1, "", "", now).AttemptID {
-		t.Fatalf("active=%v err=%v", attemptIDs(active), err)
+		t.Fatalf("active=%v err=%v", activeIDs(active), err)
 	}
 	if active, err = store.ActiveAttemptsByWallet(ctx, "hot", "another-exchange", 1); err != nil || len(active) != 1 || active[0].AttemptID != testAttempt(2, "", "", now).AttemptID {
-		t.Fatalf("other active=%v err=%v", attemptIDs(active), err)
+		t.Fatalf("other active=%v err=%v", activeIDs(active), err)
 	}
 	if active, err = store.ActiveAttemptsByWallet(ctx, "cold", "exchange", 1); err != nil || len(active) != 0 {
-		t.Fatalf("other wallet active=%v err=%v", attemptIDs(active), err)
+		t.Fatalf("other wallet active=%v err=%v", activeIDs(active), err)
 	}
 	for i := 4; i <= 5; i++ {
 		if _, err := store.ClaimAttempt(ctx, testAttempt(i, fmt.Sprintf("scope-%d", i), fmt.Sprintf("digest-%d", i), now)); err != nil {
@@ -65,7 +65,73 @@ func TestActiveAttemptsByWalletIsOwnedBoundedAndExcludesTerminalStates(t *testin
 		}
 	}
 	if active, err = store.ActiveAttemptsByWallet(ctx, "hot", "exchange", 1); !errors.Is(err, storage.ErrAttemptListLimit) || active != nil {
-		t.Fatalf("truncated active=%v err=%v", attemptIDs(active), err)
+		t.Fatalf("truncated active=%v err=%v", activeIDs(active), err)
+	}
+}
+
+func TestActiveAttemptsProjectionPreservesNonSensitiveFields(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	ensureAttemptWallet(t, store)
+	now := time.Now().UTC()
+	candidate := testAttempt(77, "scope-projection", "digest-projection", now)
+	claim, err := store.ClaimAttempt(ctx, candidate)
+	if err != nil || claim.State != storage.ClaimAcquired {
+		t.Fatalf("claim=%+v err=%v", claim, err)
+	}
+	if err := store.SetAttemptChangeAddress(ctx, candidate.AttemptID, "jregtest1change1", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	noteID := fmt.Sprintf("%064x:0", 77)
+	if err := store.ReserveAttemptPlan(ctx, candidate.AttemptID, "regtest", []byte(`{"request_json":"must not be selected"}`), "sha256:projection", "200000", 140, []string{noteID}, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginAttemptSigning(ctx, candidate.AttemptID, now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	changeIndex := uint32(1)
+	if err := store.CompleteAttemptSigning(ctx, candidate.AttemptID, fmt.Sprintf("%064x", 78), "deadbeef", "200000", []uint32{0}, &changeIndex, now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	errorAttempt := testAttempt(79, "scope-error", "digest-error", now)
+	if _, err := store.ClaimAttempt(ctx, errorAttempt); err != nil {
+		t.Fatal(err)
+	}
+	errorNote := fmt.Sprintf("%064x:0", 79)
+	if err := store.ReserveAttemptPlan(ctx, errorAttempt.AttemptID, "regtest", []byte(`{"plan":79}`), "sha256:error", "210000", 141, []string{errorNote}, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginAttemptSigning(ctx, errorAttempt.AttemptID, now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAttemptState(ctx, errorAttempt.AttemptID, "signing_unknown", "signer_unavailable", "signer outcome unknown", true, false, now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := store.ActiveAttemptsByWallet(ctx, "hot", "exchange", 10)
+	if err != nil || len(active) != 2 {
+		t.Fatalf("active=%+v err=%v", active, err)
+	}
+	var got, errored storage.ActiveAttempt
+	for _, value := range active {
+		if value.AttemptID == candidate.AttemptID {
+			got = value
+		}
+		if value.AttemptID == errorAttempt.AttemptID {
+			errored = value
+		}
+	}
+	if got.AttemptID != candidate.AttemptID || got.PrincipalName != "exchange" || got.WalletID != "hot" ||
+		got.ApprovalReference != candidate.ApprovalReference || got.ChangeAddress != "jregtest1change1" ||
+		got.PlanDigest != "sha256:projection" || got.FeeZat != "200000" || got.ExpiryHeight != 140 ||
+		len(got.SelectedNoteIDs) != 1 || got.SelectedNoteIDs[0] != noteID || got.TxID != fmt.Sprintf("%064x", 78) ||
+		len(got.OrchardOutputActionIndices) != 1 || got.OrchardOutputActionIndices[0] != 0 || got.OrchardChangeActionIndex == nil || *got.OrchardChangeActionIndex != 1 ||
+		!got.CreatedAt.Equal(candidate.CreatedAt) || got.UpdatedAt.IsZero() {
+		t.Fatalf("projection=%+v", got)
+	}
+	if errored.AttemptID != errorAttempt.AttemptID || errored.State != "signing_unknown" || errored.ErrorCode != "signer_unavailable" ||
+		errored.ErrorMessage != "signer outcome unknown" || !errored.ErrorRetryable {
+		t.Fatalf("error projection=%+v", errored)
 	}
 }
 
@@ -141,6 +207,14 @@ func attemptIDs(attempts []storage.TransactionAttempt) []string {
 		out[index] = attempts[index].AttemptID
 	}
 	return out
+}
+
+func activeIDs(attempts []storage.ActiveAttempt) []string {
+	ids := make([]string, 0, len(attempts))
+	for _, attempt := range attempts {
+		ids = append(ids, attempt.AttemptID)
+	}
+	return ids
 }
 
 func TestTransactionAttemptReservationsAreAtomicAndSurviveSigning(t *testing.T) {

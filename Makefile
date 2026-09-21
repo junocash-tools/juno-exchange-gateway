@@ -27,6 +27,7 @@ test-release-contract:
 	! ./scripts/check-attestations testdata/release/provenance.json testdata/release/sbom.json linux/amd64
 	! ./scripts/check-attestations testdata/release/provenance-missing-materials.json testdata/release/sbom.json linux/amd64 linux/arm64
 	./scripts/check-attestations testdata/release/provenance-single.json testdata/release/sbom-single.json linux/amd64
+	ATTESTATION_REPOSITORY=junocash-tools/juno-exchange-gateway ATTESTATION_REVISION=0123456789abcdef0123456789abcdef01234567 ATTESTATION_VERSION=1.2.3 ./scripts/check-attestations testdata/release/provenance-bound.json testdata/release/sbom-single.json linux/amd64
 
 test-docs: docs-build
 

@@ -370,6 +370,9 @@ func TestCoordinatorActiveAttemptsArePrivateAndNeverReturnRawHex(t *testing.T) {
 		t.Fatal(err)
 	}
 	ownedNote := fmt.Sprintf("%064x:0", 42)
+	if err := store.SetAttemptChangeAddress(context.Background(), owner.AttemptID, "jregtest1change1", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.ReserveAttemptPlan(context.Background(), owner.AttemptID, "regtest", []byte(`{"plan":1}`), "sha256:owner", "200000", 140, []string{ownedNote}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +401,7 @@ func TestCoordinatorActiveAttemptsArePrivateAndNeverReturnRawHex(t *testing.T) {
 			Attempts []Attempt `json:"attempts"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil || len(envelope.Data.Attempts) != 1 || envelope.Data.Attempts[0].AttemptID != owner.AttemptID || len(envelope.Data.Attempts[0].SelectedNoteIDs) != 1 || envelope.Data.Attempts[0].SelectedNoteIDs[0] != ownedNote || envelope.Data.Attempts[0].RawTxHex != "" {
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil || len(envelope.Data.Attempts) != 1 || envelope.Data.Attempts[0].AttemptID != owner.AttemptID || envelope.Data.Attempts[0].ChangeAddress != "jregtest1change1" || len(envelope.Data.Attempts[0].SelectedNoteIDs) != 1 || envelope.Data.Attempts[0].SelectedNoteIDs[0] != ownedNote || envelope.Data.Attempts[0].RawTxHex != "" {
 		t.Fatalf("owner list=%+v err=%v", envelope, err)
 	}
 	if w = request(otherToken, "/v1/wallets/hot/transaction-attempts/active"); w.Code != http.StatusOK || strings.Contains(w.Body.String(), owner.AttemptID) {
