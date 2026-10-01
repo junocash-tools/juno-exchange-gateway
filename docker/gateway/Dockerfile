@@ -9,7 +9,7 @@ WORKDIR /src
 RUN git clone "${JUNO_ADDRGEN_REPO}" . && git checkout --detach "${JUNO_ADDRGEN_REF}"
 RUN cargo build --locked --release --manifest-path rust/addrgen/Cargo.toml
 
-FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS addrgen-go
+FROM golang:1.27-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS addrgen-go
 
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
   && rm -rf /var/lib/apt/lists/*
@@ -28,7 +28,7 @@ WORKDIR /src
 RUN git clone "${JUNO_TXBUILD_REPO}" . && git checkout --detach "${JUNO_TXBUILD_REF}"
 RUN cargo build --locked --release --manifest-path rust/txbuild/Cargo.toml
 
-FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS txbuild-go
+FROM golang:1.27-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS txbuild-go
 
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
   && rm -rf /var/lib/apt/lists/*
@@ -37,7 +37,7 @@ COPY --from=txbuild-rust /src /src
 RUN GOWORK=off go mod download
 RUN GOWORK=off go build -trimpath -ldflags "-s -w" -o /out/juno-txbuild ./cmd/juno-txbuild
 
-FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS gateway-build
+FROM golang:1.27-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS gateway-build
 
 ARG VERSION=dev
 ARG REVISION=unknown
