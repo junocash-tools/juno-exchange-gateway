@@ -60,7 +60,7 @@
     },
     "txbuild": {
       "repository": "https://github.com/junocash-tools/juno-txbuild.git",
-      "revision": "553a977038c7f0660fc361acc059df80ce3101f3"
+      "revision": "49c16f6b564286229e9e8e191db0037cf636c80a"
     },
     "txsign": {
       "repository": "https://github.com/junocash-tools/juno-txsign.git",

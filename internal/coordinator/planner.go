@@ -18,7 +18,14 @@ import (
 const plannerOutputLimit = 64 << 10
 
 type Planner interface {
-	Plan(context.Context, CreateRequest, config.Wallet, string, []string) (planResult, error)
+	Plan(context.Context, CreateRequest, config.Wallet, string, []string, planOptions) (planResult, error)
+}
+
+// planOptions carries per-attempt planning choices made by the coordinator.
+type planOptions struct {
+	// SplitChange asks the planner to divide change into this many notes.
+	// Values below 2 leave change as a single note.
+	SplitChange int
 }
 
 type ExecPlanner struct {
@@ -30,7 +37,7 @@ func NewExecPlanner(cfg config.Config) *ExecPlanner {
 	return &ExecPlanner{cfg: cfg, commandContext: exec.CommandContext}
 }
 
-func (p *ExecPlanner) Plan(ctx context.Context, request CreateRequest, wallet config.Wallet, changeAddress string, excludedNoteIDs []string) (planResult, error) {
+func (p *ExecPlanner) Plan(ctx context.Context, request CreateRequest, wallet config.Wallet, changeAddress string, excludedNoteIDs []string, options planOptions) (planResult, error) {
 	if err := os.MkdirAll(p.cfg.CoordinatorWorkDir, 0o700); err != nil {
 		return planResult{}, wrapOpError("planner_unavailable", "planner work directory is unavailable", true, false, err)
 	}
@@ -48,7 +55,7 @@ func (p *ExecPlanner) Plan(ctx context.Context, request CreateRequest, wallet co
 
 	outputsPath := filepath.Join(dir, "outputs.json")
 	planPath := filepath.Join(dir, "txplan.json")
-	outputs, err := json.Marshal(request.Outputs)
+	outputs, err := json.Marshal(request.planOutputs(changeAddress))
 	if err != nil {
 		return planResult{}, opError("invalid_request", "outputs could not be encoded", false)
 	}
@@ -56,8 +63,12 @@ func (p *ExecPlanner) Plan(ctx context.Context, request CreateRequest, wallet co
 		return planResult{}, wrapOpError("planner_unavailable", "planner outputs could not be written", true, false, err)
 	}
 
+	command := "send-many"
+	if request.isSplit() {
+		command = "rebalance"
+	}
 	args := []string{
-		"send-many",
+		command,
 		"--wallet-id", wallet.WalletID,
 		"--coin-type", "0",
 		"--account", strconv.FormatUint(uint64(wallet.Account), 10),
@@ -71,6 +82,12 @@ func (p *ExecPlanner) Plan(ctx context.Context, request CreateRequest, wallet co
 		"--expiry-offset", strconv.FormatInt(p.cfg.CoordinatorExpiryOffset, 10),
 		"--out", planPath,
 		"--json",
+	}
+	if options.SplitChange > 1 && !request.isSplit() {
+		args = append(args,
+			"--split-change", strconv.Itoa(options.SplitChange),
+			"--split-change-min-zat", strconv.FormatInt(p.cfg.CoordinatorSplitMinNoteZat, 10),
+		)
 	}
 	for _, noteID := range excludedNoteIDs {
 		args = append(args, "--exclude-note-id", noteID)

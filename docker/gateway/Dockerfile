@@ -20,7 +20,7 @@ RUN go build -trimpath -ldflags "-s -w" -o /out/juno-addrgen ./cmd/juno-addrgen
 FROM rust:1.86-bookworm@sha256:300ec56abce8cc9448ddea2172747d048ed902a3090e6b57babb2bf19f754081 AS txbuild-rust
 
 ARG JUNO_TXBUILD_REPO=https://github.com/junocash-tools/juno-txbuild.git
-ARG JUNO_TXBUILD_REF=553a977038c7f0660fc361acc059df80ce3101f3
+ARG JUNO_TXBUILD_REF=49c16f6b564286229e9e8e191db0037cf636c80a
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
   && rm -rf /var/lib/apt/lists/*

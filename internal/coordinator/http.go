@@ -94,6 +94,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleCreate(w, r, requestID, principal)
 	default:
+		if walletID, matched := noteInventoryPath(r.URL.Path); matched {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", http.MethodGet)
+				h.writeError(w, http.StatusMethodNotAllowed, requestID, "method_not_allowed", "method not allowed", false)
+				return
+			}
+			if !principal.hasWallet(walletID) {
+				h.writeError(w, http.StatusForbidden, requestID, "forbidden", "credential is not authorized for this wallet", false)
+				return
+			}
+			inventory, err := h.service.NoteInventory(r.Context(), walletID)
+			if err != nil {
+				h.writeOperationError(w, requestID, err)
+				return
+			}
+			h.writeData(w, http.StatusOK, requestID, inventory)
+			return
+		}
 		if walletID, matched := activeAttemptsPath(r.URL.Path); matched {
 			if r.Method != http.MethodGet && r.Method != http.MethodHead {
 				w.Header().Set("Allow", http.MethodGet)
@@ -273,11 +291,11 @@ func (h *Handler) writeOperationError(w http.ResponseWriter, requestID string, e
 		status = http.StatusNotFound
 	case "idempotency_conflict", "attempt_not_cancellable":
 		status = http.StatusConflict
-	case "coordinator_recovery_sealed", "recovery_gate_unavailable", "expiry_status_unavailable":
+	case "coordinator_recovery_sealed", "recovery_gate_unavailable", "expiry_status_unavailable", "scanner_unavailable", "reservation_state_unavailable":
 		status = http.StatusServiceUnavailable
 	case "rate_limited":
 		status = http.StatusTooManyRequests
-	case "attempt_list_limit_exceeded":
+	case "attempt_list_limit_exceeded", "note_summary_limit_exceeded":
 		status = http.StatusUnprocessableEntity
 	}
 	h.writeError(w, status, requestID, operation.Code, operation.Message, operation.Retryable)
@@ -322,6 +340,14 @@ func attemptPath(path string) (string, string, bool) {
 func activeAttemptsPath(path string) (string, bool) {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	if len(segments) == 5 && segments[0] == "v1" && segments[1] == "wallets" && segments[2] != "" && segments[3] == "transaction-attempts" && segments[4] == "active" {
+		return segments[2], true
+	}
+	return "", false
+}
+
+func noteInventoryPath(path string) (string, bool) {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) == 4 && segments[0] == "v1" && segments[1] == "wallets" && segments[2] != "" && segments[3] == "note-inventory" {
 		return segments[2], true
 	}
 	return "", false

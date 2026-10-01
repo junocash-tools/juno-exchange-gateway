@@ -25,6 +25,8 @@ const (
 	recoveryBatchSize           = 1000
 	recoveryInterval            = 5 * time.Second
 	signingUnknownRetryInterval = time.Minute
+	notesReservedRetryInterval  = 15 * time.Second
+	maxInventoryReservations    = 5000
 )
 
 type AddressAllocator func(context.Context, string, string) (storage.Address, error)
@@ -119,12 +121,12 @@ func (s *Service) Create(ctx context.Context, principal, idempotencyKey string, 
 	case storage.ClaimReplay:
 		view, err := s.attemptForResponse(ctx, claim.Attempt)
 		if err != nil {
-			if recoverableState(claim.Attempt.State) {
+			if recoverableState(claim.Attempt.State) && !waitingForReservedNotes(claim.Attempt) {
 				s.enqueue(claim.Attempt.AttemptID)
 			}
 			return Attempt{}, false, err
 		}
-		if recoverableState(claim.Attempt.State) {
+		if recoverableState(claim.Attempt.State) && !waitingForReservedNotes(claim.Attempt) {
 			s.enqueue(claim.Attempt.AttemptID)
 		}
 		return view, true, nil
@@ -293,7 +295,7 @@ func (s *Service) scheduleRecoverable(ctx context.Context) {
 	processed := 0
 	for _, value := range values {
 		previousAfter := s.recoveryAfter
-		if value.State == "signing_unknown" && time.Since(value.UpdatedAt) < signingUnknownRetryInterval {
+		if !retryDue(value) {
 			s.recoveryAfter = value.AttemptID
 			processed++
 			continue
@@ -390,6 +392,11 @@ func (s *Service) planAttempt(ctx context.Context, initial storage.TransactionAt
 	if err != nil || !found || attempt.State != "planning" {
 		return false
 	}
+	if waitingForReservedNotes(attempt) {
+		// Work queued before the attempt was parked (for example an earlier
+		// replay) must not bypass the reserved-note backoff.
+		return false
+	}
 	request, wallet, err := s.decodeRequest(attempt)
 	if err != nil {
 		s.failUnsigned(ctx, attempt.AttemptID, "stored_request_invalid", err.Error())
@@ -410,6 +417,8 @@ func (s *Service) planAttempt(ctx context.Context, initial storage.TransactionAt
 		changeAddress = address.Address
 	}
 
+	policy := s.splitPolicy(ctx, request, attempt.WalletID)
+	options := policy.options(1)
 	for replan := 0; replan < s.cfg.CoordinatorMaxReplans; replan++ {
 		excluded, err := s.store.ActiveNoteIDs(ctx, string(s.cfg.Network), attempt.WalletID)
 		if err != nil {
@@ -417,12 +426,18 @@ func (s *Service) planAttempt(ctx context.Context, initial storage.TransactionAt
 			return false
 		}
 		planCtx, cancel := context.WithTimeout(ctx, s.cfg.CoordinatorPlanTimeout)
-		result, planErr := s.planner.Plan(planCtx, request, wallet, changeAddress, excluded)
+		result, planErr := s.planner.Plan(planCtx, request, wallet, changeAddress, excluded, options)
 		cancel()
 		if planErr != nil {
 			var operation *operationError
 			if !errors.As(planErr, &operation) {
 				operation = &operationError{Code: "planner_unavailable", Message: "transaction planner failed", Retryable: true}
+			}
+			if operation.Code == "insufficient_balance" && len(excluded) > 0 && s.fundableWithoutReservations(ctx, request, wallet, changeAddress) {
+				// The wallet can fund this request, just not while other active
+				// attempts hold their notes. Keep the attempt in planning so it
+				// resumes on its own once those reservations are released.
+				operation = &operationError{Code: "notes_reserved", Message: "eligible notes are reserved by other active attempts; planning resumes when they are released", Retryable: true}
 			}
 			if operation.Retryable {
 				s.recordPlanningError(ctx, attempt.AttemptID, operation)
@@ -430,6 +445,26 @@ func (s *Service) planAttempt(ctx context.Context, initial storage.TransactionAt
 				s.failUnsigned(ctx, attempt.AttemptID, operation.Code, operation.Message)
 			}
 			return false
+		}
+		// A plan that spends several notes needs change that replaces all of
+		// them. Widening the split raises the fee, which can select more notes,
+		// so repeat until the split covers the selection. SplitChange strictly
+		// grows and is capped at CoordinatorChangeSplitMax, so this ends; only
+		// that cap or a failed wider plan (which keeps the last valid one) can
+		// leave the target short, and splitting is best effort.
+		current := options
+		for widen := 0; widen < s.cfg.CoordinatorChangeSplitMax; widen++ {
+			wider := policy.options(len(result.SelectedNoteIDs))
+			if wider.SplitChange <= current.SplitChange {
+				break
+			}
+			planCtx, cancel := context.WithTimeout(ctx, s.cfg.CoordinatorPlanTimeout)
+			widerResult, widerErr := s.planner.Plan(planCtx, request, wallet, changeAddress, excluded, wider)
+			cancel()
+			if widerErr != nil {
+				break
+			}
+			result, current = widerResult, wider
 		}
 		err = s.store.ReserveAttemptPlan(ctx, attempt.AttemptID, string(s.cfg.Network), result.Bytes, result.Digest, result.FeeZat, result.ExpiryHeight, result.SelectedNoteIDs, time.Now().UTC())
 		if err == nil {
@@ -487,11 +522,14 @@ func (s *Service) signAttempt(ctx context.Context, initial storage.TransactionAt
 		_ = s.store.MarkAttemptState(ctx, signing.AttemptID, "failed_unsigned", operation.Code, operation.Message, false, true, time.Now().UTC())
 		return false
 	}
-	if err := validateSignerResult(result, request); err != nil {
+	if err := validateSignerResult(result, validated.OutputCount); err != nil {
 		s.markSigningUnknown(ctx, signing.AttemptID, "signer_invalid_response", err.Error(), true)
 		return false
 	}
-	if err := s.store.CompleteAttemptSigning(ctx, signing.AttemptID, result.TxID, result.RawTxHex, result.FeeZat, result.OrchardOutputActionIndices, result.OrchardChangeActionIndex, time.Now().UTC()); err != nil {
+	// Split change outputs follow the approved outputs; only the approved
+	// outputs are part of the attempt's public output mapping.
+	approvedIndices := result.OrchardOutputActionIndices[:len(request.planOutputs(initial.ChangeAddress))]
+	if err := s.store.CompleteAttemptSigning(ctx, signing.AttemptID, result.TxID, result.RawTxHex, result.FeeZat, approvedIndices, result.OrchardChangeActionIndex, time.Now().UTC()); err != nil {
 		s.logger.Error("coordinator_signed_result_store_failed", "attempt_id", signing.AttemptID, "error", err.Error())
 		return false
 	}
@@ -663,6 +701,27 @@ func scopedAttemptKey(principal, key string) string {
 	return "v1:" + hex.EncodeToString(sum[:])
 }
 
+// retryDue reports whether a recoverable attempt may be processed now. Attempts
+// waiting on an uncertain signer or on notes held by other attempts back off,
+// whether the retry comes from the recovery loop or from an idempotent replay.
+func retryDue(attempt storage.TransactionAttempt) bool {
+	switch {
+	case attempt.State == "signing_unknown":
+		return time.Since(attempt.UpdatedAt) >= signingUnknownRetryInterval
+	case attempt.State == "planning" && attempt.ErrorCode == "notes_reserved":
+		return time.Since(attempt.UpdatedAt) >= notesReservedRetryInterval
+	default:
+		return true
+	}
+}
+
+// waitingForReservedNotes reports whether a planning attempt was parked on
+// notes held by other attempts within the retry interval. Idempotent replays
+// do not bypass that backoff.
+func waitingForReservedNotes(attempt storage.TransactionAttempt) bool {
+	return attempt.State == "planning" && attempt.ErrorCode == "notes_reserved" && time.Since(attempt.UpdatedAt) < notesReservedRetryInterval
+}
+
 func recoverableState(state string) bool {
 	switch state {
 	case "planning", "reserved", "signing", "signing_unknown", "signed", "broadcast", "mined", "expired_pending_reconciliation", "orphaned":
@@ -688,9 +747,9 @@ func sameStringSet(left, right []string) bool {
 	return true
 }
 
-func validateSignerResult(result signerResult, request CreateRequest) error {
-	if len(result.OrchardOutputActionIndices) != len(request.Outputs) {
-		return fmt.Errorf("signer output mapping has %d entries for %d requested outputs", len(result.OrchardOutputActionIndices), len(request.Outputs))
+func validateSignerResult(result signerResult, planOutputs int) error {
+	if len(result.OrchardOutputActionIndices) != planOutputs {
+		return fmt.Errorf("signer output mapping has %d entries for %d plan outputs", len(result.OrchardOutputActionIndices), planOutputs)
 	}
 	seen := make(map[uint32]struct{}, len(result.OrchardOutputActionIndices)+1)
 	for _, index := range result.OrchardOutputActionIndices {

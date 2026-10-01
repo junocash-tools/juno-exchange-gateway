@@ -22,12 +22,12 @@ services:
       args:
         JUNO_ADDRGEN_REF: ${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}
         JUNO_TXBUILD_REPO: ${JUNO_TXBUILD_REPO:-https://github.com/junocash-tools/juno-txbuild.git}
-        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-553a977038c7f0660fc361acc059df80ce3101f3}
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-49c16f6b564286229e9e8e191db0037cf636c80a}
         VERSION: ${JUNO_GATEWAY_VERSION:-dev}
         REVISION: ${JUNO_GATEWAY_REVISION:-local}
         BUILD_TIME: ${JUNO_GATEWAY_BUILD_TIME:-}
         COMPONENTS_JSON: >-
-          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-fcd02df03cf09b482f95be070b8fa9894d5c0222}","juno-txbuild":"${JUNO_TXBUILD_REF:-553a977038c7f0660fc361acc059df80ce3101f3}","juno-txsign":"${JUNO_TXSIGN_REF:-d33f925dc73ee929ac95073fdcd40a4f17dbb43d}","junocashd":"v${JUNOCASH_VERSION:-0.9.13}"}
+          {"juno-addrgen":"${JUNO_ADDRGEN_REF:-4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834}","juno-scan":"${JUNO_SCAN_REF:-fcd02df03cf09b482f95be070b8fa9894d5c0222}","juno-txbuild":"${JUNO_TXBUILD_REF:-49c16f6b564286229e9e8e191db0037cf636c80a}","juno-txsign":"${JUNO_TXSIGN_REF:-d33f925dc73ee929ac95073fdcd40a4f17dbb43d}","junocashd":"v${JUNOCASH_VERSION:-0.9.13}"}
 
   txbuild:
     image: juno-exchange-gateway/txbuild:dev
@@ -36,7 +36,7 @@ services:
       dockerfile: docker/txbuild/Dockerfile
       args:
         JUNO_TXBUILD_REPO: ${JUNO_TXBUILD_REPO:-https://github.com/junocash-tools/juno-txbuild.git}
-        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-553a977038c7f0660fc361acc059df80ce3101f3}
+        JUNO_TXBUILD_REF: ${JUNO_TXBUILD_REF:-49c16f6b564286229e9e8e191db0037cf636c80a}
 
   txsign:
     profiles: ["automation"]

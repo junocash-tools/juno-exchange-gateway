@@ -23,6 +23,10 @@ var (
 	noteIDRE      = regexp.MustCompile(`^[0-9a-f]{64}:(0|[1-9][0-9]*)$`)
 )
 
+// maxPlanOutputs leaves room for the signer's own change output within the
+// 200 Orchard action limit.
+const maxPlanOutputs = 199
+
 type Output struct {
 	ToAddress string `json:"to_address"`
 	AmountZat string `json:"amount_zat"`
@@ -30,9 +34,39 @@ type Output struct {
 }
 
 type CreateRequest struct {
-	WalletID          string   `json:"wallet_id"`
-	ApprovalReference string   `json:"approval_reference"`
-	Outputs           []Output `json:"outputs"`
+	WalletID          string     `json:"wallet_id"`
+	ApprovalReference string     `json:"approval_reference"`
+	Outputs           []Output   `json:"outputs,omitempty"`
+	Split             *NoteSplit `json:"split,omitempty"`
+}
+
+// NoteSplit asks the coordinator to fan wallet funds out into note_count
+// equal notes of note_zat each, paid back to the wallet's own change address.
+type NoteSplit struct {
+	NoteCount int    `json:"note_count"`
+	NoteZat   string `json:"note_zat"`
+}
+
+func (r CreateRequest) isSplit() bool { return r.Split != nil }
+
+// planOutputs returns the outputs the TxPlan must start with. Withdrawals pay
+// the approved outputs; split requests pay note_count notes to changeAddress.
+func (r CreateRequest) planOutputs(changeAddress string) []Output {
+	if r.Split == nil {
+		return append([]Output(nil), r.Outputs...)
+	}
+	outputs := make([]Output, r.Split.NoteCount)
+	for i := range outputs {
+		outputs[i] = Output{ToAddress: changeAddress, AmountZat: r.Split.NoteZat}
+	}
+	return outputs
+}
+
+func (r CreateRequest) planKind() string {
+	if r.Split != nil {
+		return "rebalance"
+	}
+	return "withdrawal"
 }
 
 type Attempt struct {
@@ -85,6 +119,7 @@ type planResult struct {
 	FeeZat          string
 	ExpiryHeight    int64
 	SelectedNoteIDs []string
+	OutputCount     int
 }
 
 type signerResult struct {
@@ -104,6 +139,33 @@ func normalizeCreateRequest(req CreateRequest, cfg config.Config, wallet config.
 	}
 	if req.ApprovalReference == "" || len(req.ApprovalReference) > 128 {
 		return CreateRequest{}, nil, "", errors.New("approval_reference must contain 1 to 128 characters")
+	}
+	if req.Split != nil {
+		if len(req.Outputs) != 0 {
+			return CreateRequest{}, nil, "", errors.New("split requests must not include outputs")
+		}
+		split := *req.Split
+		split.NoteZat = strings.TrimSpace(split.NoteZat)
+		if split.NoteCount < 2 || split.NoteCount > cfg.CoordinatorMaxOutputs {
+			return CreateRequest{}, nil, "", fmt.Errorf("split.note_count must be between 2 and %d", cfg.CoordinatorMaxOutputs)
+		}
+		noteZat, err := parseDecimalZat(split.NoteZat)
+		if err != nil || noteZat == 0 {
+			return CreateRequest{}, nil, "", errors.New("split.note_zat must be a positive base-10 integer")
+		}
+		if noteZat < uint64(cfg.CoordinatorMinNoteZat) {
+			return CreateRequest{}, nil, "", errors.New("split.note_zat is below the coordinator minimum note value")
+		}
+		if noteZat > uint64(cfg.CoordinatorMaxAmountZat)/uint64(split.NoteCount) {
+			return CreateRequest{}, nil, "", errors.New("split exceeds the configured maximum amount")
+		}
+		req.Split = &split
+		canonical, err := json.Marshal(req)
+		if err != nil {
+			return CreateRequest{}, nil, "", errors.New("encode transaction request")
+		}
+		sum := sha256.Sum256(canonical)
+		return req, canonical, hex.EncodeToString(sum[:]), nil
 	}
 	if len(req.Outputs) < 1 || len(req.Outputs) > cfg.CoordinatorMaxOutputs {
 		return CreateRequest{}, nil, "", fmt.Errorf("outputs must contain between 1 and %d entries", cfg.CoordinatorMaxOutputs)
@@ -151,16 +213,29 @@ func validatePlan(raw []byte, request CreateRequest, wallet config.Wallet, netwo
 	if len(raw) == 0 || json.Unmarshal(raw, &plan) != nil {
 		return planResult{}, errors.New("planner returned invalid TxPlan JSON")
 	}
-	if plan.Version != "v0" || plan.Kind != "withdrawal" || plan.WalletID != wallet.WalletID || plan.Account != wallet.Account || plan.Chain != network.NodeChain() {
-		return planResult{}, errors.New("planner returned a TxPlan with mismatched wallet, account, or network")
+	if plan.Version != "v0" || plan.Kind != request.planKind() || plan.WalletID != wallet.WalletID || plan.Account != wallet.Account || plan.Chain != network.NodeChain() {
+		return planResult{}, errors.New("planner returned a TxPlan with mismatched kind, wallet, account, or network")
 	}
 	wantCoinType := map[domain.Network]uint32{domain.Mainnet: 8133, domain.Testnet: 8134, domain.Regtest: 8135}[network]
-	if plan.CoinType != wantCoinType || plan.ChangeAddress != changeAddress || len(plan.Outputs) != len(request.Outputs) {
+	expected := request.planOutputs(changeAddress)
+	if plan.CoinType != wantCoinType || changeAddress == "" || plan.ChangeAddress != changeAddress || len(plan.Outputs) < len(expected) || len(plan.Outputs) > maxPlanOutputs {
 		return planResult{}, errors.New("planner returned a TxPlan with mismatched coin type, change, or outputs")
 	}
-	for i := range request.Outputs {
-		if plan.Outputs[i] != request.Outputs[i] {
+	for i := range expected {
+		if plan.Outputs[i] != expected[i] {
 			return planResult{}, errors.New("planner returned output data different from the approved request")
+		}
+	}
+	// Anything after the approved outputs must be split change: value paid
+	// back to this attempt's own change address with no memo.
+	if len(plan.Outputs) > len(expected) && request.isSplit() {
+		return planResult{}, errors.New("planner returned extra outputs for a note split")
+	}
+	for i := len(expected); i < len(plan.Outputs); i++ {
+		extra := plan.Outputs[i]
+		amount, err := parseDecimalZat(extra.AmountZat)
+		if extra.ToAddress != changeAddress || extra.MemoHex != "" || err != nil || amount == 0 {
+			return planResult{}, errors.New("planner returned an extra output that is not split change")
 		}
 	}
 	if _, err := parseDecimalZat(plan.FeeZat); err != nil || plan.ExpiryHeight == 0 || len(plan.Notes) == 0 {
@@ -189,6 +264,7 @@ func validatePlan(raw []byte, request CreateRequest, wallet config.Wallet, netwo
 		FeeZat:          plan.FeeZat,
 		ExpiryHeight:    int64(plan.ExpiryHeight),
 		SelectedNoteIDs: noteIDs,
+		OutputCount:     len(plan.Outputs),
 	}, nil
 }
 

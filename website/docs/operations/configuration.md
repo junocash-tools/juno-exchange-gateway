@@ -45,7 +45,7 @@ These settings identify local source builds and the documentation site. They are
 | `JUNO_ADDRGEN_REF` | `4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834` | Address-deriver source and version manifest |
 | `JUNO_ADDRGEN_REPO` | `junocash-tools/juno-addrgen` | Direct gateway-image build argument |
 | `JUNO_SCAN_REF` | `fcd02df03cf09b482f95be070b8fa9894d5c0222` | Scanner commit recorded in the version manifest |
-| `JUNO_TXBUILD_REF` | `553a977038c7f0660fc361acc059df80ce3101f3` | Planner source and version manifest |
+| `JUNO_TXBUILD_REF` | `49c16f6b564286229e9e8e191db0037cf636c80a` | Planner source and version manifest |
 | `JUNO_TXBUILD_REPO` | `junocash-tools/juno-txbuild` | Direct planner-image build argument |
 | `JUNO_TXSIGN_REF` | `d33f925dc73ee929ac95073fdcd40a4f17dbb43d` | Offline signer source and published image |
 | `JUNO_TXSIGN_REPO` | `junocash-tools/juno-txsign` | Offline signer-image build argument |
@@ -145,6 +145,9 @@ The gateway binary and base stack keep the coordinator disabled. `compose.automa
 | `JUNO_COORDINATOR_MIN_NOTE_ZAT` | `0` | Exclude smaller otherwise-eligible inputs; zero disables the floor |
 | `JUNO_COORDINATOR_MIN_CHANGE_ZAT` | `0` | Add smaller change to the fee instead of creating a change note |
 | `JUNO_COORDINATOR_MAX_REPLANS` | `3` | Fresh selection attempts after reservation races; valid range 1 to 20 |
+| `JUNO_COORDINATOR_TARGET_NOTES` | `0` | Unreserved spendable note count to maintain. Withdrawal change is split so each withdrawal replaces the notes it spends and makes up any shortfall and `low_note_inventory` is reported. `0` disables both; valid range 0 to 10000 |
+| `JUNO_COORDINATOR_CHANGE_SPLIT_MAX` | `8` | Most change notes one withdrawal may create when inventory is below target; `0` or `1` disables splitting; valid range 0 to 50 |
+| `JUNO_COORDINATOR_SPLIT_MIN_NOTE_ZAT` | `0` | Smallest change note a split may create; the planner uses fewer pieces rather than go below it |
 | `JUNO_COORDINATOR_RATE_RPS` | `5` | Per-credential private-API bucket refill per second |
 | `JUNO_COORDINATOR_RATE_BURST` | `10` | Per-credential private-API bucket capacity |
 

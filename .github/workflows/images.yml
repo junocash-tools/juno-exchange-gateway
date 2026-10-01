@@ -25,7 +25,7 @@ env:
   JUNO_ADDRGEN_REPO: https://github.com/junocash-tools/juno-addrgen.git
   JUNO_ADDRGEN_REF: 4a2b3a361c7c1cc3e15891b0befb2eb3dfddb834
   JUNO_TXBUILD_REPO: https://github.com/junocash-tools/juno-txbuild.git
-  JUNO_TXBUILD_REF: 553a977038c7f0660fc361acc059df80ce3101f3
+  JUNO_TXBUILD_REF: 49c16f6b564286229e9e8e191db0037cf636c80a
   JUNO_TXSIGN_REPO: https://github.com/junocash-tools/juno-txsign.git
   JUNO_TXSIGN_REF: d33f925dc73ee929ac95073fdcd40a4f17dbb43d
   JUNOCASH_VERSION: 0.9.13

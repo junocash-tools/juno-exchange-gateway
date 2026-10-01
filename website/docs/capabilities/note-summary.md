@@ -104,7 +104,7 @@ The five operational buckets partition `total_unspent` without overlap. Each not
 | `below_min_note` | Mature, non-pending, positioned note below the requested floor, plus zero-value notes | Include only after checking marginal fee economics |
 | `witness_unavailable` | Mature, non-pending note has no spend position | Alert; the planner cannot use it |
 
-Even with planner-aligned parameters, `spendable` does not subtract the coordinator's durable reservations for other attempts. It also does not calculate the fee for a requested payment or prove that enough value fits within the 200-input transaction limit. A fragmented wallet may therefore report enough aggregate spendable value while a particular transaction still returns `insufficient_balance` or `too_many_inputs`.
+Even with planner-aligned parameters, `spendable` does not subtract the coordinator's durable reservations for other attempts. The private coordinator's `GET /v1/wallets/{wallet_id}/note-inventory` reports the reserved and unreserved split. It also does not calculate the fee for a requested payment or prove that enough value fits within the 200-input transaction limit. A fragmented wallet may therefore report enough aggregate spendable value while a particular transaction still returns `insufficient_balance` or `too_many_inputs`.
 
 Use `getWalletBalance` for monitoring, alerts, and a non-authoritative preflight. `CoordinatorClient.createRawTransaction` remains authoritative: it excludes active reservations, selects the exact notes, calculates the fee, enforces transaction limits, and either creates the attempt or returns the exact planning failure. Never debit a customer, approve a withdrawal, or skip transaction creation solely from this summary.
 

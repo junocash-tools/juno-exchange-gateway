@@ -97,7 +97,7 @@ When `state` is `signed`, `data` contains the broadcast inputs and reconciliatio
 }
 ```
 
-Persist `change_address` and verify outgoing and change effects against that registered same-wallet address. `orchard_output_action_indices` follows request output order; persist the mapping and do not assume Orchard action order. `orchard_change_action_index` is omitted when there is no change action.
+Persist `change_address` and verify outgoing and change effects against that registered same-wallet address. When change splitting is enabled, a withdrawal may carry extra outputs to that same `change_address` after the requested outputs; they are not listed in `orchard_output_action_indices`. `orchard_output_action_indices` follows request output order; persist the mapping and do not assume Orchard action order. `orchard_change_action_index` is omitted when there is no change action.
 
 For `signed`, `broadcast`, and `orphaned`, every POST replay and GET synchronously checks the healthy canonical node tip before returning raw hex. If the tip is past `expiry_height`, the response is `expired_pending_reconciliation` with raw hex omitted, even when the background row has not refreshed yet. If the tip cannot be verified, the API returns retryable `503 expiry_status_unavailable` and withholds raw material. Retry the same attempt; never substitute a new key because the existing notes remain reserved. `expired_pending_reconciliation` and `released` responses always omit raw hex.
 
@@ -108,7 +108,30 @@ GET /v1/wallets/exchange-hot/transaction-attempts/active
 Authorization: Bearer <coordinator-token>
 ```
 
-The private coordinator returns the caller's complete active attempt list for a granted wallet. Each entry contains its `attempt_id`, approval reference, state, selected note IDs, txid/expiry when known, latest structured error, and timestamps. It never returns `raw_tx_hex`. Other credential names' attempts remain invisible even when they have access to the same wallet. A list over 1000 returns `422 attempt_list_limit_exceeded` rather than a partial result; ask the operator to investigate. This is an on-demand diagnostic for blocked liquidity, **not** a request the exchange must make before every withdrawal. If another credential owns a reservation, the coordinator operator must investigate its state.
+The private coordinator returns the caller's complete active attempt list for a granted wallet. Each entry contains its `attempt_id`, approval reference, state, selected note IDs, txid/expiry when known, latest structured error, and timestamps. It never returns `raw_tx_hex`. Other credential names' attempts remain invisible even when they have access to the same wallet. A list over 1000 returns `422 attempt_list_limit_exceeded` rather than a partial result; ask the operator to investigate. This is an on-demand diagnostic for blocked liquidity, **not** a request the exchange must make before every withdrawal. If another credential owns a reservation, use the note-inventory endpoint below.
+
+## Note inventory
+
+```http
+GET /v1/wallets/exchange-hot/note-inventory
+Authorization: Bearer <coordinator-token>
+```
+
+Returns `spendable`, `reserved_spendable`, and `unreserved_spendable` note counts and values using the planner's own confirmation and minimum-note rules, plus `target_notes`, `low_note_inventory`, `change_split_max`, and one `reservations` entry per held note (`note_id`, `attempt_id`, `attempt_state`, `expiry_height`, `note_state`). Reservations from every credential are included; raw transaction bytes never are. Use it for monitoring and for answering "why can't this withdrawal find a note". It is not a per-withdrawal preflight.
+
+## Split notes
+
+Send `split` instead of `outputs` on the normal create request to fan wallet funds out into equal notes paid back to the wallet's own change address:
+
+```json
+{
+  "wallet_id": "exchange-hot",
+  "approval_reference": "note-split:2026-10-01",
+  "split": { "note_count": 10, "note_zat": "100000000" }
+}
+```
+
+`note_count` is 2 to `JUNO_COORDINATOR_MAX_OUTPUTS`; `note_zat` must be at least `JUNO_COORDINATOR_MIN_NOTE_ZAT`. The attempt is planned as a rebalance and then reserved, signed, and returned exactly like a withdrawal. Broadcast its `raw_tx_hex` through the public gateway. `orchard_output_action_indices` lists the new notes in order.
 
 ## Cancel
 
@@ -126,7 +149,7 @@ Only `planning` or `reserved` can become `cancelled`. This proves signing did no
 
 | State | Exchange action |
 | --- | --- |
-| `planning` | Poll. A retryable attempt-level `error` may explain a dependency delay. |
+| `planning` | Poll. A retryable attempt-level `error` may explain a dependency delay. `notes_reserved` means every eligible note is held by other active attempts; planning resumes on its own once one is released. |
 | `reserved` | Notes and exact plan are durable; poll and do not create a competing spend. |
 | `signing` | Poll. Cancellation is forbidden. |
 | `signing_unknown` | Keep polling the same ID. Background journal replay is capped at once per minute per attempt. A completed journal entry replays the original result; a busy, rejected, or unresolved retry remains locked for operator recovery. Never replan or release its notes. |

@@ -222,6 +222,30 @@ func (s *Store) ActiveNoteIDs(ctx context.Context, network, walletID string) ([]
 	return out, nil
 }
 
+func (s *Store) NoteReservations(ctx context.Context, network, walletID string) ([]storage.NoteReservation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.note_id,r.attempt_id,a.state,COALESCE(a.expiry_height,0),r.created_at FROM active_note_reservations r JOIN transaction_attempts a ON a.attempt_id=r.attempt_id WHERE r.network=? AND r.wallet_id=? ORDER BY r.note_id`, network, walletID)
+	if err != nil {
+		return nil, fmt.Errorf("list note reservations: %w", err)
+	}
+	defer rows.Close()
+	out := make([]storage.NoteReservation, 0)
+	for rows.Next() {
+		var value storage.NoteReservation
+		var created string
+		if err := rows.Scan(&value.NoteID, &value.AttemptID, &value.State, &value.ExpiryHeight, &created); err != nil {
+			return nil, fmt.Errorf("read note reservation: %w", err)
+		}
+		if value.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+			return nil, fmt.Errorf("read note reservation time: %w", err)
+		}
+		out = append(out, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list note reservations: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) ReserveAttemptPlan(ctx context.Context, attemptID, network string, planJSON []byte, planDigest, feeZat string, expiryHeight int64, noteIDs []string, now time.Time) error {
 	if len(planJSON) == 0 || planDigest == "" || feeZat == "" || expiryHeight < 0 || len(noteIDs) == 0 {
 		return errors.New("transaction plan reservation is incomplete")

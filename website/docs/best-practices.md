@@ -21,5 +21,6 @@ title: Best practices
 - Keep coordinator defaults at 100 confirmations, expiry offset 40, and fee multiplier 20 unless a reviewed policy says otherwise.
 - Consolidate only when note count, signing time, or input limits justify its fee and privacy cost.
 - Keep scanner witness mode on `auto`; monitor readiness, lag, shard-cache progress, note inventory, and outstanding reservations.
+- Keep several spendable notes in the hot wallet so withdrawals can run in parallel. Set `JUNO_COORDINATOR_TARGET_NOTES` so change is split while inventory is low, use a `split` attempt after large top-ups, and alert on `low_note_inventory` from the coordinator note-inventory endpoint.
 - Pin component images by digest and test deposits, withdrawals, expiry, reorgs, consolidation, recovery, and rollback on regtest before release.
 - Back up installation state, gateway state, exchange address mappings, and the withdrawal ledger separately. Rebuild confirmed scanner data from UFVK, birthday, network, and chain when needed.

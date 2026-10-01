@@ -51,6 +51,22 @@ The coordinator also serializes planning per wallet in one process. The database
 
 The scanner's `pending` state is additional chain evidence, not the reservation mechanism. A coordinator reservation exists before signed bytes reach the mempool; scanner pending begins only after the node observes a nullifier.
 
+The public `notes/summary` endpoint counts scanner state only. It does not subtract coordinator reservations, so it can report a spendable note that an active attempt already holds. Use the coordinator's `GET /v1/wallets/{wallet_id}/note-inventory` to see spendable, reserved, and unreserved notes together, plus which attempt holds each reservation. It covers attempts from every credential.
+
+## Notes held by other attempts
+
+When the wallet could fund a withdrawal but every eligible note is reserved, the attempt does not fail. It stays `planning` with the retryable error `notes_reserved` and resumes on its own once a reservation is released (another attempt reaches `final`, is cancelled, fails unsigned, or is `released` after expiry). The coordinator rechecks about every 15 seconds.
+
+`insufficient_balance` on a `failed_unsigned` attempt means the wallet cannot fund the request even if every reservation were released.
+
+## Note inventory
+
+Each Orchard note funds one transaction at a time, and change is unusable until it confirms. To run withdrawals in parallel, keep several notes in the hot wallet.
+
+- **Split change automatically.** Set `JUNO_COORDINATOR_TARGET_NOTES` to the number of unreserved spendable notes you want available. Each withdrawal splits its change so it replaces every note it spends plus any shortfall below the target, up to `JUNO_COORDINATOR_CHANGE_SPLIT_MAX` notes, never smaller than `JUNO_COORDINATOR_SPLIT_MIN_NOTE_ZAT`. The extra outputs pay the same internal change address and add a small amount of fee for the extra actions.
+- **Split on demand.** Create an attempt with `split` instead of `outputs`, for example `{"wallet_id": "exchange-hot", "approval_reference": "note-split:2026-10-01", "split": {"note_count": 10, "note_zat": "100000000"}}`. It plans a rebalance to the wallet's own change address, then follows the normal reserve, sign, and broadcast flow. Use it after a large deposit or cold-to-hot top-up.
+- **Watch inventory.** `low_note_inventory` on the note-inventory endpoint turns true while unreserved spendable notes are below the target. It is advisory and never blocks a withdrawal.
+
 ## Reservation lifecycle
 
 | Attempt state | Reservation rule |

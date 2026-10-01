@@ -104,6 +104,16 @@ type ActiveAttempt struct {
 	UpdatedAt                  time.Time
 }
 
+// NoteReservation is one note held by an active transaction attempt,
+// regardless of which credential created the attempt.
+type NoteReservation struct {
+	NoteID       string
+	AttemptID    string
+	State        string
+	ExpiryHeight int64
+	CreatedAt    time.Time
+}
+
 type AttemptClaimResult struct {
 	State   ClaimState
 	Attempt TransactionAttempt
@@ -126,6 +136,7 @@ type Store interface {
 	ActiveAttemptsByWallet(context.Context, string, string, int) ([]ActiveAttempt, error)
 	SetAttemptChangeAddress(context.Context, string, string, time.Time) error
 	ActiveNoteIDs(context.Context, string, string) ([]string, error)
+	NoteReservations(context.Context, string, string) ([]NoteReservation, error)
 	ReserveAttemptPlan(context.Context, string, string, []byte, string, string, int64, []string, time.Time) error
 	BeginAttemptSigning(context.Context, string, time.Time) (TransactionAttempt, error)
 	CompleteAttemptSigning(context.Context, string, string, string, string, []uint32, *uint32, time.Time) error

@@ -536,7 +536,7 @@ func TestValidateSignerResultRejectsActionIndicesOutsideOrchardBundle(t *testing
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateSignerResult(result, request); err == nil || !strings.Contains(err.Error(), "above 199") {
+			if err := validateSignerResult(result, len(request.Outputs)); err == nil || !strings.Contains(err.Error(), "above 199") {
 				t.Fatalf("error=%v", err)
 			}
 		})
@@ -564,7 +564,7 @@ func coordinatorTestConfig(t *testing.T) (config.Config, *sqlitestore.Store) {
 		CoordinatorMaxBodyBytes: 1 << 20, CoordinatorRate: config.RateLimit{RPS: 100, Burst: 100},
 		ReadTimeout: time.Second, UpstreamTimeout: time.Second, CoordinatorTxbuildPath: "/bin/true",
 		CoordinatorFeeMultiplier: 20, CoordinatorExpiryOffset: 40, CoordinatorListenAddress: "127.0.0.1:8081",
-		CoordinatorSignerSocket: "/tmp/test-signer.sock", CoordinatorWorkDir: t.TempDir(),
+		CoordinatorSignerSocket: "/tmp/test-signer.sock", CoordinatorWorkDir: t.TempDir(), NoteSummaryMaxNotes: 1000,
 	}
 	dsn := "file:" + filepath.Join(t.TempDir(), "coordinator.db") + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
 	store, err := sqlitestore.Open(context.Background(), dsn)
@@ -630,29 +630,55 @@ type fakePlanner struct {
 	mu        sync.Mutex
 	notes     []string
 	callCount int
+	options   []planOptions
+	// spends is how many unreserved notes each plan selects; zero means one.
+	spends int
+	// growWithSplit selects one extra note whenever a split is requested,
+	// standing in for the higher fee of a wider split.
+	growWithSplit bool
 }
 
-func (p *fakePlanner) Plan(_ context.Context, request CreateRequest, wallet config.Wallet, change string, excluded []string) (planResult, error) {
+func (p *fakePlanner) Plan(_ context.Context, request CreateRequest, wallet config.Wallet, change string, excluded []string, options planOptions) (planResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.callCount++
+	p.options = append(p.options, options)
 	excludedSet := make(map[string]struct{}, len(excluded))
 	for _, note := range excluded {
 		excludedSet[note] = struct{}{}
 	}
-	selected := ""
+	want := max(p.spends, 1)
+	if p.growWithSplit && options.SplitChange > 1 {
+		want++
+	}
+	var selected []planNote
 	for _, candidate := range p.notes {
-		if _, skip := excludedSet[candidate]; !skip {
-			selected = candidate
-			break
+		if _, skip := excludedSet[candidate]; !skip && len(selected) < want {
+			selected = append(selected, planNote{NoteID: candidate})
 		}
 	}
-	if selected == "" {
+	if len(selected) < want {
 		return planResult{}, opError("insufficient_balance", "no unreserved test note", false)
 	}
-	raw, _ := json.Marshal(txPlan{Version: "v0", Kind: "withdrawal", WalletID: wallet.WalletID, CoinType: 8135, Account: wallet.Account,
-		Chain: "regtest", ExpiryHeight: 140, Outputs: request.Outputs, ChangeAddress: change, FeeZat: "200000", Notes: []planNote{{NoteID: selected}}})
+	outputs := request.planOutputs(change)
+	for i := 1; i < options.SplitChange; i++ {
+		outputs = append(outputs, Output{ToAddress: change, AmountZat: "1000"})
+	}
+	raw, _ := json.Marshal(txPlan{Version: "v0", Kind: request.planKind(), WalletID: wallet.WalletID, CoinType: 8135, Account: wallet.Account,
+		Chain: "regtest", ExpiryHeight: 140, Outputs: outputs, ChangeAddress: change, FeeZat: "200000", Notes: selected})
 	return validatePlan(raw, request, wallet, domain.Regtest, change)
+}
+
+func (p *fakePlanner) setNotes(notes ...string) {
+	p.mu.Lock()
+	p.notes = notes
+	p.mu.Unlock()
+}
+
+func (p *fakePlanner) recordedOptions() []planOptions {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]planOptions(nil), p.options...)
 }
 
 func (p *fakePlanner) calls() int {
@@ -681,8 +707,12 @@ func (s *fakeSigner) Sign(_ context.Context, _ string, plan planResult) (signerR
 		s.unknownOnce = false
 		return signerResult{}, &operationError{Code: "signing_outcome_unknown", Message: "test outcome unknown", Retryable: true, OutcomeUnknown: true}
 	}
+	indices := make([]uint32, plan.OutputCount)
+	for i := range indices {
+		indices[i] = uint32(i)
+	}
 	return signerResult{TxID: fmt.Sprintf("%064x", s.callCount+100), RawTxHex: "00", FeeZat: plan.FeeZat,
-		OrchardOutputActionIndices: []uint32{0}, OrchardChangeActionIndex: uint32Pointer(1)}, nil
+		OrchardOutputActionIndices: indices, OrchardChangeActionIndex: uint32Pointer(uint32(plan.OutputCount))}, nil
 }
 
 func (s *fakeSigner) Health(context.Context) error { return nil }
@@ -754,9 +784,11 @@ func (n *fakeCoordinatorNode) setTipError(err error) {
 }
 
 type fakeCoordinatorScanner struct {
-	mu       sync.Mutex
-	health   domain.ScannerHealth
-	statuses domain.WalletNoteStatuses
+	mu           sync.Mutex
+	health       domain.ScannerHealth
+	statuses     domain.WalletNoteStatuses
+	spendable    int64
+	unspentNotes bool
 }
 
 func (s *fakeCoordinatorScanner) Health(context.Context) (domain.ScannerHealth, error) {
@@ -774,12 +806,31 @@ func (*fakeCoordinatorScanner) Backfill(context.Context, string, int64, int64) (
 func (*fakeCoordinatorScanner) Balance(context.Context, string, string, int64, int64) (domain.Balance, bool, error) {
 	return domain.Balance{}, false, nil
 }
-func (*fakeCoordinatorScanner) NoteSummary(context.Context, string, int64, int64, int) (domain.WalletNoteSummary, bool, error) {
-	return domain.WalletNoteSummary{}, false, nil
-}
-func (s *fakeCoordinatorScanner) NoteStatuses(context.Context, string, []string) (domain.WalletNoteStatuses, bool, error) {
+func (s *fakeCoordinatorScanner) NoteSummary(_ context.Context, walletID string, minConf, minNote int64, _ int) (domain.WalletNoteSummary, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.spendable == 0 {
+		return domain.WalletNoteSummary{}, false, nil
+	}
+	value := s.spendable * 1000
+	smallest, largest := int64(1000), int64(1000)
+	return domain.WalletNoteSummary{
+		WalletID: walletID, MinConfirmations: minConf, MinNoteZat: minNote, AsOfScannerHeight: 100, AsOfScannerHash: fmt.Sprintf("%064x", 100),
+		TotalUnspent: domain.NoteValueSummary{NoteCount: s.spendable, ValueZat: value},
+		Spendable:    domain.SpendableNoteSummary{NoteValueSummary: domain.NoteValueSummary{NoteCount: s.spendable, ValueZat: value}, SmallestNoteZat: &smallest, LargestNoteZat: &largest},
+	}, true, nil
+}
+func (s *fakeCoordinatorScanner) NoteStatuses(_ context.Context, walletID string, noteIDs []string) (domain.WalletNoteStatuses, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unspentNotes {
+		statuses := domain.WalletNoteStatuses{WalletID: walletID, EventEpoch: fmt.Sprintf("%064x", 1), AsOfScannerHeight: 100, AsOfScannerHash: fmt.Sprintf("%064x", 100)}
+		for _, id := range noteIDs {
+			height, value := int64(10), int64(1000)
+			statuses.Statuses = append(statuses.Statuses, domain.NoteStatus{NoteID: id, State: "unspent", SourceHeight: &height, ValueZat: &value})
+		}
+		return statuses, true, nil
+	}
 	return s.statuses, len(s.statuses.Statuses) > 0, nil
 }
 func (*fakeCoordinatorScanner) Events(context.Context, string, int64, int, domain.EventFilter) (domain.EventsPage, error) {
