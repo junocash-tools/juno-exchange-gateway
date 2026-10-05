@@ -55,7 +55,7 @@ The public `notes/summary` endpoint counts scanner state only. It does not subtr
 
 ## Notes held by other attempts
 
-When the wallet could fund a withdrawal but every eligible note is reserved, the attempt does not fail. It stays `planning` with the retryable error `notes_reserved` and resumes on its own once a reservation is released (another attempt reaches `final`, is cancelled, fails unsigned, or is `released` after expiry). The coordinator rechecks about every 15 seconds.
+When the wallet could fund a withdrawal but every eligible note is reserved, the attempt fails immediately as `failed_unsigned` with error `notes_reserved` and `retryable: true`. It holds no notes and never resumes in the background. Replaying the same idempotency key returns the same failure, so submit a new request (new key, or a new `withdrawalId` in the SDK) once a reservation is released: another attempt reaches `final`, is cancelled, fails unsigned, or is `released` after expiry.
 
 `insufficient_balance` on a `failed_unsigned` attempt means the wallet cannot fund the request even if every reservation were released.
 

@@ -15,7 +15,7 @@ import (
 	"github.com/junocash-tools/juno-exchange-gateway/internal/domain"
 )
 
-func TestReservedNotesKeepAttemptPlanningUntilReleased(t *testing.T) {
+func TestReservedNotesFailFastWithRetryableError(t *testing.T) {
 	cfg, store := coordinatorTestConfig(t)
 	note := fmt.Sprintf("%064x:0", 1)
 	planner := &fakePlanner{notes: []string{note}}
@@ -33,9 +33,13 @@ func TestReservedNotesKeepAttemptPlanningUntilReleased(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked := waitAttemptError(t, service, "exchange", second.AttemptID, "notes_reserved")
-	if blocked.State != "planning" || !blocked.Error.Retryable {
+	blocked := waitAttemptState(t, service, "exchange", second.AttemptID, "failed_unsigned")
+	if blocked.Error == nil || blocked.Error.Code != "notes_reserved" || !blocked.Error.Retryable || len(blocked.SelectedNoteIDs) != 0 {
 		t.Fatalf("blocked=%+v", blocked)
+	}
+	reserved, err := store.ActiveNoteIDs(ctx, string(cfg.Network), "hot")
+	if err != nil || len(reserved) != 1 || reserved[0] != note {
+		t.Fatalf("reserved=%v err=%v", reserved, err)
 	}
 
 	// A wallet that is genuinely short stays a hard failure.
@@ -49,26 +53,71 @@ func TestReservedNotesKeepAttemptPlanningUntilReleased(t *testing.T) {
 		t.Fatalf("failed=%+v", failed)
 	}
 
-	// Once the first attempt's note is released, the parked attempt plans
-	// with it on the next pass.
+	// Releasing the note does not revive the failed attempt: replaying the
+	// same key returns the same terminal failure, and only a new request plans.
 	planner.setNotes(note)
 	if err := store.MarkAttemptState(ctx, first.AttemptID, "released", "", "", false, true, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	// Queued work inside the backoff window is skipped; once the window has
-	// passed, the parked attempt plans again.
-	service.enqueue(second.AttemptID)
-	time.Sleep(100 * time.Millisecond)
-	if parked, _, _ := store.Attempt(ctx, second.AttemptID); parked.State != "planning" {
-		t.Fatalf("parked attempt advanced inside backoff: %+v", parked)
+	calls := planner.calls()
+	replay, replayed, err := service.Create(ctx, "exchange", "withdrawal-2-create", coordinatorRequest("100000"))
+	if err != nil || !replayed || replay.State != "failed_unsigned" || replay.Error == nil || replay.Error.Code != "notes_reserved" {
+		t.Fatalf("replay=%+v replayed=%v err=%v", replay, replayed, err)
 	}
-	if err := store.MarkAttemptState(ctx, second.AttemptID, "planning", "notes_reserved", blocked.Error.Message, true, false, time.Now().Add(-time.Minute).UTC()); err != nil {
+	time.Sleep(100 * time.Millisecond)
+	if got := planner.calls(); got != calls {
+		t.Fatalf("planner calls after replay = %d, want %d", got, calls)
+	}
+	if stored, _, _ := store.Attempt(ctx, second.AttemptID); stored.State != "failed_unsigned" {
+		t.Fatalf("failed attempt resumed: %+v", stored)
+	}
+	retry, _, err := service.Create(ctx, "exchange", "withdrawal-2b-create", coordinatorRequest("100000"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	service.enqueue(second.AttemptID)
-	signed := waitAttemptState(t, service, "exchange", second.AttemptID, "signed")
+	signed := waitAttemptState(t, service, "exchange", retry.AttemptID, "signed")
 	if len(signed.SelectedNoteIDs) != 1 || signed.SelectedNoteIDs[0] != note || signed.Error != nil {
 		t.Fatalf("signed=%+v", signed)
+	}
+}
+
+func TestParkedReservedNoteAttemptsFinishOnUpgrade(t *testing.T) {
+	cfg, store := coordinatorTestConfig(t)
+	note := fmt.Sprintf("%064x:0", 1)
+	planner := &fakePlanner{notes: []string{note}}
+	signer := &fakeSigner{}
+	service := newCoordinatorTestService(t, cfg, store, planner, signer)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Seed the v0.1.3 shape: an attempt parked in planning with notes_reserved
+	// while the note it waited for is now free.
+	parked, _, err := service.Create(ctx, "exchange", "withdrawal-parked-create", coordinatorRequest("100000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAttemptState(ctx, parked.AttemptID, "planning", "notes_reserved", "eligible notes are reserved by other active attempts", true, false, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	service.Start(ctx)
+
+	failed := waitAttemptState(t, service, "exchange", parked.AttemptID, "failed_unsigned")
+	if failed.Error == nil || failed.Error.Code != "notes_reserved" || !failed.Error.Retryable || len(failed.SelectedNoteIDs) != 0 {
+		t.Fatalf("failed=%+v", failed)
+	}
+	replay, replayed, err := service.Create(ctx, "exchange", "withdrawal-parked-create", coordinatorRequest("100000"))
+	if err != nil || !replayed || replay.State != "failed_unsigned" {
+		t.Fatalf("replay=%+v replayed=%v err=%v", replay, replayed, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := planner.calls(); got != 0 {
+		t.Fatalf("planner calls = %d, want 0", got)
+	}
+	signer.mu.Lock()
+	signs := signer.callCount
+	signer.mu.Unlock()
+	if signs != 0 {
+		t.Fatalf("signer calls = %d, want 0", signs)
 	}
 }
 
@@ -152,37 +201,6 @@ func TestMultiNoteWithdrawalSplitsChangeForEverySpentNote(t *testing.T) {
 	}
 	if got := (changeSplitPolicy{deficit: 1, max: 4}).options(9); got.SplitChange != 4 {
 		t.Fatalf("capped split=%+v", got)
-	}
-}
-
-func TestReplayDoesNotBypassReservedNoteBackoff(t *testing.T) {
-	cfg, store := coordinatorTestConfig(t)
-	planner := &fakePlanner{notes: []string{fmt.Sprintf("%064x:0", 1)}}
-	service := newCoordinatorTestService(t, cfg, store, planner, &fakeSigner{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	service.Start(ctx)
-
-	first, _, err := service.Create(ctx, "exchange", "withdrawal-1-create", coordinatorRequest("100000"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitAttemptState(t, service, "exchange", first.AttemptID, "signed")
-	second, _, err := service.Create(ctx, "exchange", "withdrawal-2-create", coordinatorRequest("100000"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitAttemptError(t, service, "exchange", second.AttemptID, "notes_reserved")
-	calls := planner.calls()
-	for range 5 {
-		replay, replayed, err := service.Create(ctx, "exchange", "withdrawal-2-create", coordinatorRequest("100000"))
-		if err != nil || !replayed || replay.State != "planning" {
-			t.Fatalf("replay=%+v replayed=%v err=%v", replay, replayed, err)
-		}
-	}
-	time.Sleep(200 * time.Millisecond)
-	if got := planner.calls(); got != calls {
-		t.Fatalf("planner calls after replays = %d, want %d", got, calls)
 	}
 }
 
@@ -374,18 +392,4 @@ func TestNoteInventoryReportsReservationsAcrossCredentials(t *testing.T) {
 	if _, err := service.NoteInventory(ctx, "hot"); !hasOperationCode(err, "not_found") {
 		t.Fatalf("missing scanner wallet err=%v", err)
 	}
-}
-
-func waitAttemptError(t *testing.T, service *Service, principal, attemptID, code string) Attempt {
-	t.Helper()
-	for range 400 {
-		attempt, err := service.Attempt(context.Background(), principal, attemptID)
-		if err == nil && attempt.Error != nil && attempt.Error.Code == code {
-			return attempt
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	attempt, err := service.Attempt(context.Background(), principal, attemptID)
-	t.Fatalf("attempt did not report %s: attempt=%+v err=%v", code, attempt, err)
-	return Attempt{}
 }

@@ -81,10 +81,12 @@ paths:
         listed in `orchard_output_action_indices`.
 
         If every eligible note is reserved by other active attempts, the attempt
-        stays `planning` with retryable error `notes_reserved` and resumes
-        automatically when a reservation is released. `insufficient_balance`
-        (`failed_unsigned`) means the wallet cannot fund the request even with
-        every reservation released.
+        ends immediately as `failed_unsigned` with error `notes_reserved` and
+        `retryable: true`. It never resumes; replaying the same idempotency key
+        returns the same failure, so retry with a new key once a reservation is
+        released. `insufficient_balance` (`failed_unsigned`, not retryable)
+        means the wallet cannot fund the request even with every reservation
+        released.
 
         The idempotency key is scoped to the authenticated credential name. A
         replay with the same normalized payload returns the same attempt and

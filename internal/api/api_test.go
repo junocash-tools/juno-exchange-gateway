@@ -1371,6 +1371,8 @@ func TestWalletTransactionEffectsPaginateAndEnforceCap(t *testing.T) {
 	txid := strings.Repeat("a", 64)
 	t.Run("all pages", func(t *testing.T) {
 		cfg := testConfig(domain.Regtest)
+		// 1001 ledger lookups can exceed the 1s test read timeout under -race.
+		cfg.ReadTimeout = 30 * time.Second
 		service, node, scanner := newTestAPI(t, cfg)
 		node.transactions[txid] = domain.Transaction{TxID: txid, State: "confirmed", Confirmations: 1}
 		first := make([]domain.ScannerEvent, 1000)

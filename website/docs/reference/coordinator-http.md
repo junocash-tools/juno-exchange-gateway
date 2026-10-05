@@ -149,7 +149,7 @@ Only `planning` or `reserved` can become `cancelled`. This proves signing did no
 
 | State | Exchange action |
 | --- | --- |
-| `planning` | Poll. A retryable attempt-level `error` may explain a dependency delay. `notes_reserved` means every eligible note is held by other active attempts; planning resumes on its own once one is released. |
+| `planning` | Poll. A retryable attempt-level `error` may explain a dependency delay. |
 | `reserved` | Notes and exact plan are durable; poll and do not create a competing spend. |
 | `signing` | Poll. Cancellation is forbidden. |
 | `signing_unknown` | Keep polling the same ID. Background journal replay is capped at once per minute per attempt. A completed journal entry replays the original result; a busy, rejected, or unresolved retry remains locked for operator recovery. Never replan or release its notes. |
@@ -160,7 +160,7 @@ Only `planning` or `reserved` can become `cancelled`. This proves signing did no
 | `orphaned` | Keep locked. The same bytes may still be valid before expiry. |
 | `expired_pending_reconciliation` | The healthy canonical tip passed expiry for an absent, mempool-only, or orphaned transaction, but release proof is incomplete. Raw bytes are no longer returned as broadcastable; keep notes locked. |
 | `released` | Post-expiry node/scanner proof showed every selected note unspent. A new attempt is allowed. |
-| `failed_unsigned` | Signing provably did not begin; reservations were released. Fix the cause and use a new key. |
+| `failed_unsigned` | Signing provably did not begin; reservations were released. Fix the cause and use a new key. `notes_reserved` (`retryable: true`) means every eligible note was held by other active attempts; retry with a new key once one is released. |
 | `cancelled` | Provably unsigned cancellation; terminal. |
 
 An attempt-level asynchronous failure appears inside `data.error` even though the HTTP envelope has `status: "ok"`:

@@ -25,7 +25,6 @@ const (
 	recoveryBatchSize           = 1000
 	recoveryInterval            = 5 * time.Second
 	signingUnknownRetryInterval = time.Minute
-	notesReservedRetryInterval  = 15 * time.Second
 	maxInventoryReservations    = 5000
 )
 
@@ -121,12 +120,12 @@ func (s *Service) Create(ctx context.Context, principal, idempotencyKey string, 
 	case storage.ClaimReplay:
 		view, err := s.attemptForResponse(ctx, claim.Attempt)
 		if err != nil {
-			if recoverableState(claim.Attempt.State) && !waitingForReservedNotes(claim.Attempt) {
+			if recoverableState(claim.Attempt.State) {
 				s.enqueue(claim.Attempt.AttemptID)
 			}
 			return Attempt{}, false, err
 		}
-		if recoverableState(claim.Attempt.State) && !waitingForReservedNotes(claim.Attempt) {
+		if recoverableState(claim.Attempt.State) {
 			s.enqueue(claim.Attempt.AttemptID)
 		}
 		return view, true, nil
@@ -392,9 +391,10 @@ func (s *Service) planAttempt(ctx context.Context, initial storage.TransactionAt
 	if err != nil || !found || attempt.State != "planning" {
 		return false
 	}
-	if waitingForReservedNotes(attempt) {
-		// Work queued before the attempt was parked (for example an earlier
-		// replay) must not bypass the reserved-note backoff.
+	if attempt.ErrorCode == "notes_reserved" {
+		// Releases before v0.1.4 parked these attempts in planning. They must
+		// not resume, so finish them with the same retryable failure.
+		s.failUnsignedWith(ctx, attempt.AttemptID, "notes_reserved", "eligible notes are reserved by other active attempts; retry with a new request once they are released", true)
 		return false
 	}
 	request, wallet, err := s.decodeRequest(attempt)
@@ -435,9 +435,10 @@ func (s *Service) planAttempt(ctx context.Context, initial storage.TransactionAt
 			}
 			if operation.Code == "insufficient_balance" && len(excluded) > 0 && s.fundableWithoutReservations(ctx, request, wallet, changeAddress) {
 				// The wallet can fund this request, just not while other active
-				// attempts hold their notes. Keep the attempt in planning so it
-				// resumes on its own once those reservations are released.
-				operation = &operationError{Code: "notes_reserved", Message: "eligible notes are reserved by other active attempts; planning resumes when they are released", Retryable: true}
+				// attempts hold their notes. Fail fast: the attempt ends here and
+				// the caller retries with a new request once notes are released.
+				s.failUnsignedWith(ctx, attempt.AttemptID, "notes_reserved", "eligible notes are reserved by other active attempts; retry with a new request once they are released", true)
+				return false
 			}
 			if operation.Retryable {
 				s.recordPlanningError(ctx, attempt.AttemptID, operation)
@@ -666,7 +667,14 @@ func (s *Service) decodeRequest(attempt storage.TransactionAttempt) (CreateReque
 }
 
 func (s *Service) failUnsigned(ctx context.Context, attemptID, code, message string) {
-	_ = s.store.MarkAttemptState(ctx, attemptID, "failed_unsigned", code, message, false, true, time.Now().UTC())
+	s.failUnsignedWith(ctx, attemptID, code, message, false)
+}
+
+// failUnsignedWith ends an attempt that never reached the signer and releases
+// its reservations. retryable tells the caller whether a new request may
+// succeed later without changing anything; the attempt itself never resumes.
+func (s *Service) failUnsignedWith(ctx context.Context, attemptID, code, message string, retryable bool) {
+	_ = s.store.MarkAttemptState(ctx, attemptID, "failed_unsigned", code, message, retryable, true, time.Now().UTC())
 }
 
 func (s *Service) recordPlanningError(ctx context.Context, attemptID string, operation *operationError) {
@@ -701,25 +709,13 @@ func scopedAttemptKey(principal, key string) string {
 	return "v1:" + hex.EncodeToString(sum[:])
 }
 
-// retryDue reports whether a recoverable attempt may be processed now. Attempts
-// waiting on an uncertain signer or on notes held by other attempts back off,
-// whether the retry comes from the recovery loop or from an idempotent replay.
+// retryDue reports whether a recoverable attempt may be processed now by the
+// recovery loop. Attempts waiting on an uncertain signer back off.
 func retryDue(attempt storage.TransactionAttempt) bool {
-	switch {
-	case attempt.State == "signing_unknown":
+	if attempt.State == "signing_unknown" {
 		return time.Since(attempt.UpdatedAt) >= signingUnknownRetryInterval
-	case attempt.State == "planning" && attempt.ErrorCode == "notes_reserved":
-		return time.Since(attempt.UpdatedAt) >= notesReservedRetryInterval
-	default:
-		return true
 	}
-}
-
-// waitingForReservedNotes reports whether a planning attempt was parked on
-// notes held by other attempts within the retry interval. Idempotent replays
-// do not bypass that backoff.
-func waitingForReservedNotes(attempt storage.TransactionAttempt) bool {
-	return attempt.State == "planning" && attempt.ErrorCode == "notes_reserved" && time.Since(attempt.UpdatedAt) < notesReservedRetryInterval
+	return true
 }
 
 func recoverableState(state string) bool {
